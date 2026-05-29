@@ -58,16 +58,3 @@ npm run dist       # build Windows installer + portable exe (release/)
 > **Note:** the `dist` target packages an NSIS installer and a portable single-file
 > exe. On Windows, building the single-file artifacts needs symlink privileges —
 > run the command from an elevated shell once, or enable Developer Mode.
-
-## Migrating from the old Python app
-
-The previous PySide6 version stored connections in `~/.ssh_manager/`. To import
-them into this app's store:
-
-```bash
-node scripts/migrate-from-python.mjs
-```
-
-Connections are remapped to the new schema and merged by id (safe to re-run).
-Passwords are not migrated — the Python app used the OS keyring directly;
-re-enter passwords for password-auth connections.
