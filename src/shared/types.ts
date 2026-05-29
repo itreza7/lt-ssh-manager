@@ -15,6 +15,12 @@ export interface Connection {
   sftpPath?: string
   /** Last directory browsed in the file manager; restored on reopen. */
   lastSftpPath?: string
+  /** Wrap interactive sessions in tmux (create-or-attach) so drops reattach. */
+  tmux?: boolean
+  /** tmux session name to create/attach when tmux is on (blank = connection name). */
+  tmuxSession?: string
+  /** Detach other clients on attach so this window drives the pane size. */
+  tmuxDetachOthers?: boolean
 }
 
 /** A draft connection from the dialog; password is handled out-of-band. */

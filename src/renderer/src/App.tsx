@@ -19,6 +19,7 @@ import { TerminalView } from './components/TerminalView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { TunnelManager } from './components/TunnelManager'
+import { tmuxAttachCommand, tmuxSessionName } from './lib/tmux'
 
 const SETTINGS_TAB_ID = 'settings'
 
@@ -129,6 +130,10 @@ export default function App() {
   // so the empty initial state never clobbers the saved tabs on disk.
   const restoredRef = useRef(false)
   const lastSavedRef = useRef('')
+
+  // Tab drag-to-reorder state.
+  const dragTabId = useRef<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const selectedConnId = activeTab && 'connectionId' in activeTab ? activeTab.connectionId : null
@@ -329,12 +334,20 @@ export default function App() {
   }
 
   // Open a console/tmux session as a NEW tab — the dashboard tab stays open.
+  // With no explicit command, a tmux-enabled connection opens straight into its
+  // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
     opts?: { command?: string; title?: string }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
+    let { command, title } = opts ?? {}
+    if (!command && conn.tmux) {
+      const session = tmuxSessionName(conn.tmuxSession || conn.name)
+      command = tmuxAttachCommand(session, !!conn.tmuxDetachOthers)
+      title = title ?? `${conn.name} · ${session}`
+    }
     const sessionId = crypto.randomUUID()
     setTabs((t) => [
       ...t,
@@ -342,10 +355,10 @@ export default function App() {
         kind: 'session',
         id: sessionId,
         connectionId: conn.id,
-        title: opts?.title ?? conn.name,
+        title: title ?? conn.name,
         status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
         password: password ?? undefined,
-        command: opts?.command
+        command
       }
     ])
     setActiveTabId(sessionId)
@@ -437,9 +450,30 @@ export default function App() {
     return window.api.probeServer({ connectionId: conn.id, password: password ?? undefined })
   }
 
+  // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
+  // session that died between listing and clicking won't error — it's recreated.
   const attachTmux = (conn: Connection, name: string): void => {
-    const quoted = `'${name.replace(/'/g, `'\\''`)}'`
-    void openSession(conn, { command: `tmux attach -t ${quoted}`, title: `${conn.name} · ${name}` })
+    void openSession(conn, {
+      command: tmuxAttachCommand(name, !!conn.tmuxDetachOthers),
+      title: `${conn.name} · ${name}`
+    })
+  }
+
+  // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
+  const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required.')
+    await window.api.tmuxKill({ connectionId: conn.id, password: password ?? undefined, name })
+  }
+  const renameTmux = (conn: Connection) => async (from: string, to: string): Promise<void> => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required.')
+    await window.api.tmuxRename({
+      connectionId: conn.id,
+      password: password ?? undefined,
+      from,
+      to: tmuxSessionName(to)
+    })
   }
 
   const closeTab = (id: string): void => {
@@ -451,6 +485,21 @@ export default function App() {
     if (activeTabId === id) {
       setActiveTabId(next.length ? next[Math.max(0, idx - 1)].id : null)
     }
+  }
+
+  // Reorder tabs by dropping the dragged tab onto another. The tabs-change
+  // effect persists the new order to the workspace automatically.
+  const moveTab = (fromId: string, toId: string): void => {
+    if (fromId === toId) return
+    setTabs((t) => {
+      const from = t.findIndex((x) => x.id === fromId)
+      const to = t.findIndex((x) => x.id === toId)
+      if (from < 0 || to < 0) return t
+      const next = t.slice()
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      return next
+    })
   }
 
   const onStatus = (sessionId: string, status: SessionStatus): void => {
@@ -500,8 +549,33 @@ export default function App() {
               return (
                 <div
                   key={tab.id}
+                  draggable
                   onClick={() => setActiveTabId(tab.id)}
+                  onDragStart={(e) => {
+                    dragTabId.current = tab.id
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', tab.id)
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                    if (dragTabId.current && dragTabId.current !== tab.id) setDragOverId(tab.id)
+                  }}
+                  onDragLeave={() => setDragOverId((id) => (id === tab.id ? null : id))}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const from = dragTabId.current
+                    if (from) moveTab(from, tab.id)
+                    dragTabId.current = null
+                    setDragOverId(null)
+                  }}
+                  onDragEnd={() => {
+                    dragTabId.current = null
+                    setDragOverId(null)
+                  }}
                   className={`group flex cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
+                    dragOverId === tab.id ? 'ring-2 ring-inset ring-signal/70' : ''
+                  } ${
                     active
                       ? 'border-line bg-ink text-fg'
                       : 'border-transparent text-muted hover:bg-elevated/40 hover:text-fg/90'
@@ -574,6 +648,9 @@ export default function App() {
                   fetchTmux={fetchTmuxFor(conn)}
                   fetchStats={fetchStatsFor(conn)}
                   onAttach={(name) => attachTmux(conn, name)}
+                  onNewSession={(name) => attachTmux(conn, name)}
+                  onKillSession={killTmux(conn)}
+                  onRenameSession={renameTmux(conn)}
                 />
               </div>
             )

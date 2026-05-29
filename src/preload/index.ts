@@ -67,6 +67,14 @@ const api = {
   // tmux
   tmuxList: (args: { connectionId: string; password?: string }): Promise<TmuxSession[]> =>
     ipcRenderer.invoke('ssh:tmux-list', args),
+  tmuxKill: (args: { connectionId: string; password?: string; name: string }): Promise<void> =>
+    ipcRenderer.invoke('ssh:tmux-kill', args),
+  tmuxRename: (args: {
+    connectionId: string
+    password?: string
+    from: string
+    to: string
+  }): Promise<void> => ipcRenderer.invoke('ssh:tmux-rename', args),
 
   // host vitals probe
   probeServer: (args: { connectionId: string; password?: string }): Promise<ServerStats> =>

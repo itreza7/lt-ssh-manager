@@ -47,7 +47,10 @@ export const connectionStore = {
       sftpPath: draft.sftpPath?.trim() || undefined,
       // editing a connection must not wipe the remembered browse location
       lastSftpPath: draft.lastSftpPath ?? existing?.lastSftpPath,
-      notes: draft.notes?.trim() || undefined
+      notes: draft.notes?.trim() || undefined,
+      tmux: draft.tmux || undefined,
+      tmuxSession: draft.tmuxSession?.trim() || undefined,
+      tmuxDetachOthers: draft.tmuxDetachOthers || undefined
     }
     const idx = list.findIndex((c) => c.id === conn.id)
     if (idx >= 0) list[idx] = conn
