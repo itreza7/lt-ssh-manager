@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -33,6 +33,29 @@ export function TerminalView({
   // latest settings for the once-mounted creation effect to read
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  // Latest connect args, so the reconnect button can re-dial with same params.
+  const connectArgsRef = useRef({ connectionId, retries, password, command })
+  connectArgsRef.current = { connectionId, retries, password, command }
+  // When the session ends (e.g. a tmux detach), show a reattach overlay.
+  const [ended, setEnded] = useState<{ kind: 'closed' | 'error'; msg: string } | null>(null)
+
+  const reconnect = useCallback(() => {
+    const term = termRef.current
+    if (!term) return
+    setEnded(null)
+    term.reset()
+    const a = connectArgsRef.current
+    void window.api.connect({
+      sessionId,
+      connectionId: a.connectionId,
+      cols: term.cols,
+      rows: term.rows,
+      retries: a.retries,
+      password: a.password,
+      command: a.command
+    })
+    term.focus()
+  }, [sessionId])
 
   // Create the terminal + SSH session exactly once per sessionId.
   useEffect(() => {
@@ -131,12 +154,16 @@ export function TerminalView({
     const offStatus = window.api.onStatus((sid, status) => {
       if (sid !== sessionId) return
       onStatus(sessionId, status)
-      if (status.kind === 'retrying') {
+      if (status.kind === 'connecting' || status.kind === 'ready') {
+        setEnded(null)
+      } else if (status.kind === 'retrying') {
         term.writeln(`\r\n\x1b[33m[retrying in ${Math.round(status.delayMs / 1000)}s: ${status.error}]\x1b[0m`)
       } else if (status.kind === 'error') {
         term.writeln(`\r\n\x1b[31m[error: ${status.message}]\x1b[0m`)
+        setEnded({ kind: 'error', msg: status.message })
       } else if (status.kind === 'closed') {
         term.writeln(`\r\n\x1b[90m[session closed]\x1b[0m`)
+        setEnded({ kind: 'closed', msg: '' })
       }
     })
 
@@ -210,5 +237,32 @@ export function TerminalView({
     })
   }, [active, sessionId])
 
-  return <div ref={containerRef} className="h-full w-full" />
+  const isTmux = command?.includes('tmux') ?? false
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" />
+      {ended && (
+        <div className="absolute inset-0 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
+          <div className="panel flex max-w-sm flex-col items-center gap-3 p-6 text-center">
+            <div className="eyebrow">
+              {ended.kind === 'error' ? 'connection error' : isTmux ? 'detached' : 'session ended'}
+            </div>
+            <p className="text-sm text-muted">
+              {ended.kind === 'error'
+                ? ended.msg
+                : isTmux
+                  ? 'Detached from tmux. Your session is still running on the host.'
+                  : 'The shell exited.'}
+            </p>
+            <button
+              onClick={reconnect}
+              className="mt-1 rounded-lg bg-signal px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
+            >
+              {isTmux ? 'Reattach ▸' : 'Reconnect ▸'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }

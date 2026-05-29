@@ -19,6 +19,7 @@ import { TerminalView } from './components/TerminalView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { TunnelManager } from './components/TunnelManager'
+import { tmuxAttachCommand, tmuxSessionName } from './lib/tmux'
 
 const SETTINGS_TAB_ID = 'settings'
 
@@ -329,12 +330,20 @@ export default function App() {
   }
 
   // Open a console/tmux session as a NEW tab — the dashboard tab stays open.
+  // With no explicit command, a tmux-enabled connection opens straight into its
+  // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
     opts?: { command?: string; title?: string }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
+    let { command, title } = opts ?? {}
+    if (!command && conn.tmux) {
+      const session = tmuxSessionName(conn.tmuxSession || conn.name)
+      command = tmuxAttachCommand(session, !!conn.tmuxDetachOthers)
+      title = title ?? `${conn.name} · ${session}`
+    }
     const sessionId = crypto.randomUUID()
     setTabs((t) => [
       ...t,
@@ -342,10 +351,10 @@ export default function App() {
         kind: 'session',
         id: sessionId,
         connectionId: conn.id,
-        title: opts?.title ?? conn.name,
+        title: title ?? conn.name,
         status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
         password: password ?? undefined,
-        command: opts?.command
+        command
       }
     ])
     setActiveTabId(sessionId)
@@ -437,9 +446,30 @@ export default function App() {
     return window.api.probeServer({ connectionId: conn.id, password: password ?? undefined })
   }
 
+  // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
+  // session that died between listing and clicking won't error — it's recreated.
   const attachTmux = (conn: Connection, name: string): void => {
-    const quoted = `'${name.replace(/'/g, `'\\''`)}'`
-    void openSession(conn, { command: `tmux attach -t ${quoted}`, title: `${conn.name} · ${name}` })
+    void openSession(conn, {
+      command: tmuxAttachCommand(name, !!conn.tmuxDetachOthers),
+      title: `${conn.name} · ${name}`
+    })
+  }
+
+  // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
+  const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required.')
+    await window.api.tmuxKill({ connectionId: conn.id, password: password ?? undefined, name })
+  }
+  const renameTmux = (conn: Connection) => async (from: string, to: string): Promise<void> => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required.')
+    await window.api.tmuxRename({
+      connectionId: conn.id,
+      password: password ?? undefined,
+      from,
+      to: tmuxSessionName(to)
+    })
   }
 
   const closeTab = (id: string): void => {
@@ -574,6 +604,9 @@ export default function App() {
                   fetchTmux={fetchTmuxFor(conn)}
                   fetchStats={fetchStatsFor(conn)}
                   onAttach={(name) => attachTmux(conn, name)}
+                  onNewSession={(name) => attachTmux(conn, name)}
+                  onKillSession={killTmux(conn)}
+                  onRenameSession={renameTmux(conn)}
                 />
               </div>
             )

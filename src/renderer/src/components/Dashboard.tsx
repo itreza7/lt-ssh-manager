@@ -12,6 +12,9 @@ interface Props {
   fetchTmux: () => Promise<TmuxSession[]>
   fetchStats: () => Promise<ServerStats>
   onAttach: (name: string) => void
+  onNewSession: (name: string) => void
+  onKillSession: (name: string) => Promise<void>
+  onRenameSession: (from: string, to: string) => Promise<void>
 }
 
 const authLabel: Record<Connection['authMethod'], string> = {
@@ -72,6 +75,33 @@ function Meter({ label, pct, detail }: { label: string; pct: number; detail: str
   )
 }
 
+function IconButton({
+  children,
+  title,
+  onClick,
+  disabled,
+  danger
+}: {
+  children: ReactNode
+  title: string
+  onClick: () => void
+  disabled?: boolean
+  danger?: boolean
+}) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={`grid h-7 w-7 place-items-center rounded-md border border-line text-xs text-muted transition-colors disabled:opacity-40 ${
+        danger ? 'hover:border-danger/50 hover:text-danger' : 'hover:border-signal/40 hover:text-signal'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
 function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => void }) {
   return (
     <button
@@ -94,11 +124,18 @@ export function Dashboard({
   onEdit,
   fetchTmux,
   fetchStats,
-  onAttach
+  onAttach,
+  onNewSession,
+  onKillSession,
+  onRenameSession
 }: Props) {
   const [tmux, setTmux] = useState<TmuxSession[] | null>(null)
   const [tmuxLoading, setTmuxLoading] = useState(false)
   const [tmuxError, setTmuxError] = useState<string | null>(null)
+  const [newName, setNewName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
 
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -135,9 +172,38 @@ export function Dashboard({
   useEffect(() => {
     setTmux(null)
     setStats(null)
+    setEditing(null)
     void loadTmux()
     void loadStats()
   }, [loadTmux, loadStats])
+
+  // Run a one-shot tmux mutation, surface its error, then refresh the list.
+  const runTmux = async (fn: () => Promise<void>): Promise<void> => {
+    setBusy(true)
+    setTmuxError(null)
+    try {
+      await fn()
+      await loadTmux()
+    } catch (e) {
+      setTmuxError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const createSession = (): void => {
+    onNewSession(newName.trim() || 'main')
+    setNewName('')
+    // The new session registers on the remote a beat later; refresh to show it.
+    setTimeout(() => void loadTmux(), 1200)
+  }
+
+  const commitRename = (from: string): void => {
+    const to = editValue.trim()
+    setEditing(null)
+    if (!to || to === from) return
+    void runTmux(() => onRenameSession(from, to))
+  }
 
   const memPct =
     stats?.memTotalKb && stats?.memUsedKb !== undefined
@@ -287,8 +353,22 @@ export function Dashboard({
             <RefreshButton loading={tmuxLoading} onClick={() => void loadTmux()} />
           </div>
 
+          {/* create-or-attach a named session */}
+          <div className="mb-3 flex gap-2">
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && createSession()}
+              placeholder="new session name  ·  blank = main"
+              className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+            />
+            <Button variant="primary" onClick={createSession}>
+              New ▸
+            </Button>
+          </div>
+
           {tmuxError && (
-            <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+            <p className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
               {tmuxError}
             </p>
           )}
@@ -301,31 +381,72 @@ export function Dashboard({
             <p className="py-2 text-sm text-faint">No tmux sessions running on this host.</p>
           )}
 
-          {!tmuxError && tmux && tmux.length > 0 && (
+          {tmux && tmux.length > 0 && (
             <div className="space-y-1.5">
               {tmux.map((s, i) => (
                 <div
                   key={s.name}
                   style={{ animationDelay: `${i * 30}ms` }}
-                  className="animate-rise flex items-center justify-between rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
+                  className="animate-rise flex items-center justify-between gap-2 rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-mono text-sm text-fg">{s.name}</span>
-                      {s.attached && (
-                        <span className="flex items-center gap-1 rounded-full bg-signal/15 px-2 py-0.5 text-[10px] font-medium text-signal">
-                          <span className="h-1 w-1 rounded-full bg-signal" />
-                          attached
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-0.5 font-mono text-[11px] text-faint">
-                      {s.windows} window{s.windows === 1 ? '' : 's'}
-                    </div>
+                  <div className="min-w-0 flex-1">
+                    {editing === s.name ? (
+                      <input
+                        autoFocus
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename(s.name)
+                          if (e.key === 'Escape') setEditing(null)
+                        }}
+                        onBlur={() => commitRename(s.name)}
+                        className="w-full rounded-md border border-signal/50 bg-ink/80 px-2 py-1 font-mono text-sm text-fg outline-none"
+                      />
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span className="truncate font-mono text-sm text-fg">{s.name}</span>
+                          {s.attached && (
+                            <span className="flex items-center gap-1 rounded-full bg-signal/15 px-2 py-0.5 text-[10px] font-medium text-signal">
+                              <span className="h-1 w-1 rounded-full bg-signal" />
+                              attached
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 font-mono text-[11px] text-faint">
+                          {s.windows} window{s.windows === 1 ? '' : 's'}
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <Button variant="primary" onClick={() => onAttach(s.name)}>
-                    Attach ▸
-                  </Button>
+                  {editing !== s.name && (
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <IconButton
+                        title="Rename session"
+                        disabled={busy}
+                        onClick={() => {
+                          setEditValue(s.name)
+                          setEditing(s.name)
+                        }}
+                      >
+                        ✎
+                      </IconButton>
+                      <IconButton
+                        title="Kill session"
+                        danger
+                        disabled={busy}
+                        onClick={() => {
+                          if (confirm(`Kill tmux session “${s.name}”? Running programs are terminated.`))
+                            void runTmux(() => onKillSession(s.name))
+                        }}
+                      >
+                        ✕
+                      </IconButton>
+                      <Button variant="primary" onClick={() => onAttach(s.name)}>
+                        Attach ▸
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

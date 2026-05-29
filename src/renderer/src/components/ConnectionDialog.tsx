@@ -23,6 +23,9 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
   const [password, setPassword] = useState('')
   const [sftpPath, setSftpPath] = useState(initial?.sftpPath ?? '')
   const [notes, setNotes] = useState(initial?.notes ?? '')
+  const [tmux, setTmux] = useState(initial?.tmux ?? false)
+  const [tmuxSession, setTmuxSession] = useState(initial?.tmuxSession ?? '')
+  const [tmuxDetachOthers, setTmuxDetachOthers] = useState(initial?.tmuxDetachOthers ?? false)
 
   const save = (): void => {
     if (!host.trim()) return
@@ -36,6 +39,9 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
       keyPath: authMethod === 'key' ? keyPath : undefined,
       sftpPath: sftpPath.trim() || undefined,
       notes,
+      tmux,
+      tmuxSession: tmux ? tmuxSession.trim() || undefined : undefined,
+      tmuxDetachOthers: tmux ? tmuxDetachOthers : undefined,
       password: authMethod === 'password' && password ? password : undefined
     })
   }
@@ -120,6 +126,49 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
             onChange={(e) => setSftpPath(e.target.value)}
             placeholder="/var/www  ·  blank = home"
           />
+        </div>
+        <div className="rounded-lg border border-line bg-ink/40 px-3 py-2.5">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span>
+              <span className="block text-sm text-fg">Open sessions in tmux</span>
+              <span className="block text-[11px] text-faint">
+                Wrap terminals in a persistent session — drops reattach instead of dying.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              className="h-4 w-4 shrink-0 accent-signal"
+              checked={tmux}
+              onChange={(e) => setTmux(e.target.checked)}
+            />
+          </label>
+          {tmux && (
+            <div className="mt-3 grid gap-3 border-t border-line-soft pt-3">
+              <div>
+                <div className={label}>Session name</div>
+                <input
+                  className={`${field} font-mono`}
+                  value={tmuxSession}
+                  onChange={(e) => setTmuxSession(e.target.value)}
+                  placeholder="blank = connection name"
+                />
+              </div>
+              <label className="flex cursor-pointer items-center justify-between gap-3 text-sm text-fg">
+                <span>
+                  Detach other clients on attach
+                  <span className="block text-[11px] text-faint">
+                    Grabs full window size instead of being clamped to a smaller peer.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 shrink-0 accent-signal"
+                  checked={tmuxDetachOthers}
+                  onChange={(e) => setTmuxDetachOthers(e.target.checked)}
+                />
+              </label>
+            </div>
+          )}
         </div>
         <div>
           <div className={label}>Notes</div>

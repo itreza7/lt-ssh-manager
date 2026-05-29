@@ -22,6 +22,9 @@ import { SshManager } from './ssh/manager'
 // inside tmux format strings).
 const TMUX_LIST = `tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}'`
 
+/** Single-quote a value for safe interpolation into a remote shell command. */
+const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
+
 // One-shot host vitals probe. Emits `key=value` lines; everything degrades
 // gracefully (missing tools just yield empty fields). Linux-oriented.
 const PROBE = [
@@ -229,6 +232,37 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         args.password ?? (connection.authMethod === 'password' ? secrets.get(connection.id) ?? undefined : undefined)
       const res = await ssh.exec(connection, { command: TMUX_LIST, password, timeoutMs: 15000 })
       return parseTmux(res.stdout + '\n' + res.stderr)
+    }
+  )
+  ipcMain.handle(
+    'ssh:tmux-kill',
+    async (_e, args: { connectionId: string; password?: string; name: string }): Promise<void> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const password = passwordFor(args.connectionId, args.password)
+      const res = await ssh.exec(connection, {
+        command: `tmux kill-session -t ${shQuote(args.name)}`,
+        password,
+        timeoutMs: 15000
+      })
+      if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to kill session')
+    }
+  )
+  ipcMain.handle(
+    'ssh:tmux-rename',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; from: string; to: string }
+    ): Promise<void> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const password = passwordFor(args.connectionId, args.password)
+      const res = await ssh.exec(connection, {
+        command: `tmux rename-session -t ${shQuote(args.from)} ${shQuote(args.to)}`,
+        password,
+        timeoutMs: 15000
+      })
+      if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to rename session')
     }
   )
   ipcMain.handle(
