@@ -1,5 +1,5 @@
-// Real host-key verification (the Python app trusted any key — MITM risk).
-// We pin keys trust-on-first-use and flag any later change loudly.
+// Real host-key verification: pin keys trust-on-first-use and flag any later
+// change loudly (MITM protection).
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'

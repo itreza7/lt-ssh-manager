@@ -52,9 +52,9 @@ npm install
 npm run dev        # launch with hot reload
 npm run typecheck  # type-check main + renderer
 npm run build      # production build into out/
-npm run dist       # build Windows installer + portable exe (release/)
+npm run dist       # build the Windows NSIS installer (release/)
 ```
 
-> **Note:** the `dist` target packages an NSIS installer and a portable single-file
-> exe. On Windows, building the single-file artifacts needs symlink privileges —
-> run the command from an elevated shell once, or enable Developer Mode.
+> **Note:** on Windows, `electron-builder` may need symlink privileges (it extracts
+> bundled tooling that contains symlinks) — run the command from an elevated shell
+> once, or enable Developer Mode.

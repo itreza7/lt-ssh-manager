@@ -6,11 +6,6 @@ dist/
 *.log
 *.tsbuildinfo
 
-# Python legacy
-.venv/
-__pycache__/
-*.pyc
-
 # Editor / OS
 .DS_Store
 Thumbs.db
