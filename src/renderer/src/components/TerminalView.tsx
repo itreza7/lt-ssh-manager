@@ -43,6 +43,9 @@ export function TerminalView({
     const term = termRef.current
     if (!term) return
     setEnded(null)
+    // Drop any session still held under this id in the main process before
+    // re-dialing, so the fresh connect never races a stale client/stream.
+    window.api.closeSession(sessionId)
     term.reset()
     const a = connectArgsRef.current
     void window.api.connect({

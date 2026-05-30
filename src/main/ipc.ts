@@ -104,9 +104,11 @@ function parseTmux(text: string): TmuxSession[] {
     const parts = line.trim().split('|')
     if (parts.length >= 3 && parts[0]) {
       out.push({
+        // session_attached is a client COUNT, not a 0/1 flag — a session with
+        // two attached clients reports '2', so test for any client, not just '1'.
         name: parts[0],
         windows: parseInt(parts[1], 10) || 0,
-        attached: parts[2] === '1'
+        attached: (parseInt(parts[2], 10) || 0) > 0
       })
     }
   }

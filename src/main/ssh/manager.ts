@@ -197,6 +197,7 @@ export class SshManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       const client = new Client()
       let settled = false
+      let session: Session | undefined
       const done = (fn: () => void) => {
         if (settled) return
         settled = true
@@ -205,8 +206,9 @@ export class SshManager extends EventEmitter {
 
       const onShell = (err: Error | undefined, stream: ClientChannel | undefined): void => {
         if (err || !stream) return done(() => reject(err ?? new Error('No channel')))
-        const session: Session = { client, stream, closed: false }
-        this.sessions.set(sessionId, session)
+        const sess: Session = { client, stream, closed: false }
+        session = sess
+        this.sessions.set(sessionId, sess)
         this.emitStatus(sessionId, { kind: 'ready' })
 
         let exitCode: number | null = null
@@ -215,11 +217,7 @@ export class SshManager extends EventEmitter {
         stream.on('exit', (code: number | null) => {
           exitCode = code
         })
-        stream.on('close', () => {
-          session.closed = true
-          this.emitStatus(sessionId, { kind: 'closed', code: exitCode })
-          this.cleanup(sessionId)
-        })
+        stream.on('close', () => this.endSession(sessionId, sess, { kind: 'closed', code: exitCode }))
         done(() => resolve())
       }
 
@@ -235,9 +233,19 @@ export class SshManager extends EventEmitter {
         }
       })
 
-      client.on('error', (err) => done(() => reject(err)))
+      // Before the shell is up, a client error/close fails this connect attempt
+      // (driving retry / permanent-error handling). Once it's up, the same events
+      // mean the live session dropped — surface it as 'closed' so the UI shows the
+      // reattach/reconnect overlay. We can't lean on the channel's own 'close'
+      // alone: an abrupt drop (reset, keepalive timeout) can surface only at the
+      // client level, and a clean detach leaves the client open unless we end it.
+      client.on('error', (err) => {
+        if (!settled) return done(() => reject(err))
+        if (session) this.endSession(sessionId, session, { kind: 'closed', code: null })
+      })
       client.on('close', () => {
-        if (!settled) done(() => reject(new Error('Connection closed')))
+        if (!settled) return done(() => reject(new Error('Connection closed')))
+        if (session) this.endSession(sessionId, session, { kind: 'closed', code: null })
       })
 
       try {
@@ -860,18 +868,31 @@ export class SshManager extends EventEmitter {
 
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
-    if (!s) return
+    if (s) this.endSession(sessionId, s)
+  }
+
+  /**
+   * Tear a session down exactly once: emit a final status (if any), end its SSH
+   * client so the connection isn't leaked (a clean tmux detach closes only the
+   * channel, not the client), and drop it from the map. The map-identity guard
+   * stops a late event from a replaced session disturbing a newer one that has
+   * reconnected under the same id.
+   */
+  private endSession(sessionId: string, session: Session, status?: SessionStatus): void {
+    if (session.closed) return
+    session.closed = true
+    if (status) this.emitStatus(sessionId, status)
     try {
-      s.stream?.end()
-      s.client.end()
+      session.stream?.end()
     } catch {
       /* ignore */
     }
-    this.cleanup(sessionId)
-  }
-
-  private cleanup(sessionId: string): void {
-    this.sessions.delete(sessionId)
+    try {
+      session.client.end()
+    } catch {
+      /* ignore */
+    }
+    if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId)
   }
 
   closeAll(): void {
