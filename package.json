@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "description": "A solid cross-platform SSH manager with embedded terminals.",
   "author": "Reza",
+  "license": "GPL-3.0-only",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

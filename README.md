@@ -1,4 +1,4 @@
-# SSH Manager
+# LT SSH Manager
 
 A cross-platform desktop SSH manager with embedded, full-color terminals.
 Built with Electron + React + xterm.js, with all SSH/secret handling isolated
@@ -78,3 +78,7 @@ npm run dist       # build the Windows NSIS installer (release/)
 > **Note:** on Windows, `electron-builder` may need symlink privileges (it extracts
 > bundled tooling that contains symlinks) — run the command from an elevated shell
 > once, or enable Developer Mode.
+
+## License
+
+Licensed under the [GNU General Public License v3.0](LICENSE).
