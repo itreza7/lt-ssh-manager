@@ -1,0 +1,14 @@
+# Node / Electron
+node_modules/
+out/
+release/
+dist/
+*.log
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+
+# Local-only project guidance for Claude Code (kept on disk, not tracked)
+CLAUDE.md

@@ -1,0 +1,282 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/* ── Design tokens ───────────────────────────────────────────────────────
+   "Mission control": deep ink canvas, hairline panels, phosphor-green signal.  */
+@theme {
+  /* slightly lifted off pure-black to avoid halation with light text */
+  --color-ink: #0c0f15;
+  --color-surface: #12161e;
+  --color-panel: #171c25;
+  --color-elevated: #202934;
+  --color-line: #2b3543;
+  --color-line-soft: #20262f;
+
+  /* body text sits ~13:1 on ink; muted/faint lifted for readable secondary text */
+  --color-fg: #e8edf3;
+  --color-muted: #a3aec0;
+  --color-faint: #7a8597;
+
+  --color-signal: #46d98a;
+  --color-signal-soft: #21392c;
+  --color-amber: #f3b75a;
+  --color-danger: #ff7b7b;
+
+  --font-sans: 'Hanken Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Every interactive element gets a pointer on hover. */
+button:not(:disabled),
+a,
+select,
+summary,
+label[for],
+[role='button'] {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* custom title bar drag regions (frameless window) */
+.drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'cv01';
+  overflow: hidden;
+  /* blueprint dot-grid over deep ink */
+  background-color: var(--color-ink);
+  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.018) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+/* phosphor glow bleeding from the top — atmosphere, not decoration */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(1100px 460px at 50% -12%, rgba(70, 217, 138, 0.045), transparent 62%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Reusable pieces ─────────────────────────────────────────────────── */
+@layer components {
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--color-faint);
+  }
+
+  .panel {
+    border: 1px solid var(--color-line);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 40%),
+      var(--color-panel);
+    border-radius: 0.85rem;
+  }
+
+  /* a soft phosphor halo for "alive" indicators */
+  .dot-glow {
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+  }
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────── */
+.xterm,
+.xterm-viewport {
+  height: 100%;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #232b38;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #2f3a4b;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Motion ──────────────────────────────────────────────────────────── */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes glow-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.animate-rise {
+  animation: rise 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.animate-glow {
+  animation: glow-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-glow {
+    animation: none;
+  }
+}
+
+/* ── Markdown read-mode (.md preview) ──────────────────────────────────── */
+.md-body {
+  color: var(--color-fg);
+  font-size: 15px;
+  line-height: 1.7;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1.6em 0 0.6em;
+}
+.md-body h1 {
+  font-size: 1.9em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--color-line);
+}
+.md-body h2 {
+  font-size: 1.5em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--color-line-soft);
+}
+.md-body h3 {
+  font-size: 1.25em;
+}
+.md-body h4 {
+  font-size: 1.05em;
+}
+.md-body p,
+.md-body ul,
+.md-body ol,
+.md-body blockquote,
+.md-body table,
+.md-body pre {
+  margin: 0.8em 0;
+}
+.md-body a {
+  color: var(--color-signal);
+  text-decoration: none;
+}
+.md-body a:hover {
+  text-decoration: underline;
+}
+.md-body strong {
+  color: #fff;
+}
+.md-body ul,
+.md-body ol {
+  padding-left: 1.5em;
+}
+.md-body li {
+  margin: 0.3em 0;
+}
+.md-body li::marker {
+  color: var(--color-faint);
+}
+.md-body blockquote {
+  border-left: 3px solid var(--color-signal);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0.4em 1em;
+  color: var(--color-muted);
+}
+.md-body code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-elevated);
+  border: 1px solid var(--color-line-soft);
+  border-radius: 5px;
+  padding: 0.12em 0.4em;
+}
+.md-body pre {
+  background: #0a0d12;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  padding: 1em 1.1em;
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+  color: #d7e0ec;
+}
+.md-body hr {
+  border: 0;
+  border-top: 1px solid var(--color-line);
+  margin: 1.6em 0;
+}
+.md-body table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--color-line);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+.md-body th {
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-weight: 600;
+}
+.md-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
