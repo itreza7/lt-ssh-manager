@@ -162,13 +162,14 @@ export interface TerminalSettings {
   cursorBlink: boolean
   scrollback: number
   /**
-   * Enable tmux mouse mode (`set -g mouse on`) + a bigger history-limit when
-   * attaching tmux sessions, so the wheel scrolls tmux's own history. Required
-   * because tmux runs in the alt-screen, where xterm's `scrollback` never fills.
-   * Trade-off: a plain mouse drag selects in tmux — Shift+drag still selects in
-   * xterm for copy-on-select. Applies to sessions opened after the toggle changes.
+   * Terminal height multiplier (1 = off). When >1 the live grid is rendered this
+   * many times taller than the visible pane, and the overflow scrolls with a
+   * native scrollbar/wheel — a purely client-side way to scroll long output
+   * (notably under tmux, whose alt-screen xterm's own scrollback can't reach)
+   * without enabling tmux mouse mode. Applies to sessions opened/resized after
+   * it changes.
    */
-  tmuxMouse: boolean
+  overscroll: number
 }
 
 export interface EditorSettings {
@@ -204,7 +205,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   cursorStyle: 'bar',
   cursorBlink: true,
   scrollback: 1000,
-  tmuxMouse: true
+  overscroll: 1
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {

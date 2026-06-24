@@ -19,12 +19,16 @@ export const SCROLLBACK_MIN = 200
 export const SCROLLBACK_MAX = 100000
 export const RETRIES_MIN = 1
 export const RETRIES_MAX = 10
+export const OVERSCROLL_MIN = 1
+export const OVERSCROLL_MAX = 10
 
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, Math.round(n)))
 
 export const clampFont = (n: number): number => clamp(n, FONT_MIN, FONT_MAX)
 export const clampScrollback = (n: number): number => clamp(n, SCROLLBACK_MIN, SCROLLBACK_MAX)
 export const clampRetries = (n: number): number => clamp(n, RETRIES_MIN, RETRIES_MAX)
+/** Clamp the overscroll multiplier to a whole number in range; undefined → 1 (off). */
+export const clampOverscroll = (n: number | undefined): number => clamp(n ?? 1, OVERSCROLL_MIN, OVERSCROLL_MAX)
 
 // Terminal font choices. The first two are bundled (offline); the rest fall
 // back to OS-installed monospace fonts. `stack` is the CSS font-family.

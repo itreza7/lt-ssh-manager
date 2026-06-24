@@ -16,33 +16,15 @@ export function tmuxSessionName(raw: string): string {
 }
 
 /**
- * Lines of scrollback tmux keeps per pane when mouse mode is enabled. tmux's
- * default is a stingy 2000; bumping it gives the wheel something to scroll back
- * through. Set globally *before* `new` so the first pane inherits it.
- */
-export const TMUX_HISTORY_LIMIT = 50000
-
-/**
  * Create-or-attach command for a named session.
  *
  * `new -A` attaches if the session already exists, else creates it — so it never
  * fails on a stale name the way `attach -t` does. `-D` (valid only with `-A`)
  * detaches any other clients so this window, not the smallest peer, drives the
  * pane size.
- *
- * With `mouse` on, prefix `set -g mouse on` + a larger `history-limit` so the
- * mouse wheel scrolls tmux's history (xterm's own scrollback can't, since tmux
- * lives in the alt-screen). `set-clipboard on` makes tmux's own copy-mode push
- * the selection to the outer terminal via OSC 52 — so a normal mouse drag copies
- * to the system clipboard (xterm honors the OSC 52, see TerminalView). The `\;`
- * are tmux command separators; the shell unescapes each to a literal `;` argument.
  */
-export function tmuxAttachCommand(name: string, detachOthers = false, mouse = false): string {
-  const attach = `new -A${detachOthers ? ' -D' : ''} -s ${shQuote(tmuxSessionName(name))}`
-  const prefix = mouse
-    ? `set -g mouse on \\; set -g history-limit ${TMUX_HISTORY_LIMIT} \\; set -g set-clipboard on \\; `
-    : ''
-  return `tmux ${prefix}${attach}`
+export function tmuxAttachCommand(name: string, detachOthers = false): string {
+  return `tmux new -A${detachOthers ? ' -D' : ''} -s ${shQuote(tmuxSessionName(name))}`
 }
 
 /**

@@ -733,7 +733,7 @@ export default function App() {
       const session = tmuxSessionName(conn.tmuxSession || conn.name)
       command = control
         ? tmuxControlCommand(session, !!conn.tmuxDetachOthers)
-        : tmuxAttachCommand(session, !!conn.tmuxDetachOthers, appSettings.terminal.tmuxMouse)
+        : tmuxAttachCommand(session, !!conn.tmuxDetachOthers)
       title = title ?? `${conn.name} · ${session}`
     }
     const sessionId = crypto.randomUUID()
@@ -843,7 +843,7 @@ export default function App() {
     void openSession(conn, {
       command: control
         ? tmuxControlCommand(name, !!conn.tmuxDetachOthers)
-        : tmuxAttachCommand(name, !!conn.tmuxDetachOthers, appSettings.terminal.tmuxMouse),
+        : tmuxAttachCommand(name, !!conn.tmuxDetachOthers),
       title: `${conn.name} · ${name}`
     })
   }

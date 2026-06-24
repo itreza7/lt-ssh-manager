@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { SessionStatus } from '../../../shared/types'
-import type { TerminalSettings } from '../lib/terminalSettings'
+import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachTerminalClipboard } from '../lib/xtermClipboard'
-import { applyTerminalSettings, createTerminal } from '../lib/xtermSetup'
+import { applyTerminalSettings, createTerminal, LINE_HEIGHT } from '../lib/xtermSetup'
 
 interface Props {
   sessionId: string
@@ -27,6 +27,9 @@ export function TerminalView({
   settings,
   onStatus
 }: Props) {
+  // The outer host owns the scroll in overscroll mode; the inner host is where
+  // xterm mounts and is sized to overscroll× the visible height.
+  const scrollRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -38,6 +41,79 @@ export function TerminalView({
   connectArgsRef.current = { connectionId, retries, password, command }
   // When the session ends (e.g. a tmux detach), show a reattach overlay.
   const [ended, setEnded] = useState<{ kind: 'closed' | 'error'; msg: string } | null>(null)
+
+  // Overscroll bookkeeping: whether the view is pinned to the bottom, and a
+  // guard so our own programmatic scrolls don't read as the user scrolling away.
+  const stuckRef = useRef(true)
+  const programmaticScrollRef = useRef(false)
+  const roRafRef = useRef(0)
+  // xterm's grid element, cached after open() to measure the true row height.
+  const screenElRef = useRef<HTMLElement | null>(null)
+
+  // xterm's *actual* rendered row height in CSS px. Prefer the render service's
+  // exact device-derived value (what xterm laid the grid out with); fall back to
+  // measuring the grid element, then to an estimate. A computed
+  // ceil(fontSize×lineHeight) drifts a fraction of a pixel per row, which over a
+  // tall grid compounds to several rows of pin error.
+  const cellHeight = useCallback(() => {
+    const term = termRef.current
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const css = (term as any)?._core?._renderService?.dimensions?.css?.cell?.height
+    if (typeof css === 'number' && css > 0) return css
+    const screen = screenElRef.current
+    const rows = term?.rows ?? 0
+    if (screen && rows > 0 && screen.offsetHeight > 0) return screen.offsetHeight / rows
+    return Math.max(1, Math.ceil(settingsRef.current.fontSize * LINE_HEIGHT))
+  }, [])
+
+  // Pin the view to the true bottom of the scroll content (the end of the
+  // output). This target is constant — it doesn't depend on where the cursor
+  // momentarily sits during a repaint — so streaming output never jumps: the
+  // grid just scrolls under a fixed viewport, exactly like a normal terminal.
+  // No-op unless overscroll is on and we're pinned.
+  const stickToBottom = useCallback((force = false) => {
+    const scroll = scrollRef.current
+    if (!scroll) return
+    if (clampOverscroll(settingsRef.current.overscroll) <= 1) return
+    if (!force && !stuckRef.current) return
+    const target = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+    // Skip sub-pixel corrections so the view never jitters.
+    if (Math.abs(scroll.scrollTop - target) <= 1) return
+    programmaticScrollRef.current = true
+    scroll.scrollTop = target
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false
+    })
+  }, [])
+
+  // Size the inner grid to overscroll× the visible height, then refit xterm so
+  // the right (tall) row count is computed. Callers push that to the PTY.
+  const fitToHeight = useCallback(() => {
+    const scroll = scrollRef.current
+    const inner = containerRef.current
+    const fit = fitRef.current
+    if (!scroll || !inner || !fit) return
+    const factor = clampOverscroll(settingsRef.current.overscroll)
+    inner.style.height = `${Math.max(1, scroll.clientHeight) * factor}px`
+    try {
+      fit.fit()
+    } catch {
+      /* ignore mid-teardown fit */
+    }
+  }, [])
+
+  const layout = useCallback(() => {
+    fitToHeight()
+    const term = termRef.current
+    if (term) {
+      try {
+        window.api.resize(sessionId, term.cols, term.rows)
+      } catch {
+        /* ignore mid-teardown resize */
+      }
+    }
+    stickToBottom()
+  }, [sessionId, fitToHeight, stickToBottom])
 
   const reconnect = useCallback(() => {
     const term = termRef.current
@@ -62,16 +138,41 @@ export function TerminalView({
 
   // Create the terminal + SSH session exactly once per sessionId.
   useEffect(() => {
-    const { term, fit: fitAddon } = createTerminal(settingsRef.current, containerRef.current!, { fit: true })
+    const scroll = scrollRef.current!
+    const host = containerRef.current!
+    // Give the host its initial (possibly tall) height before opening xterm so
+    // the first fit reports the right row count to connect().
+    host.style.height = `${Math.max(1, scroll.clientHeight) * clampOverscroll(settingsRef.current.overscroll)}px`
+
+    const { term, fit: fitAddon } = createTerminal(settingsRef.current, host, { fit: true })
     const fit = fitAddon!
     fit.fit()
     termRef.current = term
     fitRef.current = fit
+    screenElRef.current = host.querySelector('.xterm-screen')
 
     term.onData((d) => window.api.sendInput(sessionId, d))
+    const offRender = term.onRender(() => stickToBottom())
 
     // Copy-on-select, copy/paste keys, right/middle-click paste, OSC 52 writes.
-    const detachClipboard = attachTerminalClipboard(term, containerRef.current!)
+    const detachClipboard = attachTerminalClipboard(term, host)
+
+    // Overscroll scroll plumbing. Let the browser scroll the outer host natively
+    // (so it keeps its smooth/inertial feel) — we only stop xterm from also
+    // seeing the wheel, since in the alt-screen (e.g. under tmux) it would
+    // preventDefault and translate the wheel into arrow keys, which both kills
+    // the native scroll and leaks keystrokes into tmux. The inner viewport is
+    // made non-scrollable in CSS so the native scroll lands on the outer host.
+    const onWheel = (e: WheelEvent): void => {
+      if (clampOverscroll(settingsRef.current.overscroll) <= 1) return
+      e.stopPropagation()
+    }
+    const onScroll = (): void => {
+      if (programmaticScrollRef.current) return
+      stuckRef.current = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - cellHeight()
+    }
+    scroll.addEventListener('wheel', onWheel, { capture: true, passive: true })
+    scroll.addEventListener('scroll', onScroll, { passive: true })
 
     const offData = window.api.onData((sid, data) => {
       if (sid === sessionId) term.write(data)
@@ -102,20 +203,22 @@ export function TerminalView({
       command
     })
 
+    // Watch the visible host (not the tall inner one) so a window/pane resize
+    // re-derives the tall height; rAF-coalesce bursts to limit PTY resize churn.
     const ro = new ResizeObserver(() => {
-      try {
-        fit.fit()
-        window.api.resize(sessionId, term.cols, term.rows)
-      } catch {
-        /* ignore mid-teardown resize */
-      }
+      cancelAnimationFrame(roRafRef.current)
+      roRafRef.current = requestAnimationFrame(() => layout())
     })
-    if (containerRef.current) ro.observe(containerRef.current)
+    ro.observe(scroll)
 
     return () => {
       offData()
       offStatus()
+      offRender.dispose()
+      cancelAnimationFrame(roRafRef.current)
       ro.disconnect()
+      scroll.removeEventListener('wheel', onWheel, { capture: true })
+      scroll.removeEventListener('scroll', onScroll)
       detachClipboard()
       window.api.closeSession(sessionId)
       term.dispose()
@@ -123,44 +226,44 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // Apply live setting changes (font size / cursor) and refit.
+  // Apply live setting changes (font / cursor / overscroll) and re-layout.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     applyTerminalSettings(term, settings)
-    try {
-      fitRef.current?.fit()
-      window.api.resize(sessionId, term.cols, term.rows)
-    } catch {
-      /* ignore */
-    }
+    layout()
   }, [
     settings.fontFamily,
     settings.fontSize,
     settings.cursorStyle,
     settings.cursorBlink,
     settings.scrollback,
-    sessionId
+    settings.overscroll,
+    sessionId,
+    layout
   ])
 
   // Re-fit and focus when this tab becomes the active one.
   useEffect(() => {
     if (!active) return
     requestAnimationFrame(() => {
-      try {
-        fitRef.current?.fit()
-        termRef.current?.focus()
-        if (termRef.current) window.api.resize(sessionId, termRef.current.cols, termRef.current.rows)
-      } catch {
-        /* ignore */
-      }
+      layout()
+      termRef.current?.focus()
     })
-  }, [active, sessionId])
+  }, [active, sessionId, layout])
 
   const isTmux = command?.includes('tmux') ?? false
+  const tall = clampOverscroll(settings.overscroll) > 1
   return (
     <div className="relative h-full w-full">
-      <div ref={containerRef} className="h-full w-full" />
+      <div
+        ref={scrollRef}
+        className={`absolute inset-0 overflow-x-hidden ${
+          tall ? 'overscroll-host overflow-y-auto' : 'overflow-hidden'
+        }`}
+      >
+        <div ref={containerRef} className="w-full" />
+      </div>
       {/* z-30: xterm's canvas layers are position:absolute with z-index up to 10 and
           hoist out of the non-stacking .xterm wrapper, so the overlay must sit above
           them (and above pane chrome) or the reattach button can't be clicked. Stays

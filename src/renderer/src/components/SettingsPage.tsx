@@ -2,10 +2,13 @@ import { useState, type ReactNode } from 'react'
 import type { AppSettings, CursorStyle, SettingsPatch } from '../lib/terminalSettings'
 import {
   clampFont,
+  clampOverscroll,
   clampRetries,
   clampScrollback,
   FONT_MAX,
   FONT_MIN,
+  OVERSCROLL_MAX,
+  OVERSCROLL_MIN,
   resolveFontStack,
   RETRIES_MAX,
   RETRIES_MIN,
@@ -237,10 +240,15 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                     />
                   </Row>
                   <Row
-                    label="tmux mouse scroll"
-                    hint="Wheel scrolls tmux history (needed in tmux). Drag selects in tmux; Shift+drag selects to copy. New sessions only."
+                    label="Overscroll height"
+                    hint="Render the terminal this many × taller than the window so you can scroll long output — including tmux — with the scrollbar/wheel. 1 = off."
                   >
-                    <Toggle on={t.tmuxMouse} onChange={(b) => setT({ tmuxMouse: b })} />
+                    <Stepper
+                      value={clampOverscroll(t.overscroll)}
+                      min={OVERSCROLL_MIN}
+                      max={OVERSCROLL_MAX}
+                      onChange={(n) => setT({ overscroll: clampOverscroll(n) })}
+                    />
                   </Row>
                 </div>
               </>

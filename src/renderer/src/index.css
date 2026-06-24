@@ -132,6 +132,20 @@ body::before {
   background: transparent;
 }
 
+/* Overscroll (tall-grid) terminal host: the outer container owns the scroll, so
+   hide xterm's own inner scrollbar and keep the gutter stable to avoid reflow. */
+.overscroll-host {
+  scrollbar-gutter: stable;
+}
+.overscroll-host .xterm-viewport {
+  overflow: hidden !important;
+  scrollbar-width: none;
+}
+.overscroll-host .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 /* ── Motion ──────────────────────────────────────────────────────────── */
 @keyframes rise {
   from {
