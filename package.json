@@ -1,6 +1,6 @@
 {
   "name": "ssh-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A solid cross-platform SSH manager with embedded terminals.",
   "author": "Reza",
   "license": "GPL-3.0-only",
@@ -13,7 +13,9 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win",
+    "dist:mac": "electron-vite build && electron-builder --mac",
+    "dist:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
     "@fontsource-variable/fira-code": "^5.2.7",

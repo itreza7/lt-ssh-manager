@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell, nativeTheme, Menu } from 'electron'
 import { join } from 'node:path'
-import { registerIpc } from './ipc'
+import { registerIpc, toggleFullScreen } from './ipc'
 import appIcon from '../../resources/icon.png?asset'
 
 let mainWindow: BrowserWindow | null = null
@@ -34,8 +34,8 @@ function createWindow(): void {
   mainWindow.on('maximize', () => sendMax(true))
   mainWindow.on('unmaximize', () => sendMax(false))
 
-  // tell the renderer to drop all chrome (title bar / sidebar / tab bar) and show
-  // only the active tab while full screen — fires however fullscreen was toggled.
+  // notify the renderer of native fullscreen transitions (macOS uses simple
+  // fullscreen, which doesn't emit these — the chrome stays put either way).
   const sendFull = (v: boolean): void => mainWindow?.webContents.send('window:fullscreen', v)
   mainWindow.on('enter-full-screen', () => sendFull(true))
   mainWindow.on('leave-full-screen', () => sendFull(false))
@@ -62,7 +62,7 @@ function createWindow(): void {
       wc?.toggleDevTools()
       event.preventDefault()
     } else if (key === 'f11') {
-      mainWindow?.setFullScreen(!mainWindow.isFullScreen())
+      if (mainWindow) toggleFullScreen(mainWindow)
       event.preventDefault()
     } else if (ctrl && (key === '=' || key === '+')) {
       wc?.setZoomLevel((wc.getZoomLevel() ?? 0) + 0.5)

@@ -184,8 +184,6 @@ export default function App() {
   const [activeViewId, setActiveViewId] = useState<string | null>(null)
   const [secretsAvailable, setSecretsAvailable] = useState(true)
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULTS)
-  // Full screen is a focus mode: drop all chrome and show only the active tab.
-  const [fullScreen, setFullScreen] = useState(false)
 
   const [dialogConn, setDialogConn] = useState<Connection | null | undefined>(undefined) // undefined = closed
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
@@ -433,11 +431,6 @@ export default function App() {
     void window.api.getSettings().then(setAppSettings)
   }, [])
 
-  // Track full-screen so we can hide the title bar / sidebar / tab bar in it.
-  useEffect(() => {
-    void window.api.winIsFullScreen().then(setFullScreen)
-    return window.api.onFullScreenChange(setFullScreen)
-  }, [])
   const updateSettings = useCallback((patch: SettingsPatch): void => {
     setAppSettings((s) => {
       const next: AppSettings = {
@@ -953,24 +946,22 @@ export default function App() {
 
   return (
     <div className="flex h-full w-full flex-col">
-      {!fullScreen && <TitleBar onNewConnection={() => setDialogConn(null)} onOpenSettings={openSettings} />}
+      <TitleBar onNewConnection={() => setDialogConn(null)} onOpenSettings={openSettings} />
       <div className="flex min-h-0 flex-1">
-        {!fullScreen && (
-          <Sidebar
-            connections={connections}
-            selectedId={selectedConnId}
-            onSelect={selectConnection}
-            onAdd={() => setDialogConn(null)}
-            onEdit={(c) => setDialogConn(c)}
-            onDelete={deleteConnection}
-            collapsed={appSettings.sidebarCollapsed}
-            onToggleCollapse={toggleSidebar}
-          />
-        )}
+        <Sidebar
+          connections={connections}
+          selectedId={selectedConnId}
+          onSelect={selectConnection}
+          onAdd={() => setDialogConn(null)}
+          onEdit={(c) => setDialogConn(c)}
+          onDelete={deleteConnection}
+          collapsed={appSettings.sidebarCollapsed}
+          onToggleCollapse={toggleSidebar}
+        />
 
         <div className="flex min-w-0 flex-1 flex-col">
           {/* tab bar */}
-          {!fullScreen && views.length > 0 && (
+          {views.length > 0 && (
             <div className="flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 pt-1.5">
               <div className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
                 {views.map((view) => {

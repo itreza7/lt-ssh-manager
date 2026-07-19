@@ -18,6 +18,14 @@ import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager } from './ssh/manager'
 
+// Native macOS fullscreen leaves a black bar above a frameless window and pushes
+// it into a separate Space; simple fullscreen covers the whole screen in place.
+// Other platforms use native fullscreen.
+export function toggleFullScreen(w: BrowserWindow): void {
+  if (process.platform === 'darwin') w.setSimpleFullScreen(!w.isSimpleFullScreen())
+  else w.setFullScreen(!w.isFullScreen())
+}
+
 // tmux list-sessions with a parseable format (pipe-delimited; tab isn't honored
 // inside tmux format strings).
 const TMUX_LIST = `tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}'`
@@ -418,7 +426,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (action === 'zoomIn') wc.setZoomLevel(wc.getZoomLevel() + 0.5)
     else if (action === 'zoomOut') wc.setZoomLevel(wc.getZoomLevel() - 0.5)
     else if (action === 'zoomReset') wc.setZoomLevel(0)
-    else if (action === 'fullscreen') w.setFullScreen(!w.isFullScreen())
+    else if (action === 'fullscreen') toggleFullScreen(w)
     else if (action === 'devtools') wc.toggleDevTools()
   })
 
