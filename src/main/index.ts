@@ -94,6 +94,8 @@ app.whenReady().then(() => {
   })
 })
 
+// Quit once the last window closes on every platform, including macOS — the app
+// has a single window, so there's nothing to keep the process alive for.
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  app.quit()
 })
