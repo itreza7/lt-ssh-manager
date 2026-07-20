@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { resolveFontStack, type TerminalSettings } from './terminalSettings'
+import { isMac } from './platform'
 
 /** xterm cell line-height multiple; mirrored by the cell-metrics measurement. */
 export const LINE_HEIGHT = 1.2
@@ -45,10 +46,13 @@ export function createTerminal(
     fit = new FitAddon()
     term.loadAddon(fit)
   }
-  // Ctrl + left-click opens a URL in the OS browser (validated http/https in main).
+  // Ctrl (or Cmd on macOS) + left-click opens a URL in the OS browser (validated
+  // http/https in main). On macOS a Ctrl+click is also synthesized as a secondary
+  // click; the clipboard handler swallows that so it doesn't paste as well.
   term.loadAddon(
     new WebLinksAddon((event, uri) => {
-      if (event.ctrlKey && event.button === 0) window.api.openExternal(uri)
+      const modifier = event.ctrlKey || (isMac && event.metaKey)
+      if (modifier && event.button === 0) window.api.openExternal(uri)
     })
   )
   term.open(container)

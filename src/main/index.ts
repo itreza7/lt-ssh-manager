@@ -6,13 +6,18 @@ import appIcon from '../../resources/icon.png?asset'
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
     minWidth: 800,
     minHeight: 500,
     show: false,
-    frame: false, // custom in-app title bar + menu
+    // Custom in-app title bar + menu. On macOS keep the native traffic lights
+    // (hidden title bar) instead of a fully frameless window; elsewhere go frameless.
+    ...(isMac
+      ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 12 } }
+      : { frame: false }),
     backgroundColor: '#0c0f15',
     title: 'SSH Manager',
     icon: appIcon,

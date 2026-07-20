@@ -1,6 +1,6 @@
 {
   "name": "ssh-manager",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A solid cross-platform SSH manager with embedded terminals.",
   "author": "Reza",
   "license": "GPL-3.0-only",

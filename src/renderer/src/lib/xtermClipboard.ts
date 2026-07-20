@@ -3,6 +3,7 @@
 // OSC 52 *write* handler so a mouse-drag selection inside a mouse-mode app
 // (e.g. tmux with `set-clipboard on`) reaches the system clipboard.
 import type { Terminal as XTerm } from '@xterm/xterm'
+import { isMac } from './platform'
 
 /**
  * Wire clipboard behavior onto a terminal + its container element. Returns a
@@ -46,17 +47,22 @@ export function attachTerminalClipboard(term: XTerm, el: HTMLElement): () => voi
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
     const k = e.key.toLowerCase()
-    // Ctrl+Shift+C / Ctrl+Shift+V — explicit copy / paste.
-    if (e.ctrlKey && e.shiftKey && k === 'c') {
+    // Explicit copy / paste. macOS uses ⌘C / ⌘V (safe in a terminal — Cmd never
+    // reaches the PTY); elsewhere Ctrl+Shift+C / Ctrl+Shift+V, since bare Ctrl+C
+    // is SIGINT.
+    const copyChord = isMac ? e.metaKey && !e.shiftKey && k === 'c' : e.ctrlKey && e.shiftKey && k === 'c'
+    const pasteChord = isMac ? e.metaKey && !e.shiftKey && k === 'v' : e.ctrlKey && e.shiftKey && k === 'v'
+    if (copyChord) {
       copySelection()
       return false
     }
-    if (e.ctrlKey && e.shiftKey && k === 'v') {
+    if (pasteChord) {
       paste()
       return false
     }
-    // Ctrl+C: copy if text is selected, otherwise let it through as SIGINT.
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && k === 'c' && term.hasSelection()) {
+    // Windows/Linux: Ctrl+C copies if text is selected, otherwise falls through
+    // as SIGINT. On macOS ⌘C owns copy, so Ctrl+C is always left as SIGINT.
+    if (!isMac && e.ctrlKey && !e.shiftKey && !e.altKey && k === 'c' && term.hasSelection()) {
       copySelection()
       term.clearSelection() // so the next Ctrl+C interrupts as usual
       return false
@@ -65,8 +71,11 @@ export function attachTerminalClipboard(term: XTerm, el: HTMLElement): () => voi
   })
 
   // Right-click and middle-click paste (the selection is already auto-copied).
+  // On macOS a Ctrl+left-click arrives here as a secondary click; that chord is
+  // reserved for other gestures, so swallow it instead of pasting.
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault()
+    if (isMac && e.ctrlKey) return
     paste()
   }
   const onMouseDown = (e: MouseEvent): void => {
