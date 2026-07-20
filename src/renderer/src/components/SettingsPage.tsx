@@ -19,6 +19,7 @@ import {
 } from '../lib/terminalSettings'
 import { Button } from './Modal'
 import { Select } from './Select'
+import { isMac } from '../lib/platform'
 
 interface Props {
   settings: AppSettings
@@ -40,14 +41,23 @@ const CURSORS: { value: CursorStyle; label: string }[] = [
   { value: 'underline', label: 'Underline' }
 ]
 
-const KEYS: { keys: string; what: string }[] = [
-  { keys: 'Select text', what: 'Copies automatically' },
-  { keys: 'Ctrl+Shift+C', what: 'Copy selection' },
-  { keys: 'Ctrl+C', what: 'Copy if text selected, else interrupt (SIGINT)' },
-  { keys: 'Ctrl+Shift+V / Right-click', what: 'Paste' },
-  { keys: 'Shift+drag', what: 'Select inside htop/vim (mouse-mode apps)' },
-  { keys: 'Ctrl+click', what: 'Open a link' }
-]
+const KEYS: { keys: string; what: string }[] = isMac
+  ? [
+      { keys: 'Select text', what: 'Copies automatically' },
+      { keys: '⌘C', what: 'Copy selection' },
+      { keys: 'Ctrl+C', what: 'Interrupt (SIGINT)' },
+      { keys: '⌘V / Right-click', what: 'Paste' },
+      { keys: 'Shift+drag', what: 'Select inside htop/vim (mouse-mode apps)' },
+      { keys: '⌘-click / Ctrl+click', what: 'Open a link' }
+    ]
+  : [
+      { keys: 'Select text', what: 'Copies automatically' },
+      { keys: 'Ctrl+Shift+C', what: 'Copy selection' },
+      { keys: 'Ctrl+C', what: 'Copy if text selected, else interrupt (SIGINT)' },
+      { keys: 'Ctrl+Shift+V / Right-click', what: 'Paste' },
+      { keys: 'Shift+drag', what: 'Select inside htop/vim (mouse-mode apps)' },
+      { keys: 'Ctrl+click', what: 'Open a link' }
+    ]
 
 const field =
   'rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-signal/60'

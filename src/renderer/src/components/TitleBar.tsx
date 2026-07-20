@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isMac, fmtAccel } from '../lib/platform'
 
 interface Props {
   onNewConnection: () => void
@@ -67,12 +68,17 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
   return (
     <div
       ref={barRef}
-      className="drag relative z-30 flex h-9 shrink-0 items-center border-b border-line bg-surface/80 pl-2.5"
+      className={`drag relative z-30 flex h-9 shrink-0 items-center border-b border-line bg-surface/80 ${
+        // leave room for the native traffic lights on macOS
+        isMac ? 'pl-[78px]' : 'pl-2.5'
+      }`}
     >
-      {/* brand mark */}
-      <div className="no-drag flex items-center gap-2 pr-1">
-        <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
-      </div>
+      {/* brand mark — the native traffic lights already sit at the far left on macOS */}
+      {!isMac && (
+        <div className="no-drag flex items-center gap-2 pr-1">
+          <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
+        </div>
+      )}
 
       {/* menus */}
       <div className="no-drag flex items-center">
@@ -96,7 +102,9 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
                       className="flex w-full items-center justify-between gap-6 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg/85 transition-colors hover:bg-signal/15 hover:text-signal"
                     >
                       <span>{item.label}</span>
-                      {item.accel && <span className="font-mono text-[10px] text-faint">{item.accel}</span>}
+                      {item.accel && (
+                        <span className="font-mono text-[10px] text-faint">{fmtAccel(item.accel)}</span>
+                      )}
                     </button>
                     {item.separatorAfter && <div className="my-1 h-px bg-line-soft" />}
                   </div>
@@ -124,7 +132,8 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
         </svg>
       </button>
 
-      {/* window controls */}
+      {/* window controls — macOS supplies native traffic lights instead */}
+      {!isMac && (
       <div className="no-drag flex h-full items-stretch">
         <WinButton onClick={() => window.api.winMinimize()} label="minimize">
           <svg width="11" height="11" viewBox="0 0 11 11">
@@ -150,6 +159,7 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
           </svg>
         </WinButton>
       </div>
+      )}
     </div>
   )
 }
