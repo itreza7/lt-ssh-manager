@@ -12,12 +12,16 @@ import type {
   SftpEntry,
   SftpList,
   SftpReadResult,
+  TmuxIntent,
   TunnelDef,
   TunnelState,
   TunnelStatus
 } from '../../shared/types'
+import { tmuxReattachCommand } from '../../shared/tmux'
 import { knownHosts } from './knownHosts'
 import { TmuxControlClient } from './tmuxControl'
+import { ByteBatcher } from './byteBatcher'
+import { classifyDrop, ladderDelay, withJitter } from './dropClassifier'
 
 /** Files up to this size open editable; larger ones open view-only. */
 const MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -51,6 +55,18 @@ export interface ConnectOpts {
   command?: string
   /** Treat the stream as a tmux control-mode (`tmux -CC`) protocol channel. */
   control?: boolean
+  /**
+   * Present when `command` attaches to a tmux session. Enables the reattach
+   * ladder: on a drop the session is re-attached (never re-created) on its own.
+   */
+  tmux?: TmuxIntent
+  /**
+   * Nobody is watching this dial. Suppresses the host-key prompt — an unknown or
+   * *changed* key is refused outright rather than asked about, since a key that
+   * changed while the app reconnected by itself is the one case that must not be
+   * click-through. Set by the reattach ladder, never by a user action.
+   */
+  unattended?: boolean
 }
 
 interface ExecOpts {
@@ -66,7 +82,76 @@ interface Session {
   closed: boolean
   /** Present for tmux control-mode sessions; multiplexes many panes over one stream. */
   control?: TmuxControlClient
+  /** Flush + tear down this session's output coalescing (see ByteBatcher). */
+  endOutput?: () => void
+  /** True when the reattach ladder started this attempt, not the user. */
+  auto: boolean
+  /** Whether 'ready' has been emitted for this attempt yet (see announceReady). */
+  announced: boolean
+  /** Fallback timer that announces readiness when no output arrives to prove it. */
+  readyTimer?: ReturnType<typeof setTimeout>
+  /** When the session first proved it worked; gates the attempt-counter reset. */
+  healthyAt?: number
+  // ---- evidence gathered as the session dies, read once by classifyDrop() ----
+  sawStreamExit: boolean
+  exitCode: number | null
+  exitSignal?: string
+  sawTmuxExit: boolean
+  tmuxExitReason: string
+  /**
+   * Rolling tail of what the command last printed. Kept as raw bytes and decoded
+   * once, at death, because this is fed from the terminal stream — decoding every
+   * chunk here would undo the whole point of ByteBatcher.
+   *
+   * It is *output*, not stderr: every interactive channel here allocates a pty,
+   * and sshd's pty path passes -1 as the channel's extended-data fd (session.c,
+   * `do_exec_pty`), so the server has no separate stderr to forward and
+   * `stream.stderr` never fires. tmux's exit banner — the only thing that tells a
+   * detach from a killed session — is printed to the pty by client.c.
+   */
+  outputTail: Buffer
+  transportError?: string
 }
+
+/**
+ * A tmux-backed session's standing order to reattach itself. Outlives the Session
+ * it belongs to — it is what survives a drop — and is dropped only by close() or
+ * a verdict that reattaching cannot help.
+ */
+interface Redial {
+  /** The original connect options, including the credential needed to redial. */
+  opts: ConnectOpts
+  /** Attach-only command, or null when this session must never be reattached. */
+  reattachCommand: string | null
+  /** Latest geometry the renderer asked for, so a reattach comes up right-sized. */
+  cols: number
+  rows: number
+  /** Rungs climbed since the last proven-healthy stretch. */
+  attempt: number
+  /**
+   * Globally unique per connect(). A dial whose epoch is no longer the one in this
+   * map has been superseded and must go quiet — no status, no session registered.
+   */
+  epoch: number
+  timer?: ReturnType<typeof setTimeout>
+}
+
+/** A session must run this long before a later drop is treated as a fresh outage. */
+const HEALTHY_RESET_MS = 10_000
+/** Per-dial timeout while reattaching. Short: the ladder is the retry mechanism. */
+const REATTACH_DIAL_TIMEOUT_MS = 8000
+/** How long to wait for output proving a reattach worked before saying it did. */
+const AUTO_READY_FALLBACK_MS = 3000
+/** Size of the retained output tail. Only the last line or two ever matters. */
+const TAIL_BYTES = 512
+/**
+ * Enough of the escape grammar to unwrap tmux's parting banner: OSC (terminated by
+ * BEL or ST), CSI, and any other escape — optional 0x20-0x2F intermediates then a
+ * 0x30-0x7E final, which is what covers the `ESC ( B` charset reset ncurses emits
+ * immediately before it.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b[ -/]*[0-~]/g
 
 interface PendingHostKey {
   cb: (ok: boolean) => void
@@ -99,6 +184,11 @@ function isPermanent(err: any): boolean {
 
 export class SshManager extends EventEmitter {
   private sessions = new Map<string, Session>()
+  // Standing orders to reattach, one per connected session id. Deliberately a
+  // sibling of `sessions` rather than a field on Session: it has to outlive the
+  // Session that dropped, and it is the authority on whether a dial still matters.
+  private redials = new Map<string, Redial>()
+  private epoch = 0
   // One SFTP channel shared per connection, reference-counted across the file
   // manager + every editor tab. Kept warm briefly after the last release so
   // reopening a file doesn't pay for a fresh SSH handshake.
@@ -120,17 +210,22 @@ export class SshManager extends EventEmitter {
     c: Connection,
     password: string | undefined,
     passphrase: string | undefined,
-    timeoutMs: number | undefined
+    timeoutMs: number | undefined,
+    extra?: { unattended?: boolean; keepaliveMs?: number }
   ): ConnectConfig {
     const config: ConnectConfig = {
       host: c.host,
       port: c.port || 22,
       username: c.username,
       readyTimeout: timeoutMs ?? 30000,
-      keepaliveInterval: 15000,
+      keepaliveInterval: extra?.keepaliveMs ?? 15000,
       hostVerifier: ((key: Buffer, verify: (ok: boolean) => void) => {
         const res = knownHosts.verify(c.host, c.port || 22, key)
         if (res.status === 'known') return verify(true)
+        // Nobody is at the keyboard: refuse rather than prompt. A key that turns
+        // up unknown or changed during an automatic reattach is exactly the case
+        // that should stop the ladder, not raise a dialog behind the user's back.
+        if (extra?.unattended) return verify(false)
         const requestId = randomUUID()
         this.pendingHostKeys.set(requestId, { cb: verify, host: c.host, port: c.port || 22, key })
         const prompt: HostKeyPrompt = {
@@ -160,15 +255,34 @@ export class SshManager extends EventEmitter {
 
   async connect(opts: ConnectOpts): Promise<void> {
     const { sessionId, retries } = opts
+    // This connect supersedes anything already running or scheduled for the id —
+    // including a reattach ladder from a previous life of the same tab.
+    this.cancelRedial(sessionId)
+    const record: Redial = {
+      opts,
+      // Only a tmux-backed tab reattaches by itself: a plain shell has no state to
+      // return to, so reconnecting it is the user's call (the overlay's button).
+      reattachCommand: opts.tmux ? tmuxReattachCommand(opts.tmux) : null,
+      cols: opts.cols,
+      rows: opts.rows,
+      attempt: 0,
+      epoch: (this.epoch += 1)
+    }
+    this.redials.set(sessionId, record)
+    const { epoch } = record
+
     let lastErr: any
     for (let attempt = 1; attempt <= Math.max(1, retries); attempt++) {
+      if (!this.isCurrent(sessionId, epoch)) return
       this.emitStatus(sessionId, { kind: 'connecting', attempt, retries })
       try {
-        await this.connectOnce(opts)
+        await this.connectOnce(opts, epoch, false)
         return // ready; shell streaming begins via events
       } catch (err) {
         lastErr = err
+        if (!this.isCurrent(sessionId, epoch)) return
         if (isPermanent(err)) {
+          this.cancelRedial(sessionId)
           this.emitStatus(sessionId, {
             kind: 'error',
             message: String((err as any)?.message ?? err),
@@ -190,6 +304,9 @@ export class SshManager extends EventEmitter {
         }
       }
     }
+    // Out of dials without ever reaching a shell: drop the standing order too, or a
+    // record with no timer and no session sits in the map until the tab is closed.
+    this.cancelRedial(sessionId)
     this.emitStatus(sessionId, {
       kind: 'error',
       message: String(lastErr?.message ?? lastErr ?? 'Connection failed'),
@@ -197,7 +314,14 @@ export class SshManager extends EventEmitter {
     })
   }
 
-  private connectOnce(opts: ConnectOpts): Promise<void> {
+  /**
+   * One dial. `epoch` is the Redial generation this attempt belongs to: if it is no
+   * longer current the tab has been closed or reconnected under us, so the attempt
+   * hangs up without registering a session or emitting a single status.
+   * `auto` marks a rung of the reattach ladder, which reports readiness only once
+   * the remote end proves the attach worked (see announceReady).
+   */
+  private connectOnce(opts: ConnectOpts, epoch: number, auto: boolean): Promise<void> {
     const { connection: c, sessionId } = opts
     return new Promise((resolve, reject) => {
       const client = new Client()
@@ -208,11 +332,60 @@ export class SshManager extends EventEmitter {
         settled = true
         fn()
       }
+      // Superseded: drop the connection and report neither success nor failure, so
+      // the caller's retry/ladder logic stays out of the live session's way.
+      const abandon = (): void => {
+        try {
+          client.end()
+        } catch {
+          /* ignore */
+        }
+        done(() => resolve())
+      }
 
       const onShell = (err: Error | undefined, stream: ClientChannel | undefined): void => {
-        if (err || !stream) return done(() => reject(err ?? new Error('No channel')))
-        const sess: Session = { client, stream, closed: false }
+        // Unlike every other failure here, this one fires *after* a successful
+        // handshake and auth (the server refused the channel or the pty-req), so
+        // the socket is alive and nothing else holds a reference to it. Left open
+        // it keeps pinging every keepalive, and since the error isn't permanent the
+        // ladder dials again — one leaked authenticated connection per rung.
+        if (err || !stream) {
+          try {
+            client.end()
+          } catch {
+            /* ignore */
+          }
+          return done(() => reject(err ?? new Error('No channel')))
+        }
+        if (!this.isCurrent(sessionId, epoch)) return abandon()
+        const sess: Session = {
+          client,
+          stream,
+          closed: false,
+          auto,
+          announced: false,
+          sawStreamExit: false,
+          exitCode: null,
+          sawTmuxExit: false,
+          tmuxExitReason: '',
+          outputTail: Buffer.alloc(0)
+        }
         session = sess
+
+        // A reattach replaces a screen the user is still looking at, so it stays
+        // quiet until the remote end proves it worked: an attach that fails (the
+        // session was killed while we were away) exits non-zero within the same
+        // moment, and announcing readiness first would flash a live terminal.
+        const announceReady = (): void => {
+          if (sess.announced || sess.closed) return
+          sess.announced = true
+          if (sess.readyTimer) {
+            clearTimeout(sess.readyTimer)
+            sess.readyTimer = undefined
+          }
+          sess.healthyAt = Date.now()
+          this.emitStatus(sessionId, { kind: 'ready' })
+        }
 
         if (opts.control) {
           // tmux control mode: the stream is a protocol channel, not raw terminal
@@ -220,29 +393,75 @@ export class SshManager extends EventEmitter {
           // structured per-pane output + a window/pane model.
           const ctrl = new TmuxControlClient(stream, opts.cols, opts.rows)
           sess.control = ctrl
-          ctrl.on('paneOutput', (paneId: string, data: Buffer) =>
-            this.emit('tmux-output', sessionId, paneId, data)
-          )
-          ctrl.on('state', (state) => this.emit('tmux-windows', sessionId, state))
-          ctrl.on('exit', () => this.endSession(sessionId, sess, { kind: 'closed', code: null }))
+          // Control mode emits one %output line at a time; coalesce per pane so a
+          // pane spewing output costs one IPC message per window, not per line.
+          const perPane = new Map<string, ByteBatcher>()
+          ctrl.on('paneOutput', (paneId: string, data: Buffer) => {
+            announceReady()
+            let batcher = perPane.get(paneId)
+            if (!batcher) {
+              batcher = new ByteBatcher((buf) => this.emit('tmux-output', sessionId, paneId, buf))
+              perPane.set(paneId, batcher)
+            }
+            batcher.push(data)
+          })
+          sess.endOutput = () => {
+            for (const batcher of perPane.values()) batcher.dispose()
+            perPane.clear()
+          }
+          ctrl.on('state', (state) => {
+            announceReady() // a window/pane model means the attach took
+            this.emit('tmux-windows', sessionId, state)
+          })
+          ctrl.on('exit', (reason?: string) => {
+            sess.sawTmuxExit = true
+            sess.tmuxExitReason = reason ?? ''
+            this.endSession(sessionId, sess)
+          })
+          // No output tail is kept in control mode. The bytes on this channel are
+          // the `%…` protocol, not prose, and the reason a control client died
+          // arrives as `%exit <reason>` on that protocol (handled above) — which is
+          // strictly better evidence than scraped text. An attach that fails never
+          // reaches control mode at all: tmux exits non-zero first, and the
+          // exit-code path classifies that correctly with no tail.
           ctrl.start()
         } else {
-          stream.on('data', (d: Buffer) => this.emit('data', sessionId, d.toString('utf-8')))
-          stream.stderr.on('data', (d: Buffer) => this.emit('data', sessionId, d.toString('utf-8')))
+          // Raw bytes, coalesced — never decoded here, so multi-byte UTF-8 that
+          // straddles a chunk boundary reaches xterm intact.
+          const out = new ByteBatcher((buf) => this.emit('data', sessionId, buf))
+          stream.on('data', (d: Buffer) => {
+            announceReady()
+            // Under a pty this is where tmux's exit banner lands — "[detached (from
+            // session x)]" vs "[exited]" vs "[lost server]" — and that banner is the
+            // only thing distinguishing endings that share an exit status.
+            this.noteTail(sess, d)
+            out.push(d)
+          })
+          stream.stderr.on('data', (d: Buffer) => {
+            // Normally never fires: a pty merges the child's fd 2 into the pty
+            // master, so sshd has no separate stderr to forward. Kept for servers
+            // that do keep one, where the same banner would arrive here instead.
+            this.noteTail(sess, d)
+            out.push(d)
+          })
+          sess.endOutput = () => out.dispose()
         }
 
         this.sessions.set(sessionId, sess)
-        this.emitStatus(sessionId, { kind: 'ready' })
+        if (auto) sess.readyTimer = setTimeout(announceReady, AUTO_READY_FALLBACK_MS)
+        else announceReady()
 
-        let exitCode: number | null = null
-        stream.on('exit', (code: number | null) => {
-          exitCode = code
+        stream.on('exit', (code: number | null, signal?: string) => {
+          sess.sawStreamExit = true
+          sess.exitCode = typeof code === 'number' ? code : null
+          if (typeof signal === 'string') sess.exitSignal = signal
         })
-        stream.on('close', () => this.endSession(sessionId, sess, { kind: 'closed', code: exitCode }))
+        stream.on('close', () => this.endSession(sessionId, sess))
         done(() => resolve())
       }
 
       client.on('ready', () => {
+        if (!this.isCurrent(sessionId, epoch)) return abandon()
         if (opts.command) {
           client.exec(
             opts.command,
@@ -256,25 +475,61 @@ export class SshManager extends EventEmitter {
 
       // Before the shell is up, a client error/close fails this connect attempt
       // (driving retry / permanent-error handling). Once it's up, the same events
-      // mean the live session dropped — surface it as 'closed' so the UI shows the
-      // reattach/reconnect overlay. We can't lean on the channel's own 'close'
-      // alone: an abrupt drop (reset, keepalive timeout) can surface only at the
-      // client level, and a clean detach leaves the client open unless we end it.
+      // mean the live session dropped — end the session so it is classified and
+      // either reattached or surfaced in the overlay. We can't lean on the channel's
+      // own 'close' alone: an abrupt drop (reset, keepalive timeout) can surface
+      // only at the client level, and a clean detach leaves the client open unless
+      // we end it. The message is kept as the reason shown to the user.
       client.on('error', (err) => {
         if (!settled) return done(() => reject(err))
-        if (session) this.endSession(sessionId, session, { kind: 'closed', code: null })
+        if (!session) return
+        session.transportError = String((err as any)?.message ?? err)
+        this.endSession(sessionId, session)
       })
       client.on('close', () => {
         if (!settled) return done(() => reject(new Error('Connection closed')))
-        if (session) this.endSession(sessionId, session, { kind: 'closed', code: null })
+        if (session) this.endSession(sessionId, session)
       })
 
       try {
-        client.connect(this.baseConfig(c, opts.password, opts.passphrase, opts.timeoutMs))
+        client.connect(
+          this.baseConfig(c, opts.password, opts.passphrase, opts.timeoutMs, {
+            unattended: opts.unattended,
+            // Interactive sessions poll harder than the 15s default so a dead link
+            // is noticed in ~15s instead of ~45s — the reattach can only start once
+            // ssh2 has given up (keepaliveCountMax defaults to 3).
+            keepaliveMs: 5000
+          })
+        )
       } catch (e) {
         done(() => reject(e))
       }
     })
+  }
+
+  /**
+   * Keep the last {@link TAIL_BYTES} of what a command printed; tmux's exit banner
+   * lives there. Runs on every chunk of a live terminal, so it never grows or
+   * decodes anything: a chunk that already fills the window replaces it outright
+   * and the concat path is bounded by the window size.
+   */
+  private noteTail(session: Session, chunk: Buffer): void {
+    if (chunk.length >= TAIL_BYTES) {
+      session.outputTail = Buffer.from(chunk.subarray(chunk.length - TAIL_BYTES))
+      return
+    }
+    const merged = Buffer.concat([session.outputTail, chunk])
+    session.outputTail =
+      merged.length > TAIL_BYTES ? merged.subarray(merged.length - TAIL_BYTES) : merged
+  }
+
+  /**
+   * The tail as text, with escape sequences removed. tmux restores the terminal as
+   * it exits, so the banner arrives wrapped in resets that would otherwise break a
+   * match; decoding is deferred to here because this runs once, as a session dies.
+   */
+  private tailText(session: Session): string {
+    return session.outputTail.toString('utf-8').replace(ANSI_RE, '')
   }
 
   /** One-shot command: connect, run, collect output, disconnect. */
@@ -886,6 +1141,14 @@ export class SshManager extends EventEmitter {
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
+    // Record first, unconditionally: a resize that lands while the session is down
+    // (the pane is still on screen, the window can still be dragged) is what makes
+    // the reattach come up at the size the user is now looking at.
+    const r = this.redials.get(sessionId)
+    if (r) {
+      r.cols = cols
+      r.rows = rows
+    }
     const s = this.sessions.get(sessionId)
     if (!s) return
     if (s.control) s.control.resize(cols, rows)
@@ -912,22 +1175,157 @@ export class SshManager extends EventEmitter {
     this.sessions.get(sessionId)?.control?.killPane(paneId)
   }
 
-  close(sessionId: string): void {
-    const s = this.sessions.get(sessionId)
-    if (s) this.endSession(sessionId, s)
+  /** True while `epoch` is still the live generation for this session id. */
+  private isCurrent(sessionId: string, epoch: number): boolean {
+    return this.redials.get(sessionId)?.epoch === epoch
   }
 
   /**
-   * Tear a session down exactly once: emit a final status (if any), end its SSH
-   * client so the connection isn't leaked (a clean tmux detach closes only the
-   * channel, not the client), and drop it from the map. The map-identity guard
-   * stops a late event from a replaced session disturbing a newer one that has
-   * reconnected under the same id.
+   * Forget the standing order to reattach. Any dial still in flight for the old
+   * epoch goes quiet the moment it notices, so this is enough to cancel work that
+   * has not reached a timer yet.
    */
-  private endSession(sessionId: string, session: Session, status?: SessionStatus): void {
+  private cancelRedial(sessionId: string): void {
+    const r = this.redials.get(sessionId)
+    if (!r) return
+    if (r.timer) clearTimeout(r.timer)
+    this.redials.delete(sessionId)
+  }
+
+  /** The most specific thing we can tell the user about why the session dropped. */
+  private detailOf(session: Session): string {
+    const printed = this.tailText(session).trim().split('\n').filter(Boolean).pop()
+    return session.transportError || printed || session.tmuxExitReason || 'Connection lost'
+  }
+
+  /** Put the session on the next rung: announce the wait, then dial when it elapses. */
+  private scheduleReattach(sessionId: string, record: Redial, error: string): void {
+    const delayMs = withJitter(ladderDelay(record.attempt))
+    record.attempt += 1
+    this.emitStatus(sessionId, {
+      kind: 'reattaching',
+      attempt: record.attempt,
+      delayMs,
+      error
+    })
+    record.timer = setTimeout(() => {
+      record.timer = undefined
+      if (this.redials.get(sessionId) !== record) return
+      const opts: ConnectOpts = {
+        ...record.opts,
+        cols: record.cols,
+        rows: record.rows,
+        // Attach-only. Never record.opts.command — that one creates on miss.
+        command: record.reattachCommand!,
+        // The ladder *is* the retry loop; an inner one would stack delays and its
+        // own terminal 'error' would drop the user onto the blocking overlay.
+        retries: 1,
+        timeoutMs: REATTACH_DIAL_TIMEOUT_MS,
+        unattended: true
+      }
+      void this.connectOnce(opts, record.epoch, true).catch((err) => {
+        if (this.redials.get(sessionId) !== record) return
+        const message = String((err as any)?.message ?? err)
+        // Auth or a changed host key won't fix itself — stop and say so.
+        if (isPermanent(err)) {
+          this.cancelRedial(sessionId)
+          this.emitStatus(sessionId, { kind: 'error', message, permanent: true })
+          return
+        }
+        // The host is still unreachable: straight back onto the ladder, silently.
+        this.scheduleReattach(sessionId, record, message)
+      })
+    }, delayMs)
+  }
+
+  close(sessionId: string): void {
+    // Cancel first, and unconditionally: a session in the middle of the reattach
+    // ladder has no entry in `sessions` at all, so closing its tab has to reach the
+    // standing order rather than the (absent) live session.
+    this.cancelRedial(sessionId)
+    const s = this.sessions.get(sessionId)
+    if (s) this.endSession(sessionId, s, true)
+  }
+
+  /** The banner's Stop button: give up reattaching and show the manual overlay. */
+  stopReattach(sessionId: string): void {
+    if (!this.redials.has(sessionId)) return
+    this.cancelRedial(sessionId)
+    // A rung may have already connected: an auto dial registers its session but
+    // holds 'ready' back until the remote proves the attach worked, so the banner
+    // (and its Stop button) is still on screen over a link that is actually up.
+    // Tearing it down here is what makes Stop mean stop — otherwise the ssh2
+    // client stays authenticated and, because the ladder attaches with `-d`, keeps
+    // the tmux session held open, and the deferred 'ready' fires *after* our
+    // 'closed' and silently undoes the user's click.
+    const live = this.sessions.get(sessionId)
+    if (live) this.endSession(sessionId, live, true)
+    this.emitStatus(sessionId, {
+      kind: 'closed',
+      code: null,
+      reason: 'unreachable',
+      detail: 'Stopped reconnecting.'
+    })
+  }
+
+  /**
+   * Tear a session down exactly once, and decide what happens next — this is the
+   * only place a session's final status is emitted, so a drop cannot flash 'closed'
+   * on its way to being reattached.
+   *
+   * Emits exactly one of: nothing (the user closed the tab, or this session was
+   * already replaced), 'reattaching' (the ladder took it), or 'closed'.
+   */
+  private endSession(sessionId: string, session: Session, userInitiated = false): void {
     if (session.closed) return
     session.closed = true
-    if (status) this.emitStatus(sessionId, status)
+    if (session.readyTimer) clearTimeout(session.readyTimer)
+    // Flush buffered output before the status, so a shell's parting bytes are
+    // written to the terminal ahead of the "session closed" notice.
+    try {
+      session.endOutput?.()
+    } catch {
+      /* ignore */
+    }
+
+    // A late event from a session that has already been replaced under this id must
+    // not speak for the live one — not even to report its own death.
+    const current = this.sessions.get(sessionId) === session
+    if (current) this.sessions.delete(sessionId)
+
+    const record = current && !userInitiated ? this.redials.get(sessionId) : undefined
+    if (record) {
+      // A long healthy run means this is a fresh outage, not a failing ladder, so
+      // the next attempt starts back at one second.
+      if (session.healthyAt && Date.now() - session.healthyAt >= HEALTHY_RESET_MS) {
+        record.attempt = 0
+      }
+      const verdict = classifyDrop({
+        tmuxBacked: !!record.opts.tmux,
+        sawTmuxExit: session.sawTmuxExit,
+        tmuxExitReason: session.tmuxExitReason,
+        sawStreamExit: session.sawStreamExit,
+        exitCode: session.exitCode,
+        exitSignal: session.exitSignal,
+        outputTail: this.tailText(session)
+      })
+      if (verdict.action === 'reattach' && record.reattachCommand) {
+        this.scheduleReattach(sessionId, record, this.detailOf(session))
+      } else {
+        this.cancelRedial(sessionId)
+        this.emitStatus(sessionId, {
+          kind: 'closed',
+          code: session.exitCode,
+          // 'reattach' with nothing to reattach to (a plain shell, or a name tmux
+          // can't target): the link died, so leave the door open for a manual retry.
+          reason: verdict.action === 'stop' ? verdict.reason : 'unreachable',
+          detail: this.detailOf(session)
+        })
+      }
+    } else if (current && !userInitiated) {
+      this.emitStatus(sessionId, { kind: 'closed', code: session.exitCode })
+    }
+
     try {
       session.control?.dispose()
     } catch {
@@ -943,12 +1341,13 @@ export class SshManager extends EventEmitter {
     } catch {
       /* ignore */
     }
-    if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId)
   }
 
   closeAll(): void {
     for (const id of [...this.tunnels.keys()]) this.stopTunnel(id)
-    for (const id of [...this.sessions.keys()]) this.close(id)
+    // Sessions waiting on a reattach rung aren't in `sessions` at all, so close the
+    // union of both maps or their timers keep the app alive after the last window.
+    for (const id of new Set([...this.redials.keys(), ...this.sessions.keys()])) this.close(id)
     for (const [, s] of this.sftpPool) {
       if (s.closeTimer) clearTimeout(s.closeTimer)
       try {

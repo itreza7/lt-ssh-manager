@@ -6,6 +6,7 @@ import type {
   PersistedTab,
   SessionStatus,
   SplitDirection,
+  TmuxIntent,
   Workspace
 } from '../../shared/types'
 import { DEFAULTS, type AppSettings, type SettingsPatch } from './lib/terminalSettings'
@@ -25,7 +26,7 @@ import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
-import { tmuxAttachCommand, tmuxControlCommand, tmuxSessionName } from './lib/tmux'
+import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 
 const SETTINGS_TAB_ID = 'settings'
 
@@ -43,6 +44,8 @@ interface SessionTab {
   status: SessionStatus
   password?: string
   command?: string
+  /** Set when `command` attaches to tmux — lets the main process reattach on a drop. */
+  tmux?: TmuxIntent
 }
 
 /** A tmux control-mode (`tmux -CC`) session — one stream, many panes/windows. */
@@ -54,6 +57,7 @@ interface ControlTab {
   status: SessionStatus
   password?: string
   command?: string
+  tmux?: TmuxIntent
 }
 
 interface SettingsTab {
@@ -149,9 +153,21 @@ function serializeTab(t: Tab): PersistedTab {
     case 'dashboard':
       return { kind: 'dashboard', connectionId: t.connectionId }
     case 'session':
-      return { kind: 'session', connectionId: t.connectionId, title: t.title, command: t.command }
+      return {
+        kind: 'session',
+        connectionId: t.connectionId,
+        title: t.title,
+        command: t.command,
+        tmux: t.tmux
+      }
     case 'tmux':
-      return { kind: 'tmux', connectionId: t.connectionId, title: t.title, command: t.command }
+      return {
+        kind: 'tmux',
+        connectionId: t.connectionId,
+        title: t.title,
+        command: t.command,
+        tmux: t.tmux
+      }
     case 'settings':
       return { kind: 'settings' }
     case 'sftp':
@@ -170,8 +186,15 @@ function statusDot(status: SessionStatus): string {
     case 'connecting':
     case 'retrying':
       return 'bg-amber-400 animate-pulse'
+    // Reconnecting on its own: distinct from the first-dial amber so a glance at a
+    // background tab tells you it dropped and is coming back by itself.
+    case 'reattaching':
+      return 'bg-sky-400 animate-pulse'
     case 'error':
       return 'bg-red-500'
+    case 'closed':
+      // A session that can't be brought back reads as an error, not as idle.
+      return status.reason === 'gone' ? 'bg-red-500/60' : 'bg-white/30'
     default:
       return 'bg-white/30'
   }
@@ -375,21 +398,34 @@ export default function App() {
       : { top: pct(offset), height: pct(size), left: 0, right: 0 }
   }
 
-  // Last on-screen pane rect per leaf, so a hidden leaf parks at the geometry it
-  // left rather than full-bleed. Returning to an unchanged layout is then a no-op
-  // size change (no ResizeObserver refit / terminal reflow); a leaf that returns
-  // to a differently-sized pane still gets the new rect and refits correctly.
+  // Last on-screen pane rect per leaf, so a leaf that returns to an unchanged
+  // layout comes back at the geometry it left rather than full-bleed (it still
+  // refits on reveal; a leaf returning to a differently-sized pane gets the new
+  // rect). Only used to seed the rect — a parked leaf isn't laid out at all.
   const lastRectRef = useRef<Record<string, CSSProperties>>({})
 
   // Absolute-position style for a mounted leaf's wrapper: into its pane when the
-  // active view shows it, else parked hidden at its last rect (kept mounted so
-  // live state survives). New leaves with no remembered rect fall back full-bleed.
+  // active view shows it, else parked (kept mounted so live state survives).
+  //
+  // A leaf that HAS been laid out before is parked with `display: none`: xterm
+  // pauses its render service off an IntersectionObserver, which reports a
+  // merely-invisible element as still intersecting, so a `visibility: hidden`
+  // terminal keeps painting and submitting compositor frames nobody can see.
+  //
+  // A leaf that has NEVER been laid out is parked with `visibility: hidden`
+  // instead, because `display: none` gives it no layout box at all — and a
+  // terminal mounting into a zero-size box measures no grid, so it would open its
+  // PTY at xterm's construction defaults. tmux sizes a window to its smallest
+  // attached client, so one such tab can clamp (or with `-D`, steal) a session the
+  // user is actively looking at in another tab. It costs nothing to keep it laid
+  // out until it has been shown once: a terminal only repaints when output
+  // arrives, and the render-pause win applies from the first switch away onward.
   const wrapperStyle = (id: string): CSSProperties => {
     const i = activeView ? activeView.panes.indexOf(id) : -1
     if (i < 0) {
       const last = lastRectRef.current[id]
       return last
-        ? { position: 'absolute', visibility: 'hidden', ...last }
+        ? { position: 'absolute', display: 'none', ...last }
         : { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, visibility: 'hidden' }
     }
     const rect = paneRect(i)
@@ -585,7 +621,10 @@ export default function App() {
           title: pt.title ?? conn.name,
           status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
           password: pw ?? undefined,
-          command: pt.command
+          command: pt.command,
+          // Workspaces written before 0.2.4 only stored the command; recover the
+          // intent from it so restored tabs reattach automatically too.
+          tmux: pt.tmux ?? parseTmuxIntent(pt.command) ?? undefined
         })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
@@ -600,7 +639,8 @@ export default function App() {
           title: pt.title ?? conn.name,
           status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
           password: pw ?? undefined,
-          command: pt.command
+          command: pt.command,
+          tmux: pt.tmux ?? parseTmuxIntent(pt.command) ?? undefined
         })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
@@ -716,19 +756,21 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { command?: string; title?: string }
+    opts?: { session?: string; title?: string }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
-    let { command, title } = opts ?? {}
+    let { title } = opts ?? {}
     const control = !!(conn.tmux && conn.tmuxControl)
-    if (!command && conn.tmux) {
-      const session = tmuxSessionName(conn.tmuxSession || conn.name)
-      command = control
-        ? tmuxControlCommand(session, !!conn.tmuxDetachOthers)
-        : tmuxAttachCommand(session, !!conn.tmuxDetachOthers)
-      title = title ?? `${conn.name} · ${session}`
-    }
+    // The session name, if any: an explicit one (already exactly as tmux spells it)
+    // wins over the connection's own.
+    const session = opts?.session ?? (conn.tmux ? tmuxSessionName(conn.tmuxSession || conn.name) : undefined)
+    // Kept structured rather than re-sniffed from the command string later, because
+    // reattaching after a drop needs an attach-*only* command built from it.
+    const tmux: TmuxIntent | undefined = session
+      ? { session, control, detachOthers: !!conn.tmuxDetachOthers }
+      : undefined
+    if (tmux) title = title ?? `${conn.name} · ${session}`
     const sessionId = crypto.randomUUID()
     const base = {
       id: sessionId,
@@ -736,7 +778,8 @@ export default function App() {
       title: title ?? conn.name,
       status: { kind: 'connecting' as const, attempt: 1, retries: appSettings.connectRetries },
       password: password ?? undefined,
-      command
+      command: tmux ? tmuxCreateCommand(tmux) : undefined,
+      tmux
     }
     const tab: Tab = control ? { kind: 'tmux', ...base } : { kind: 'session', ...base }
     setTabs((t) => [...t, tab])
@@ -831,14 +874,11 @@ export default function App() {
 
   // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
   // session that died between listing and clicking won't error — it's recreated.
+  // `name` comes from the server's own session list (or the user's new-session
+  // field) and is passed through verbatim: sanitizing it here would attach to the
+  // wrong name for any session tmux itself allows but tmuxSessionName() rewrites.
   const attachTmux = (conn: Connection, name: string): void => {
-    const control = !!(conn.tmux && conn.tmuxControl)
-    void openSession(conn, {
-      command: control
-        ? tmuxControlCommand(name, !!conn.tmuxDetachOthers)
-        : tmuxAttachCommand(name, !!conn.tmuxDetachOthers),
-      title: `${conn.name} · ${name}`
-    })
+    void openSession(conn, { session: name, title: `${conn.name} · ${name}` })
   }
 
   // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
@@ -1077,7 +1117,11 @@ export default function App() {
                     fetchTmux={fetchTmuxFor(conn)}
                     fetchStats={fetchStatsFor(conn)}
                     onAttach={(name) => attachTmux(conn, name)}
-                    onNewSession={(name) => attachTmux(conn, name)}
+                    // A name the user just typed, unlike onAttach's, has never been
+                    // through tmux. Normalise it here so the tab records the name
+                    // tmux will actually use — `.` and `:` split tmux's target
+                    // syntax, so a session called "api.v2" could never be reattached.
+                    onNewSession={(name) => attachTmux(conn, tmuxSessionName(name))}
                     onKillSession={killTmux(conn)}
                     onRenameSession={renameTmux(conn)}
                   />
@@ -1107,6 +1151,7 @@ export default function App() {
                   active={activeTabId === tab.id}
                   password={tab.password}
                   command={tab.command}
+                  tmux={tab.tmux}
                   retries={appSettings.connectRetries}
                   settings={appSettings.terminal}
                   onStatus={onStatus}
@@ -1129,6 +1174,7 @@ export default function App() {
                   onScreen={onScreen(tab.id)}
                   password={tab.password}
                   command={tab.command}
+                  tmux={tab.tmux}
                   retries={appSettings.connectRetries}
                   settings={appSettings.terminal}
                   onStatus={onStatus}

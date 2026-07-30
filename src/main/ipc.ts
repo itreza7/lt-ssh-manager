@@ -7,6 +7,7 @@ import type {
   ServerStats,
   SettingsPatch,
   SftpList,
+  TmuxIntent,
   TmuxSession,
   TunnelDef,
   Workspace
@@ -215,6 +216,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         passphrase?: string
         command?: string
         control?: boolean
+        tmux?: TmuxIntent
       }
     ) => {
       const connection = connectionStore.get(args.connectionId)
@@ -231,7 +233,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         rows: args.rows,
         retries: args.retries,
         command: args.command,
-        control: args.control
+        control: args.control,
+        tmux: args.tmux
       })
       return true
     }
@@ -376,6 +379,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     ssh.resize(sessionId, cols, rows)
   )
   ipcMain.on('ssh:close', (_e, sessionId: string) => ssh.close(sessionId))
+  ipcMain.on('ssh:stop-reattach', (_e, sessionId: string) => ssh.stopReattach(sessionId))
 
   // ---- tmux control mode (tmux -CC) ----
   ipcMain.on('tmux:send-keys', (_e, sessionId: string, paneId: string, data: string) =>

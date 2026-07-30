@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
-import type { SessionStatus, TmuxControlState, TmuxWindowInfo } from '../../../shared/types'
+import type {
+  CloseReason,
+  SessionStatus,
+  TmuxControlState,
+  TmuxIntent,
+  TmuxWindowInfo
+} from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
 import { attachTerminalClipboard } from '../lib/xtermClipboard'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
+import { tmuxReattachCommand } from '../lib/tmux'
+import { ReattachBanner } from './ReattachBanner'
 
 interface Props {
   sessionId: string
@@ -14,6 +22,8 @@ interface Props {
   onScreen: boolean
   password?: string
   command?: string
+  /** Which tmux session this is attached to; enables the automatic reattach. */
+  tmux?: TmuxIntent
   retries: number
   settings: TerminalSettings
   onStatus: (sessionId: string, status: SessionStatus) => void
@@ -38,13 +48,25 @@ export function TmuxControlView({
   onScreen,
   password,
   command,
+  tmux,
   retries,
   settings,
   onStatus
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<TmuxControlState | null>(null)
-  const [ended, setEnded] = useState<{ kind: 'closed' | 'error'; msg: string } | null>(null)
+  const [ended, setEnded] = useState<{
+    kind: 'closed' | 'error'
+    msg: string
+    reason?: CloseReason
+  } | null>(null)
+  // Set while the main process reattaches a dropped session on its own.
+  const [reattach, setReattach] = useState<{
+    attempt: number
+    delayMs: number
+    error: string
+  } | null>(null)
+  const reattachingRef = useRef(false)
 
   // Per-pane output routing. Output can arrive before a pane mounts (the attach
   // repaint), so buffer by pane id until its writer registers.
@@ -55,8 +77,8 @@ export function TmuxControlView({
   settingsRef.current = settings
   const onScreenRef = useRef(onScreen)
   onScreenRef.current = onScreen
-  const connectArgsRef = useRef({ connectionId, retries, password, command })
-  connectArgsRef.current = { connectionId, retries, password, command }
+  const connectArgsRef = useRef({ connectionId, retries, password, command, tmux })
+  connectArgsRef.current = { connectionId, retries, password, command, tmux }
   const lastSizeRef = useRef({ cols: 0, rows: 0 })
 
   const registerPane = useCallback((paneId: string, write: PaneWriter): (() => void) => {
@@ -84,8 +106,10 @@ export function TmuxControlView({
     window.api.resize(sessionId, cols, rows)
   }, [sessionId])
 
-  const reconnect = useCallback(() => {
+  const reconnect = useCallback((mode: 'attach' | 'create') => {
     setEnded(null)
+    setReattach(null)
+    reattachingRef.current = false
     setState(null)
     writers.current.clear()
     buffers.current.clear()
@@ -94,8 +118,19 @@ export function TmuxControlView({
     const a = connectArgsRef.current
     const el = areaRef.current
     const { cw, ch } = measureCell(settingsRef.current)
-    const cols = el ? Math.max(1, Math.floor(el.clientWidth / cw)) : 80
-    const rows = el ? Math.max(1, Math.floor(el.clientHeight / ch)) : 24
+    // Same window-derived fallback as the mount path: a fixed 80x24 would clamp
+    // the session, since tmux sizes a window to its smallest attached client.
+    const cols = el?.clientWidth
+      ? Math.max(1, Math.floor(el.clientWidth / cw))
+      : Math.max(20, Math.floor(window.innerWidth / cw))
+    const rows = el?.clientHeight
+      ? Math.max(1, Math.floor(el.clientHeight / ch))
+      : Math.max(5, Math.floor(window.innerHeight / ch))
+    // See TerminalView.reconnect: attach-only unless the user asked to start the
+    // session again, so this button can never resurrect a killed session as an
+    // empty one.
+    const command =
+      mode === 'attach' && a.tmux ? (tmuxReattachCommand(a.tmux) ?? a.command) : a.command
     void window.api.connect({
       sessionId,
       connectionId: a.connectionId,
@@ -103,8 +138,9 @@ export function TmuxControlView({
       rows,
       retries: a.retries,
       password: a.password,
-      command: a.command,
-      control: true
+      command,
+      control: true,
+      tmux: a.tmux
     })
   }, [sessionId])
 
@@ -127,15 +163,59 @@ export function TmuxControlView({
     const offStatus = window.api.onStatus((sid, status) => {
       if (sid !== sessionId) return
       onStatus(sessionId, status)
-      if (status.kind === 'connecting' || status.kind === 'ready') setEnded(null)
-      else if (status.kind === 'error') setEnded({ kind: 'error', msg: status.message })
-      else if (status.kind === 'closed') setEnded({ kind: 'closed', msg: '' })
+      if (status.kind === 'connecting') {
+        setEnded(null)
+      } else if (status.kind === 'ready') {
+        setEnded(null)
+        if (reattachingRef.current) {
+          reattachingRef.current = false
+          setReattach(null)
+          // The new control client hasn't been told our size yet, and lastSizeRef
+          // was cleared below so this actually sends.
+          requestAnimationFrame(pushSize)
+          // Mark the seam in each pane's scrollback. Unlike the drawn view there's
+          // no alternate buffer here — each pane is a plain xterm we append to — so
+          // a line of text is both safe and the clearest signal that what follows
+          // came from a new client.
+          for (const write of writers.current.values())
+            write(new TextEncoder().encode('\r\n\x1b[90m── reconnected ──\x1b[0m\r\n'))
+        }
+      } else if (status.kind === 'reattaching') {
+        reattachingRef.current = true
+        setEnded(null)
+        setReattach({ attempt: status.attempt, delayMs: status.delayMs, error: status.error })
+        // Drop output queued for panes that never mounted — it belongs to the dead
+        // client's repaint. `state` and `writers` are deliberately kept: clearing
+        // state unmounts every TmuxPane, disposing the xterms that hold the only
+        // copy of the pane content this whole feature exists to preserve.
+        buffers.current.clear()
+        lastSizeRef.current = { cols: 0, rows: 0 }
+      } else if (status.kind === 'error') {
+        setReattach(null)
+        reattachingRef.current = false
+        setEnded({ kind: 'error', msg: status.message })
+      } else if (status.kind === 'closed') {
+        setReattach(null)
+        reattachingRef.current = false
+        setEnded({ kind: 'closed', msg: status.detail ?? '', reason: status.reason })
+      }
     })
 
     const el = areaRef.current
     const { cw, ch } = measureCell(settingsRef.current)
-    const cols = el && el.clientWidth ? Math.max(1, Math.floor(el.clientWidth / cw)) : 80
-    const rows = el && el.clientHeight ? Math.max(1, Math.floor(el.clientHeight / ch)) : 24
+    // Falling back to a fixed 80x24 was actively harmful: tmux sizes a window to
+    // its smallest attached client, so a pane that happened to mount without a
+    // layout box would clamp — or with `-D`, steal — a session the user is
+    // watching elsewhere. The window is a far better guess, and pushSize()
+    // corrects it as soon as the pane is laid out.
+    const cols =
+      el && el.clientWidth
+        ? Math.max(1, Math.floor(el.clientWidth / cw))
+        : Math.max(20, Math.floor(window.innerWidth / cw))
+    const rows =
+      el && el.clientHeight
+        ? Math.max(1, Math.floor(el.clientHeight / ch))
+        : Math.max(5, Math.floor(window.innerHeight / ch))
     lastSizeRef.current = { cols, rows }
     void window.api.connect({
       sessionId,
@@ -145,7 +225,8 @@ export function TmuxControlView({
       retries,
       password,
       command,
-      control: true
+      control: true,
+      tmux
     })
 
     const ro = new ResizeObserver(() => pushSize())
@@ -179,6 +260,36 @@ export function TmuxControlView({
   )
 
   const isReady = windows.length > 0
+  // See TerminalView: a session that is *gone* must not offer "Reattach", since
+  // reattaching there means running the create-or-attach command again.
+  const recreate = ended?.reason === 'gone' || ended?.reason === 'exited'
+  const canAttach = !!(tmux && tmuxReattachCommand(tmux))
+  const overlay = ended && {
+    eyebrow:
+      ended.kind === 'error'
+        ? 'connection error'
+        : ended.reason === 'gone'
+          ? 'session gone'
+          : ended.reason === 'unreachable'
+            ? 'disconnected'
+            : ended.reason === 'exited'
+              ? 'session ended'
+              : 'detached',
+    body:
+      ended.kind === 'error'
+        ? ended.msg
+        : ended.reason === 'gone'
+          ? `That tmux session is no longer running on the host.${ended.msg ? ` (${ended.msg})` : ''}`
+          : ended.reason === 'unreachable'
+            ? `Lost the connection${ended.msg ? `: ${ended.msg}` : ''}.`
+            : ended.reason === 'exited'
+              ? 'The tmux session ended.'
+              : 'Detached from tmux. Your session is still running on the host.',
+    // 'exited' joins 'gone' here: both mean there is no session left to attach to,
+    // so the honest offer is to start one, not to "reattach" to nothing.
+    action: recreate || !canAttach ? 'Start it again ▸' : 'Reattach ▸',
+    mode: (recreate || !canAttach ? 'create' : 'attach') as 'attach' | 'create'
+  }
 
   return (
     <div className="flex h-full w-full flex-col bg-ink">
@@ -203,7 +314,12 @@ export function TmuxControlView({
                 top: `${(100 * pane.y) / rows}%`,
                 width: `${(100 * pane.w) / cols}%`,
                 height: `${(100 * pane.h) / rows}%`,
-                visibility: visible ? 'visible' : 'hidden'
+                // `display: none`, not `visibility: hidden` — xterm gates its
+                // renderer on an IntersectionObserver, which still counts an
+                // invisible-but-laid-out pane as on screen and keeps painting it.
+                // Panes are sized from tmux's own cell grid, not measured, so
+                // taking them out of layout costs nothing.
+                display: visible ? undefined : 'none'
               }}
             >
               <div
@@ -226,27 +342,24 @@ export function TmuxControlView({
           )
         })}
 
-        {!isReady && !ended && (
+        {!isReady && !ended && !reattach && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-muted">
             Attaching tmux (control mode)…
           </div>
         )}
+        {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
       </div>
 
-      {ended && (
+      {overlay && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
           <div className="panel flex max-w-sm flex-col items-center gap-3 p-6 text-center">
-            <div className="eyebrow">{ended.kind === 'error' ? 'connection error' : 'detached'}</div>
-            <p className="text-sm text-muted">
-              {ended.kind === 'error'
-                ? ended.msg
-                : 'Detached from tmux. Your session is still running on the host.'}
-            </p>
+            <div className="eyebrow">{overlay.eyebrow}</div>
+            <p className="text-sm text-muted">{overlay.body}</p>
             <button
-              onClick={reconnect}
+              onClick={() => reconnect(overlay.mode)}
               className="mt-1 rounded-lg bg-signal px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
             >
-              Reattach ▸
+              {overlay.action}
             </button>
           </div>
         </div>
