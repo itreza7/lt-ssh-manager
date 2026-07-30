@@ -189,6 +189,12 @@ export interface AppSettings {
   connectRetries: number
   /** Whether the connections sidebar is collapsed to its narrow rail. */
   sidebarCollapsed: boolean
+  /**
+   * Schema version of the saved settings file. Not user-facing — it exists so a
+   * changed default can be applied to an install that already has a file, and
+   * only once. See the migration in main/store/settings.ts.
+   */
+  version: number
 }
 
 /** A partial update to settings (terminal/editor fields may be partial). */
@@ -203,7 +209,10 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: 'jetbrains',
   fontSize: 13,
   cursorStyle: 'bar',
-  cursorBlink: true,
+  // Off by default: a blinking cursor drives a full WebGL redraw + compositor
+  // frame twice a second forever, which is the single largest source of idle
+  // battery draw in the app. Turn it back on in Settings if you prefer it.
+  cursorBlink: false,
   scrollback: 1000,
   overscroll: 1
 }
@@ -218,11 +227,18 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   markdownPreview: true
 }
 
+/**
+ * Bump when a changed default should also reach installs that already have a
+ * settings file, and add the step to migrate() in main/store/settings.ts.
+ */
+export const SETTINGS_VERSION = 1
+
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal: DEFAULT_TERMINAL_SETTINGS,
   editor: DEFAULT_EDITOR_SETTINGS,
   connectRetries: 4,
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  version: SETTINGS_VERSION
 }
 
 // ---- Port forwarding / tunnels ----

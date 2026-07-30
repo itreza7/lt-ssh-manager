@@ -1,9 +1,15 @@
-import { useEffect, useState } from 'react'
-import { CodeEditor } from './CodeEditor'
-import { MarkdownPreview } from './MarkdownPreview'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { Button } from './Modal'
 import { resolveFontStack } from '../lib/terminalSettings'
 import type { EditorSettings } from '../lib/terminalSettings'
+
+// Monaco and highlight.js together are the bulk of the renderer bundle, and most
+// sessions never open a file. Load them the first time one is opened instead of
+// making every cold start parse them.
+const CodeEditor = lazy(() => import('./CodeEditor').then((m) => ({ default: m.CodeEditor })))
+const MarkdownPreview = lazy(() =>
+  import('./MarkdownPreview').then((m) => ({ default: m.MarkdownPreview }))
+)
 
 const isMarkdown = (name: string): boolean => /\.(md|markdown|mdown|mkd)$/i.test(name)
 
@@ -144,24 +150,33 @@ export function EditorView({ connectionId, password, path, name, active, setting
       </div>
 
       <div className="min-h-0 flex-1">
-        {mode === 'preview' ? (
-          <MarkdownPreview source={content} fontSize={settings.fontSize + 1} />
-        ) : (
-          <CodeEditor
-            name={name}
-            value={content}
-            onChange={setContent}
-            fontFamily={resolveFontStack(settings.fontFamily)}
-            fontSize={settings.fontSize}
-            tabSize={settings.tabSize}
-            wordWrap={settings.wordWrap}
-            minimap={settings.minimap}
-            lineNumbers={settings.lineNumbers}
-            readOnly={readOnly}
-            onCursor={(line, col) => setPos({ line, col })}
-            onLanguage={setLang}
-          />
-        )}
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center text-sm text-muted">
+              <span className="animate-glow mr-2 text-signal">⟳</span> Loading{' '}
+              {mode === 'preview' ? 'preview' : 'editor'}…
+            </div>
+          }
+        >
+          {mode === 'preview' ? (
+            <MarkdownPreview source={content} fontSize={settings.fontSize + 1} />
+          ) : (
+            <CodeEditor
+              name={name}
+              value={content}
+              onChange={setContent}
+              fontFamily={resolveFontStack(settings.fontFamily)}
+              fontSize={settings.fontSize}
+              tabSize={settings.tabSize}
+              wordWrap={settings.wordWrap}
+              minimap={settings.minimap}
+              lineNumbers={settings.lineNumbers}
+              readOnly={readOnly}
+              onCursor={(line, col) => setPos({ line, col })}
+              onLanguage={setLang}
+            />
+          )}
+        </Suspense>
       </div>
 
       {/* status bar */}

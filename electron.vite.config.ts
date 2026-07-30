@@ -19,6 +19,11 @@ export default defineConfig({
     },
     plugins: [react(), tailwindcss()],
     build: {
+      // Emit every asset as a file. Small font subsets would otherwise be inlined
+      // as `data:` URIs, and the app's CSP sets no font-src — so they fall back to
+      // `default-src 'self'`, which refuses them and silently drops those glyph
+      // ranges to a system font.
+      assetsInlineLimit: 0,
       rollupOptions: { input: resolve('src/renderer/index.html') }
     }
   }

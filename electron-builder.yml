@@ -3,6 +3,12 @@ productName: SSH Manager
 directories:
   buildResources: build
   output: release
+# These globs plus every entry in package.json's "dependencies" (pulled in
+# transitively) make up the asar. Renderer packages are already bundled into
+# out/ by Vite, so listing one as a runtime dependency ships a second, unused
+# copy of it — monaco-editor alone is ~72 MB that way. Keep "dependencies" to
+# what the main/preload processes require() at runtime (currently just ssh2);
+# everything else belongs in "devDependencies".
 files:
   - out/**/*
   - resources/**/*
