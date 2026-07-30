@@ -61,9 +61,12 @@ export function CodeEditor({
         minimap: { enabled: minimap, renderCharacters: false },
         scrollBeyondLastLine: false,
         automaticLayout: true,
-        smoothScrolling: true,
-        cursorSmoothCaretAnimation: 'on',
-        cursorBlinking: 'smooth',
+        // No animated scrolling, caret easing, or caret blink: each one repaints
+        // the editor at up to the display's refresh rate — a smooth blink alone
+        // never stops while the file is open. A solid caret costs nothing.
+        smoothScrolling: false,
+        cursorSmoothCaretAnimation: 'off',
+        cursorBlinking: 'solid',
         tabSize,
         wordWrap: wordWrap ? 'on' : 'off',
         wrappingIndent: 'same',

@@ -48,6 +48,21 @@ export interface TmuxSession {
   attached: boolean
 }
 
+/**
+ * What a tmux-backed tab is attached to, kept structured rather than inferred
+ * from the command string. The main process needs it to build an *attach-only*
+ * command when a dropped session is reattached automatically — see
+ * shared/tmux.ts and the reattach ladder in main/ssh/manager.ts.
+ */
+export interface TmuxIntent {
+  /** The session name exactly as it must reach tmux (already sanitized if typed). */
+  session: string
+  /** Control mode (`tmux -CC`) rather than a drawn tmux screen. */
+  control: boolean
+  /** `-D`: detach other clients on the initial create-or-attach. */
+  detachOthers: boolean
+}
+
 // ---- tmux control mode (tmux -CC) ----
 // The main process parses tmux's control protocol and pushes a structured view
 // of windows/panes to the renderer, which draws each pane as its own terminal.
@@ -189,6 +204,12 @@ export interface AppSettings {
   connectRetries: number
   /** Whether the connections sidebar is collapsed to its narrow rail. */
   sidebarCollapsed: boolean
+  /**
+   * Schema version of the saved settings file. Not user-facing — it exists so a
+   * changed default can be applied to an install that already has a file, and
+   * only once. See the migration in main/store/settings.ts.
+   */
+  version: number
 }
 
 /** A partial update to settings (terminal/editor fields may be partial). */
@@ -203,7 +224,10 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: 'jetbrains',
   fontSize: 13,
   cursorStyle: 'bar',
-  cursorBlink: true,
+  // Off by default: a blinking cursor drives a full WebGL redraw + compositor
+  // frame twice a second forever, which is the single largest source of idle
+  // battery draw in the app. Turn it back on in Settings if you prefer it.
+  cursorBlink: false,
   scrollback: 1000,
   overscroll: 1
 }
@@ -218,11 +242,18 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   markdownPreview: true
 }
 
+/**
+ * Bump when a changed default should also reach installs that already have a
+ * settings file, and add the step to migrate() in main/store/settings.ts.
+ */
+export const SETTINGS_VERSION = 1
+
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal: DEFAULT_TERMINAL_SETTINGS,
   editor: DEFAULT_EDITOR_SETTINGS,
   connectRetries: 4,
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  version: SETTINGS_VERSION
 }
 
 // ---- Port forwarding / tunnels ----
@@ -264,6 +295,11 @@ export interface PersistedTab {
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
+  /**
+   * session/tmux: what the tab is attached to. Written since 0.2.4; tabs saved
+   * before that carry only `command`, which parseTmuxIntent() recovers this from.
+   */
+  tmux?: TmuxIntent
   initialPath?: string // sftp: directory to open
   path?: string // editor: remote file path
   name?: string // editor: file name
@@ -294,9 +330,30 @@ export interface Workspace {
 
 export const EMPTY_WORKSPACE: Workspace = { tabs: [], active: -1 }
 
+/**
+ * Why a session ended, when we can tell. Drives the wording of the overlay and,
+ * more importantly, whether reattaching automatically could ever help:
+ * `detached`/`exited`/`gone` are all final, `unreachable` is not.
+ */
+export type CloseReason =
+  /** The user detached (C-b d, `detach-client`) — the tmux session is still alive. */
+  | 'detached'
+  /** The command/shell ran to completion. */
+  | 'exited'
+  /** The remote tmux session (or its server) is gone; reattaching cannot bring it back. */
+  | 'gone'
+  /** The link died and the ladder gave up or was stopped; the session may still exist. */
+  | 'unreachable'
+
 export type SessionStatus =
   | { kind: 'connecting'; attempt: number; retries: number }
   | { kind: 'retrying'; attempt: number; retries: number; delayMs: number; error: string }
   | { kind: 'ready' }
-  | { kind: 'closed'; code: number | null }
+  /**
+   * A tmux-backed session dropped and is being reattached without asking. The
+   * previous screen stays on-screen; the renderer shows a banner, not the
+   * blocking overlay. See the reattach ladder in main/ssh/manager.ts.
+   */
+  | { kind: 'reattaching'; attempt: number; delayMs: number; error: string }
+  | { kind: 'closed'; code: number | null; reason?: CloseReason; detail?: string }
   | { kind: 'error'; message: string; permanent: boolean }

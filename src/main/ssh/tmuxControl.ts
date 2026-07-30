@@ -23,21 +23,33 @@ import type { TmuxControlState, TmuxPaneRect, TmuxWindowInfo } from '../../share
 
 const LF = 0x0a
 
-/** Decode tmux's `%output` escaping (`\ooo` octal for `\` and non-printable bytes). */
+const isOctal = (c: number): boolean => c >= 0x30 /* 0 */ && c <= 0x37 /* 7 */
+
+/**
+ * Decode tmux's `%output` escaping (`\ooo` octal for `\` and non-printable bytes).
+ *
+ * Writes straight into one right-sized Buffer — escapes only ever shrink the
+ * input, so `s.length` bounds the output. This runs once per protocol line on a
+ * hot path, which a boxed number[] plus a regex per character would tax heavily.
+ */
 function unescapeOutput(s: string): Buffer {
-  const out: number[] = []
+  const out = Buffer.allocUnsafe(s.length)
+  let n = 0
   for (let i = 0; i < s.length; i++) {
-    if (s.charCodeAt(i) === 92 /* \ */ && i + 3 < s.length + 1) {
-      const oct = s.slice(i + 1, i + 4)
-      if (/^[0-7]{3}$/.test(oct)) {
-        out.push(parseInt(oct, 8))
+    const c = s.charCodeAt(i)
+    if (c === 92 /* \ */ && i + 3 < s.length) {
+      const a = s.charCodeAt(i + 1)
+      const b = s.charCodeAt(i + 2)
+      const d = s.charCodeAt(i + 3)
+      if (isOctal(a) && isOctal(b) && isOctal(d)) {
+        out[n++] = ((a - 0x30) << 6) | ((b - 0x30) << 3) | (d - 0x30)
         i += 3
         continue
       }
     }
-    out.push(s.charCodeAt(i) & 0xff)
+    out[n++] = c & 0xff
   }
-  return Buffer.from(out)
+  return out.subarray(0, n)
 }
 
 /**
@@ -78,6 +90,8 @@ export class TmuxControlClient extends EventEmitter {
   private resyncing = false
   private resyncAgain = false
   private disposed = false
+  /** The stream listener installed by start(), held so dispose() can detach it. */
+  private onStreamData?: (chunk: Buffer) => void
 
   constructor(
     private stream: ClientChannel,
@@ -89,7 +103,11 @@ export class TmuxControlClient extends EventEmitter {
 
   /** Begin parsing stream data and pull the initial window/pane structure. */
   start(): void {
-    this.stream.on('data', (d: Buffer) => this.onData(d))
+    // Kept so dispose() can detach it. An anonymous listener would go on parsing —
+    // and re-emitting pane output — for a client the session manager has already
+    // torn down, while holding this object alive through the stream.
+    this.onStreamData = (d: Buffer): void => this.onData(d)
+    this.stream.on('data', this.onStreamData)
     // Let tmux's own startup chatter flush before our first command, so the
     // %begin/%end FIFO correlation starts clean.
     setTimeout(() => {
@@ -100,6 +118,7 @@ export class TmuxControlClient extends EventEmitter {
   }
 
   private onData(chunk: Buffer): void {
+    if (this.disposed) return
     this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk
     let nl: number
     // Split on raw LF bytes — protocol lines are ASCII and %output never carries
@@ -337,6 +356,11 @@ export class TmuxControlClient extends EventEmitter {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    if (this.onStreamData) {
+      this.stream.off('data', this.onStreamData)
+      this.onStreamData = undefined
+    }
+    this.buf = Buffer.alloc(0)
     if (this.resyncTimer) clearTimeout(this.resyncTimer)
     this.resyncTimer = undefined
     for (const p of this.pending) p.reject(new Error('control client disposed'))

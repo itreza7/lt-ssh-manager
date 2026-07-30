@@ -10,6 +10,7 @@ import type {
   SftpList,
   SftpReadResult,
   TmuxControlState,
+  TmuxIntent,
   TmuxSession,
   TransferProgress,
   TunnelDef,
@@ -29,6 +30,12 @@ export interface ConnectArgs {
   command?: string
   /** Parse the stream as a tmux control-mode (`tmux -CC`) protocol channel. */
   control?: boolean
+  /**
+   * Set when `command` attaches to a tmux session. It lets the main process
+   * reattach the session by itself after a drop, without re-running a command
+   * that would create the session had it been killed meanwhile.
+   */
+  tmux?: TmuxIntent
 }
 
 const api = {
@@ -162,6 +169,8 @@ const api = {
   resize: (sessionId: string, cols: number, rows: number): void =>
     ipcRenderer.send('ssh:resize', sessionId, cols, rows),
   closeSession: (sessionId: string): void => ipcRenderer.send('ssh:close', sessionId),
+  /** Give up on the automatic reattach ladder and show the manual overlay. */
+  stopReattach: (sessionId: string): void => ipcRenderer.send('ssh:stop-reattach', sessionId),
   respondHostKey: (requestId: string, accept: boolean): void =>
     ipcRenderer.send('ssh:hostkey-response', requestId, accept),
 
@@ -195,8 +204,10 @@ const api = {
     ipcRenderer.on('ssh:status', h)
     return () => ipcRenderer.removeListener('ssh:status', h)
   },
-  onData: (cb: (sessionId: string, data: string) => void): (() => void) => {
-    const h = (_e: unknown, sessionId: string, data: string): void => cb(sessionId, data)
+  // Raw bytes, coalesced in main. xterm decodes UTF-8 itself and carries partial
+  // sequences across writes, so never turn these into strings on the way through.
+  onData: (cb: (sessionId: string, data: Uint8Array) => void): (() => void) => {
+    const h = (_e: unknown, sessionId: string, data: Uint8Array): void => cb(sessionId, data)
     ipcRenderer.on('ssh:data', h)
     return () => ipcRenderer.removeListener('ssh:data', h)
   },
