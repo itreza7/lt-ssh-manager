@@ -1,5 +1,8 @@
-/** Renderer-side platform check (the preload doesn't expose process.platform). */
-export const isMac = navigator.userAgent.includes('Mac OS X')
+/** Renderer-side platform check (the preload doesn't expose process.platform).
+ * `navigator.platform` reports "MacIntel" even on Apple Silicon; fall back to the
+ * user-agent string in case a future runtime drops the deprecated property. */
+export const isMac =
+  navigator.platform.toUpperCase().includes('MAC') || navigator.userAgent.includes('Mac OS X')
 
 /**
  * Render a canonical "Ctrl+Shift+I"-style accelerator for the current platform:

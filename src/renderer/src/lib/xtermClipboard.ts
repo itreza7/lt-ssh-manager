@@ -47,16 +47,16 @@ export function attachTerminalClipboard(term: XTerm, el: HTMLElement): () => voi
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
     const k = e.key.toLowerCase()
-    // Explicit copy / paste. macOS uses ⌘C / ⌘V (safe in a terminal — Cmd never
-    // reaches the PTY); elsewhere Ctrl+Shift+C / Ctrl+Shift+V, since bare Ctrl+C
-    // is SIGINT.
+    // Explicit copy: ⌘C on macOS, Ctrl+Shift+C elsewhere (bare Ctrl+C is SIGINT).
     const copyChord = isMac ? e.metaKey && !e.shiftKey && k === 'c' : e.ctrlKey && e.shiftKey && k === 'c'
-    const pasteChord = isMac ? e.metaKey && !e.shiftKey && k === 'v' : e.ctrlKey && e.shiftKey && k === 'v'
     if (copyChord) {
       copySelection()
       return false
     }
-    if (pasteChord) {
+    // Paste. On macOS ⌘V is the OS paste shortcut and xterm already handles it
+    // natively — intercepting it here too would paste twice — so we only wire the
+    // Ctrl+Shift+V convenience chord on Windows/Linux, where nothing else pastes.
+    if (!isMac && e.ctrlKey && e.shiftKey && k === 'v') {
       paste()
       return false
     }
