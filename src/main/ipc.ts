@@ -405,9 +405,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     async (_e, args: { connectionId: string; password?: string }): Promise<TmuxSession[]> => {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
-      const password =
-        args.password ?? (connection.authMethod === 'password' ? secrets.get(connection.id) ?? undefined : undefined)
-      const res = await ssh.exec(connection, { command: TMUX_LIST, password, timeoutMs: 15000 })
+      const password = passwordFor(args.connectionId, args.password)
+      const res = await ssh.exec(args.connectionId, connection, {
+        command: TMUX_LIST,
+        password,
+        timeoutMs: 15000
+      })
       return parseTmux(res.stdout + '\n' + res.stderr)
     }
   )
@@ -417,7 +420,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
       const password = passwordFor(args.connectionId, args.password)
-      const res = await ssh.exec(connection, {
+      const res = await ssh.exec(args.connectionId, connection, {
         command: `tmux kill-session -t ${shQuote(args.name)}`,
         password,
         timeoutMs: 15000
@@ -434,7 +437,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
       const password = passwordFor(args.connectionId, args.password)
-      const res = await ssh.exec(connection, {
+      const res = await ssh.exec(args.connectionId, connection, {
         command: `tmux rename-session -t ${shQuote(args.from)} ${shQuote(args.to)}`,
         password,
         timeoutMs: 15000
@@ -447,11 +450,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     async (_e, args: { connectionId: string; password?: string }): Promise<ServerStats> => {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
-      const password =
-        args.password ?? (connection.authMethod === 'password' ? secrets.get(connection.id) ?? undefined : undefined)
+      const password = passwordFor(args.connectionId, args.password)
       const started = Date.now()
-      const res = await ssh.exec(connection, { command: PROBE, password, timeoutMs: 15000 })
+      const res = await ssh.exec(args.connectionId, connection, {
+        command: PROBE,
+        password,
+        timeoutMs: 15000
+      })
       const stats = parseProbe(res.stdout)
+      // Now that the connection is pooled this is the command's round trip on a
+      // warm link, not a handshake plus a command. It reads lower than it used
+      // to and is the more honest latency number for what the card claims.
       stats.probeMs = Date.now() - started
       return stats
     }
@@ -800,15 +809,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if (!connection) throw new Error('Connection not found')
       const started = Date.now()
       const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}${SEP}${CLAUDE_PROBE}`
-      const res = await ssh.exec(connection, {
+      const res = await ssh.exec(args.connectionId, connection, {
         command: shWrap(script),
         password: passwordFor(args.connectionId, args.password),
         timeoutMs: 15000,
-        // The 20s default is *smaller* than this probe's worst case: 15s to
-        // connect, plus three remotely-bounded `claude` calls at 6s each. Leaving
-        // it would time out a slow-but-healthy host and render the card as "not
-        // installed" — the one wrong answer that makes someone break a working
-        // setup. First caller to need this; the rest are a single fast command.
+        // The 20s default is *smaller* than this probe's worst case: three
+        // remotely-bounded `claude` calls at 6s each. Leaving it would time out a
+        // slow-but-healthy host and render the card as "not installed" — the one
+        // wrong answer that makes someone break a working setup. Connecting is no
+        // longer inside this budget (timeoutMs covers that), so 35s is now pure
+        // headroom over the commands themselves.
         deadlineMs: 35000
       })
       const m = kv(res.stdout)
@@ -839,13 +849,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // ---- git review ----
 
   /**
-   * Run one review command over the connection's pooled SFTP client.
+   * Run one review command on the connection's pooled client.
    *
-   * Both handlers below bracket their own openSftp/closeSftp, exactly as
-   * withClaudeSettings does. The ref-counted pool means a connection whose file
-   * manager is already open pays nothing for this, and one whose isn't keeps the
-   * channel warm for the 30s grace — long enough that clicking through a list of
-   * files is a single connection's worth of work either way.
+   * The ref-counted pool means a connection whose file manager is already open
+   * pays nothing for this, and one whose isn't keeps the connection warm for the
+   * grace period — long enough that clicking through a list of files is a single
+   * connection's worth of work either way. Raw bytes, because half of what comes
+   * back is file content rather than a reply.
    */
   const gitExec = async (
     connectionId: string,
@@ -855,18 +865,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ): Promise<Buffer> => {
     const connection = connectionStore.get(connectionId)
     if (!connection) throw new Error('Connection not found')
-    let opened = false
-    try {
-      await ssh.openSftp(connectionId, connection, passwordFor(connectionId, password), undefined, 30000)
-      opened = true
-      const res = await ssh.execOnPooled(connectionId, shWrap(script), {
-        deadlineMs: 30000,
-        maxBytes
-      })
-      return res.stdout
-    } finally {
-      if (opened) ssh.closeSftp(connectionId)
-    }
+    const res = await ssh.execBytes(connectionId, connection, {
+      command: shWrap(script),
+      password: passwordFor(connectionId, password),
+      timeoutMs: 30000,
+      deadlineMs: 30000,
+      maxBytes
+    })
+    return res.stdout
   }
 
   /** What the review script's `err=` values mean, in words a panel can show. */
