@@ -9,7 +9,7 @@
 // once to reach every terminal in the app.
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { TerminalSettings } from './terminalSettings'
-import { isMac } from './platform'
+import { fmtAccel, isMac } from './platform'
 
 export interface TerminalAttachOptions {
   /**
@@ -26,10 +26,50 @@ export interface TerminalAttachOptions {
    * are many panes per tab and tmux already reports window names itself.
    */
   onTitle?: (title: string) => void
+  /**
+   * The user asked for the prompt composer (see COMPOSE_ACCEL). Only the chord
+   * is owned here; the caller owns the drafting UI and what it sends.
+   */
+  onCompose?: () => void
 }
 
 /** Longest remote-set title we'll surface — a tab is not a billboard. */
 const TITLE_MAX = 80
+
+/**
+ * The chord that opens the prompt composer.
+ *
+ * ⌘↩ on macOS: nothing in a terminal claims it, and ⌘ chords never reach the
+ * remote anyway. Elsewhere it has to be Ctrl+Shift+↩ — plain Ctrl+key belongs to
+ * readline, and Ctrl+Shift is already this app's namespace for its own keys
+ * (copy and paste live there).
+ */
+export const COMPOSE_ACCEL = isMac ? fmtAccel('Cmd+Enter') : 'Ctrl+Shift+Enter'
+
+const isComposeChord = (e: KeyboardEvent): boolean =>
+  isMac
+    ? e.metaKey && !e.ctrlKey && !e.altKey
+    : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey
+
+/**
+ * Put a composed body on the remote's input as one unit, then submit it.
+ *
+ * `term.paste()` is what wraps the body in the bracketed-paste markers when the
+ * remote has that mode on, and those markers are the whole trick: inside them
+ * the embedded newlines arrive as line breaks in the program's prompt rather
+ * than as N separate commands. The submitting CR goes through `term.input()`
+ * *afterwards*, never inside the paste — bracketed, it would be literal text and
+ * nothing would be submitted at all.
+ *
+ * With bracketed paste off — a plain shell sitting at its prompt — this does
+ * exactly what pasting the same text by hand does: every line runs. That's the
+ * honest outcome rather than something to paper over, and the composer says so
+ * before you send.
+ */
+export function sendComposed(term: XTerm, body: string, submit = true): void {
+  term.paste(body)
+  if (submit) term.input('\r')
+}
 
 /**
  * A title is a remote-controlled string that lands in our chrome. React escapes
@@ -90,6 +130,13 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
     const k = e.key.toLowerCase()
+    // The prompt composer, claimed ahead of the Shift+Enter branch so the
+    // non-mac chord can't be mistaken for a bare Shift+Enter.
+    if (k === 'enter' && opts.onCompose && isComposeChord(e)) {
+      e.preventDefault()
+      opts.onCompose()
+      return false
+    }
     // Shift+Enter. xterm gives it the same CR as Enter, so a terminal agent that
     // wants a newline inside its prompt can't distinguish them and submits early.
     // Encode it explicitly instead — see ShiftEnterMode for the choices.
