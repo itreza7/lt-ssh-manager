@@ -13,6 +13,8 @@ interface Props {
   onCwdChange: (path: string) => void
   /** Start Claude Code in a directory, in its own tab. */
   onOpenClaude?: (dir: string) => void
+  /** Review the git working tree containing a directory, in its own tab. */
+  onOpenReview?: (dir: string) => void
 }
 
 // SFTP realpath resolves relative paths against the login dir, so a leading
@@ -194,7 +196,8 @@ export function FileManager({
   active,
   onOpenFile,
   onCwdChange,
-  onOpenClaude
+  onOpenClaude,
+  onOpenReview
 }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [openError, setOpenError] = useState<string | null>(null)
@@ -529,6 +532,15 @@ export function FileManager({
             ✻
           </ToolBtn>
         )}
+        {/* Ungated for a stronger reason than the button above: whether this
+            directory is inside a repo is exactly what the pane answers, so a
+            button that only appeared once we knew would have to ask on every
+            listing. "Not a git repository" is a sentence, not a dead control. */}
+        {onOpenReview && (
+          <ToolBtn label="Review changes" disabled={!cwd} onClick={() => onOpenReview(cwd)}>
+            ±
+          </ToolBtn>
+        )}
         <button
           onClick={() => setShowHidden((v) => !v)}
           title="Toggle hidden files"
@@ -711,6 +723,9 @@ export function FileManager({
           <MenuItem onClick={() => setPrompt({ kind: 'mkdir' })}>New folder</MenuItem>
           <MenuItem onClick={() => void doUploadPick()}>Upload here</MenuItem>
           {onOpenClaude && cwd && <MenuItem onClick={() => onOpenClaude(cwd)}>Claude here</MenuItem>}
+          {onOpenReview && cwd && (
+            <MenuItem onClick={() => onOpenReview(cwd)}>Review changes</MenuItem>
+          )}
           <MenuItem onClick={() => void list(cwd)}>Refresh</MenuItem>
         </div>
       )}

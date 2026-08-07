@@ -17,6 +17,9 @@ import type {
   ClaudeHookStatus,
   ClaudeRuntime,
   ConnectionDraft,
+  GitBlob,
+  GitFileDiff,
+  GitReview,
   ServerStats,
   SettingsPatch,
   SftpList,
@@ -33,8 +36,17 @@ import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
-import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT, SEP as CLAUDE_SEP, shWrap } from '../shared/claude'
-import { shQuote } from '../shared/tmux'
+import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
+import { SEP, shQuote, shWrap } from '../shared/shell'
+import {
+  DATA_MARK,
+  MAX_DIFF_BYTES,
+  MAX_REVIEW_FILES,
+  fileScript,
+  isSafeRelPath,
+  parsePorcelain,
+  reviewScript
+} from '../shared/git'
 
 // Native macOS fullscreen leaves a black bar above a frameless window and pushes
 // it into a separate Space; simple fullscreen covers the whole screen in place.
@@ -137,6 +149,25 @@ function kv(text: string): Map<string, string> {
   return map
 }
 
+/**
+ * Turn one side of a diff into something the pane can render, or an explanation
+ * of why it cannot.
+ *
+ * `bytes` is null when the side does not exist at all — a deletion has no work
+ * side, an addition has no base side — which is the case a blank editor would
+ * misdescribe as "an empty file".
+ *
+ * Binary is git's own test: a NUL byte anywhere in the first 8000. It is a
+ * heuristic and it is the right one to copy, because the file the user is
+ * looking at was classified by git with that exact rule.
+ */
+function sideOf(buf: Buffer, bytes: number | null): GitBlob {
+  if (bytes === null) return { text: '', note: 'absent' }
+  if (bytes > MAX_DIFF_BYTES) return { text: '', note: 'too-large', bytes }
+  if (buf.subarray(0, 8000).includes(0)) return { text: '', note: 'binary', bytes }
+  return { text: buf.toString('utf-8'), bytes }
+}
+
 // One-shot probe for the Claude Code CLI on a host: which binary the launch will
 // actually run, what version it is, and whether it is signed in.
 //
@@ -181,8 +212,8 @@ const CLAUDE_PROBE = [
   'echo "end=1"'
   // `'; '`, not a newline, and for a reason worth knowing: shWrap single-quotes
   // this for a possibly-csh login shell, and csh cannot carry a single-quoted
-  // word across a line break. See SEP in shared/claude.ts.
-].join(CLAUDE_SEP)
+  // word across a line break. See SEP in shared/shell.ts.
+].join(SEP)
 
 function parseProbe(text: string): ServerStats {
   const map = kv(text)
@@ -768,7 +799,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
       const started = Date.now()
-      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}${CLAUDE_SEP}${CLAUDE_PROBE}`
+      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}${SEP}${CLAUDE_PROBE}`
       const res = await ssh.exec(connection, {
         command: shWrap(script),
         password: passwordFor(args.connectionId, args.password),
@@ -801,6 +832,142 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         authMethod: /^[A-Za-z0-9_.@:+-]{1,32}$/.test(method) ? method : undefined,
         credsFile: m.get('creds') === '1',
         probeMs: Date.now() - started
+      }
+    }
+  )
+
+  // ---- git review ----
+
+  /**
+   * Run one review command over the connection's pooled SFTP client.
+   *
+   * Both handlers below bracket their own openSftp/closeSftp, exactly as
+   * withClaudeSettings does. The ref-counted pool means a connection whose file
+   * manager is already open pays nothing for this, and one whose isn't keeps the
+   * channel warm for the 30s grace — long enough that clicking through a list of
+   * files is a single connection's worth of work either way.
+   */
+  const gitExec = async (
+    connectionId: string,
+    password: string | undefined,
+    script: string,
+    maxBytes: number
+  ): Promise<Buffer> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    let opened = false
+    try {
+      await ssh.openSftp(connectionId, connection, passwordFor(connectionId, password), undefined, 30000)
+      opened = true
+      const res = await ssh.execOnPooled(connectionId, shWrap(script), {
+        deadlineMs: 30000,
+        maxBytes
+      })
+      return res.stdout
+    } finally {
+      if (opened) ssh.closeSftp(connectionId)
+    }
+  }
+
+  /** What the review script's `err=` values mean, in words a panel can show. */
+  const GIT_ERRORS: Record<string, string> = {
+    nodir: 'That directory no longer exists on the server.',
+    nogit: 'git is not installed on this server.',
+    norepo: 'That directory is not inside a git repository.'
+  }
+
+  ipcMain.handle(
+    'git:review',
+    async (_e, args: { connectionId: string; dir: string; password?: string }): Promise<GitReview> => {
+      if (!args.dir.startsWith('/')) throw new Error('Directory must be an absolute path')
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        reviewScript(args.dir),
+        // Each record is a status pair plus a path; 4 KB per record is generous
+        // against a 4096-byte path cap and still bounded.
+        MAX_REVIEW_FILES * 4096 + 65536
+      )
+      const text = out.toString('utf-8')
+      const m = kv(text)
+      const err = m.get('err')
+      if (err) throw new Error(GIT_ERRORS[err] ?? 'Could not read the repository.')
+      if (m.get('end') !== '1') throw new Error('git status did not complete')
+      const root = m.get('root') ?? ''
+      if (!root.startsWith('/')) throw new Error('Could not locate the repository root')
+      // Sliced, not trimmed: a path may legitimately end in a space, and
+      // core.quotePath leaves that one unescaped because a space is printable.
+      const records = text
+        .split('\n')
+        .filter((l) => l.startsWith('f='))
+        .map((l) => l.slice(2).replace(/\r$/, ''))
+      const base = m.get('base') ?? ''
+      return {
+        root,
+        branch: m.get('branch') ?? '',
+        base: /^[0-9a-f]{7,64}$/.test(base) ? base : '',
+        files: parsePorcelain(records.slice(0, MAX_REVIEW_FILES)),
+        truncated: records.length > MAX_REVIEW_FILES
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'git:file',
+    async (
+      _e,
+      args: {
+        connectionId: string
+        root: string
+        base: string
+        path: string
+        /**
+         * Where to read the base side from, when that differs from `path` — i.e.
+         * a rename. Without it a renamed file diffs against nothing at the base
+         * and reads as a wholly new file, hiding whatever the rename also changed.
+         */
+        basePath?: string
+        password?: string
+      }
+    ): Promise<GitFileDiff> => {
+      if (!args.root.startsWith('/')) throw new Error('Repository root must be an absolute path')
+      // Both paths are interpolated into `cat` and into a `<rev>:<path>` object
+      // spec rooted at the repo, so `..` would read outside the tree under review.
+      if (!isSafeRelPath(args.path)) throw new Error('Unsupported file path')
+      const basePath = args.basePath || args.path
+      if (!isSafeRelPath(basePath)) throw new Error('Unsupported file path')
+      // Empty base is legitimate — an untracked file, or a repo with no commits —
+      // and means "no base side". Anything else must be a bare SHA: it reaches
+      // git as a revision, where `--upload-pack=…` and friends are options.
+      if (args.base && !/^[0-9a-f]{7,64}$/.test(args.base)) throw new Error('Invalid base revision')
+      const spec = args.base ? `${args.base}:${basePath}` : null
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        fileScript(args.root, spec, args.path),
+        MAX_DIFF_BYTES * 2 + 65536
+      )
+      const split = out.indexOf(DATA_MARK)
+      if (split < 0) throw new Error('File read did not complete')
+      const header = kv(out.subarray(0, split + 1).toString('utf-8'))
+      const headerErr = header.get('err')
+      if (headerErr) throw new Error(GIT_ERRORS[headerErr] ?? 'Could not read the file.')
+      if (header.get('end') !== '1') throw new Error('File read did not complete')
+      const payload = out.subarray(split + DATA_MARK.length)
+      const size = (k: string): number | null => {
+        const v = header.get(k) ?? ''
+        return /^\d{1,12}$/.test(v) ? Number(v) : null
+      }
+      const baseBytes = size('baseBytes')
+      const workBytes = size('workBytes')
+      // The base side is sliced by its exact `cat-file -s` count — a git object
+      // cannot change under us. The work side is whatever remains, and is NOT
+      // sliced by its own count: the agent may be writing that file right now, so
+      // a length measured a moment earlier would put the split in the wrong place.
+      const baseLen = baseBytes !== null && baseBytes <= MAX_DIFF_BYTES ? baseBytes : 0
+      return {
+        base: sideOf(payload.subarray(0, baseLen), baseBytes),
+        work: sideOf(payload.subarray(baseLen), workBytes)
       }
     }
   )
