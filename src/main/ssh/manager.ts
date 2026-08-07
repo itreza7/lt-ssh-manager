@@ -826,12 +826,36 @@ export class SshManager extends EventEmitter {
       }
       if (posix) return await posix
 
-      // Plain SFTP rename fails outright when the destination exists, so the old
-      // file has to go first. That leaves a window where neither name resolves —
-      // still strictly better than a truncated file, since the new contents are
-      // already fully written and one rename away.
-      await new Promise<void>((res) => sftp.unlink(p, () => res()))
-      await new Promise<void>((res, rej) => sftp.rename(tmp, p, (e) => (e ? rej(e) : res())))
+      // Plain SFTP rename refuses an existing destination — SFTPv3 RENAME has no
+      // overwrite flag — so the old file has to move first. It moves *aside*
+      // rather than away: unlinking it means a link dropped between the two calls
+      // destroys the user's settings outright, which is strictly worse than the
+      // truncation this function exists to prevent. A rename leaves the bytes
+      // readable under some name at every instant, and lets a failed second
+      // rename put them back.
+      const aside = `${p}.${randomUUID().slice(0, 8)}.bak`
+      let moved = false
+      await new Promise<void>((res) =>
+        sftp.rename(p, aside, (e) => {
+          moved = !e // failing here is usually "no file yet", which is fine
+          res()
+        })
+      )
+      try {
+        await new Promise<void>((res, rej) => sftp.rename(tmp, p, (e) => (e ? rej(e) : res())))
+      } catch (e) {
+        if (moved) {
+          const back = await new Promise<boolean>((res) => sftp.rename(aside, p, (e2) => res(!e2)))
+          // Both renames failed and there is nothing left to try. Say where the
+          // old contents went — otherwise, to the user, they are simply gone.
+          if (!back) {
+            const why = e instanceof Error ? e.message : String(e)
+            throw new Error(`${why} — previous contents left at ${aside}`)
+          }
+        }
+        throw e
+      }
+      if (moved) await new Promise<void>((res) => sftp.unlink(aside, () => res()))
     } catch (e) {
       await new Promise<void>((res) => sftp.unlink(tmp, () => res()))
       throw e

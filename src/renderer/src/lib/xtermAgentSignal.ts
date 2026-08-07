@@ -32,8 +32,13 @@ export interface AgentSignal {
  * allowed to be megabytes long by the parser.
  */
 function clean(raw: string): string {
+  // Slice before scrubbing, not after. xterm hands the handler payloads up to
+  // 10MB (it only discards past that), so running the regex over the whole
+  // thing lets any host stall the renderer thread once per signal — in a loop,
+  // for as long as it likes. The 2x headroom is so a payload padded with
+  // control characters still fills the cap once they're gone.
   // eslint-disable-next-line no-control-regex
-  return raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, TEXT_MAX)
+  return raw.slice(0, TEXT_MAX * 2).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, TEXT_MAX)
 }
 
 /**
@@ -66,8 +71,10 @@ function clean(raw: string): string {
  * boundaries, which ByteBatcher can do.
  *
  * A tmux client on a real tty is the opposite case: tmux parses the wrapper
- * itself and drops it unless the server has `allow-passthrough` on, which has
- * been off by default since tmux 3.3. That is why the hook we install pairs the
+ * itself and drops it unless the server has `allow-passthrough all`, which has
+ * been off by default since tmux 3.3. `all` and not `on`: `on` refuses to write
+ * to a pane whose window isn't the attached client's current one, which is
+ * exactly the background agent this feature exists for. That is why we pair the
  * wrapped OSC with a plain BEL (see main/claudeHooks.ts) — the bell is what
  * survives a stock tmux, and it lands here as a `bell` signal.
  *
@@ -89,7 +96,15 @@ export function attachAgentSignal(term: XTerm, onSignal: (s: AgentSignal) => voi
     return false
   })
 
+  // ConEmu's progress protocol shares this id, and Windows Terminal, PowerShell
+  // and a growing number of build tools emit it: `OSC 9 ; 4 ; <state> ; <pct>`
+  // for a progress bar, `OSC 9 ; 9 ; <cwd>` for the working directory. Neither
+  // is a message, and without this guard a build running on the far side pops a
+  // desktop notification reading "4;1;50". iTerm2's notification form is free
+  // text, so only the two known sub-command prefixes are turned away — a general
+  // "starts with a digit" test would eat real messages.
   const off9 = term.parser.registerOscHandler(9, (data) => {
+    if (/^[49];/.test(data)) return false
     const body = clean(data)
     if (body) onSignal({ kind: 'message', title: '', body })
     return false

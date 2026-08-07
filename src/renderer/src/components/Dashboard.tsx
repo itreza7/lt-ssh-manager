@@ -104,6 +104,9 @@ function IconButton({
   )
 }
 
+/** Add to `~/.tmux.conf`, or run against a live server as `tmux set -g …`. */
+const TMUX_PASSTHROUGH = 'set -g allow-passthrough all'
+
 /** A remote file's contents, verbatim — what we read, or what we're about to write. */
 function JsonBlock({ label, body, tone }: { label: string; body: string; tone?: 'signal' | 'danger' }) {
   const edge = tone === 'signal' ? 'border-signal/30' : tone === 'danger' ? 'border-danger/30' : 'border-line'
@@ -168,6 +171,7 @@ export function Dashboard({
   const [hookError, setHookError] = useState<string | null>(null)
   const [hookAction, setHookAction] = useState<'install' | 'uninstall' | null>(null)
   const [hookBusy, setHookBusy] = useState(false)
+  const [passCopied, setPassCopied] = useState(false)
 
   const loadTmux = useCallback(async () => {
     setTmuxLoading(true)
@@ -574,11 +578,32 @@ export function Dashboard({
             </div>
           </div>
 
-          <p className="mt-3 border-t border-line-soft pt-3 text-[12px] leading-relaxed text-faint">
-            Under tmux you get the tab dot, but not the notification text: tmux drops the sequence carrying it unless
-            the server has <span className="font-mono">set -g allow-passthrough all</span> — off by default since tmux
-            3.3. Control mode (<span className="font-mono">tmux -CC</span>) tabs and plain shells are unaffected.
-          </p>
+          <div className="mt-3 border-t border-line-soft pt-3">
+            <p className="text-[12px] leading-relaxed text-faint">
+              Under tmux you get the tab dot, but not the notification text: tmux drops the sequence carrying it
+              unless the server allows passthrough — off by default since tmux 3.3. Control mode (
+              <span className="font-mono">tmux -CC</span>) tabs and plain shells are unaffected.
+            </p>
+            {/* Copied rather than applied for you. allow-passthrough is a tmux
+                *server* option: it changes every session and every client on the
+                host, and the Uninstall above could never honestly take it back,
+                since we can't know whether you'd set it yourself. The dot works
+                without it — only the notification text is at stake. */}
+            <div className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md border border-line bg-ink/60 px-2 py-1 font-mono text-[11px] text-fg/70">
+                {TMUX_PASSTHROUGH}
+              </code>
+              <Button
+                onClick={() => {
+                  void navigator.clipboard.writeText(TMUX_PASSTHROUGH)
+                  setPassCopied(true)
+                  window.setTimeout(() => setPassCopied(false), 1500)
+                }}
+              >
+                {passCopied ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+          </div>
         </div>
 
         {/* details */}
