@@ -170,6 +170,20 @@ export interface ServerStats {
 
 export type CursorStyle = 'block' | 'bar' | 'underline'
 
+/**
+ * What Shift+Enter sends. xterm gives it the same plain CR as Enter, so a CLI
+ * that wants a newline *within* a prompt — Claude Code and other terminal
+ * agents — can't tell the two apart and submits early. Terminals that support
+ * this disagree on the encoding, so it's a choice:
+ * - `newline`: LF (0x0a), i.e. what Ctrl+J sends. Works with no remote setup and
+ *   is read as a line break by such tools; a plain shell accepts it exactly like
+ *   Enter, so it's safe everywhere. The default.
+ * - `escape-cr`: ESC CR, what iTerm2/VS Code emit once configured. Pick it if
+ *   the remote program expects that encoding specifically.
+ * - `submit`: don't intercept — Shift+Enter submits, as it did before 0.3.0.
+ */
+export type ShiftEnterMode = 'newline' | 'escape-cr' | 'submit'
+
 export interface TerminalSettings {
   fontFamily: string // id from the renderer's font list (see lib/terminalSettings)
   fontSize: number
@@ -185,6 +199,15 @@ export interface TerminalSettings {
    * it changes.
    */
   overscroll: number
+  /** How Shift+Enter is encoded — see ShiftEnterMode. */
+  shiftEnter: ShiftEnterMode
+  /**
+   * Let a session's tab take the window title the remote sets (OSC 0/2) while
+   * one is set, instead of always showing the connection name. Shells report the
+   * working directory or running command that way, and a terminal agent reports
+   * what it's working on — which is what you want to read off a background tab.
+   */
+  liveTitles: boolean
 }
 
 export interface EditorSettings {
@@ -229,7 +252,11 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   // battery draw in the app. Turn it back on in Settings if you prefer it.
   cursorBlink: false,
   scrollback: 1000,
-  overscroll: 1
+  overscroll: 1,
+  // Newline rather than submit: it costs a plain shell nothing (which accepts LF
+  // as Enter) and it's what lets a terminal agent take a multi-line prompt.
+  shiftEnter: 'newline',
+  liveTitles: true
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {

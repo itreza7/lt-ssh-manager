@@ -8,7 +8,7 @@ import type {
   TmuxWindowInfo
 } from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
-import { attachTerminalClipboard } from '../lib/xtermClipboard'
+import { attachTerminal } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { ReattachBanner } from './ReattachBanner'
@@ -433,12 +433,18 @@ function TmuxPane({
   useEffect(() => {
     const { term } = createTerminal(settingsRef.current, containerRef.current!)
     termRef.current = term
-    term.onData((d) => window.api.tmuxSendKeys(sessionId, paneId, d))
-    const detachClipboard = attachTerminalClipboard(term, containerRef.current!)
+    const send = (d: string): void => window.api.tmuxSendKeys(sessionId, paneId, d)
+    term.onData(send)
+    // No onTitle: a control-mode tab holds many panes, and tmux reports window
+    // names itself (%window-renamed) — the window bar above already shows them.
+    const detachTerminal = attachTerminal(term, containerRef.current!, {
+      sendData: send,
+      settings: () => settingsRef.current
+    })
     const unregister = register(paneId, (data) => term.write(data))
     return () => {
       unregister()
-      detachClipboard()
+      detachTerminal()
       term.dispose()
       termRef.current = null
     }

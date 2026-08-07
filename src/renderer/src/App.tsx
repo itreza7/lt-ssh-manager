@@ -41,6 +41,13 @@ interface SessionTab {
   id: string // sessionId
   connectionId: string
   title: string
+  /**
+   * Window title the remote is currently reporting (OSC 0/2). Display-only and
+   * deliberately *not* serialized: `title` is what the user/connection named the
+   * tab, so a restored tab never comes back labelled with whatever happened to
+   * be running last session.
+   */
+  liveTitle?: string
   status: SessionStatus
   password?: string
   command?: string
@@ -243,7 +250,13 @@ export default function App() {
   // --- view / pane helpers ---------------------------------------------------
 
   const leafLabel = (t: Tab): string =>
-    t.kind === 'dashboard' ? nameOf(t.connectionId) : t.kind === 'settings' ? 'Settings' : t.title
+    t.kind === 'dashboard'
+      ? nameOf(t.connectionId)
+      : t.kind === 'settings'
+        ? 'Settings'
+        : t.kind === 'session' && appSettings.terminal.liveTitles && t.liveTitle
+          ? t.liveTitle
+          : t.title
 
   const leafIcon = (t: Tab, lit: boolean): ReactNode => {
     const c = lit ? 'text-signal' : 'text-faint'
@@ -967,6 +980,17 @@ export default function App() {
     )
   }
 
+  // A shell re-sets its title on every prompt, so bail out on an unchanged one:
+  // returning the same array lets React skip the render entirely.
+  const onTitle = (sessionId: string, title: string): void => {
+    const next = title || undefined
+    setTabs((t) => {
+      const cur = t.find((x) => x.id === sessionId)
+      if (!cur || cur.kind !== 'session' || cur.liveTitle === next) return t
+      return t.map((x) => (x.id === sessionId ? { ...x, liveTitle: next } : x))
+    })
+  }
+
   const saveConnection = async (draft: ConnectionDraft): Promise<void> => {
     await window.api.upsertConnection(draft)
     setDialogConn(undefined)
@@ -1155,6 +1179,7 @@ export default function App() {
                   retries={appSettings.connectRetries}
                   settings={appSettings.terminal}
                   onStatus={onStatus}
+                  onTitle={onTitle}
                 />
                 {paneTools(tab.id)}
               </div>

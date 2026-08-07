@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { AppSettings, CursorStyle, SettingsPatch } from '../lib/terminalSettings'
+import type { AppSettings, CursorStyle, SettingsPatch, ShiftEnterMode } from '../lib/terminalSettings'
 import {
   clampFont,
   clampOverscroll,
@@ -40,6 +40,19 @@ const CURSORS: { value: CursorStyle; label: string }[] = [
   { value: 'block', label: 'Block' },
   { value: 'underline', label: 'Underline' }
 ]
+
+const SHIFT_ENTERS: { value: ShiftEnterMode; label: string }[] = [
+  { value: 'newline', label: 'Newline' },
+  { value: 'escape-cr', label: 'Esc+Enter' },
+  { value: 'submit', label: 'Submit' }
+]
+
+/** What Shift+Enter actually does right now — the setting above decides. */
+const SHIFT_ENTER_HELP: Record<ShiftEnterMode, string> = {
+  newline: 'Newline inside the prompt (LF) — Enter still submits',
+  'escape-cr': 'Newline as Esc+Enter — for programs expecting that encoding',
+  submit: 'Submits, same as Enter'
+}
 
 const KEYS: { keys: string; what: string }[] = isMac
   ? [
@@ -90,7 +103,15 @@ function Stepper({ value, min, max, onChange }: { value: number; min: number; ma
   )
 }
 
-function Segmented({ value, options, onChange }: { value: CursorStyle; options: typeof CURSORS; onChange: (v: CursorStyle) => void }) {
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange
+}: {
+  value: T
+  options: readonly { value: T; label: string }[]
+  onChange: (v: T) => void
+}) {
   return (
     <div className="flex rounded-lg border border-line p-0.5">
       {options.map((o) => (
@@ -250,6 +271,18 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                     />
                   </Row>
                   <Row
+                    label="Shift+Enter sends"
+                    hint="Newline lets a terminal agent take a multi-line prompt; a plain shell reads it as Enter either way. Esc+Enter is what iTerm2/VS Code send. Submit is the pre-0.3 behavior."
+                  >
+                    <Segmented value={t.shiftEnter} options={SHIFT_ENTERS} onChange={(v) => setT({ shiftEnter: v })} />
+                  </Row>
+                  <Row
+                    label="Live tab titles"
+                    hint="Label a session tab with the title the remote sets — the working directory, or what's running — instead of the connection name."
+                  >
+                    <Toggle on={t.liveTitles} onChange={(b) => setT({ liveTitles: b })} />
+                  </Row>
+                  <Row
                     label="Overscroll height"
                     hint="Render the terminal this many × taller than the window so you can scroll long output — including tmux — with the scrollbar/wheel. 1 = off."
                   >
@@ -345,6 +378,15 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                     <span className="text-right text-muted">{k.what}</span>
                   </div>
                 ))}
+                <div className="eyebrow py-2 pt-4">Typing</div>
+                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-signal">Shift+Enter</span>
+                  <span className="text-right text-muted">{SHIFT_ENTER_HELP[t.shiftEnter]}</span>
+                </div>
+                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-signal">Ctrl+J</span>
+                  <span className="text-right text-muted">Newline — always, whatever Shift+Enter is set to</span>
+                </div>
               </div>
             )}
           </div>
