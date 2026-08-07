@@ -11,6 +11,8 @@ import type { TerminalSettings } from '../lib/terminalSettings'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
+import { useDropUpload } from '../lib/useDropUpload'
+import { DropHint, DropStatusBar } from './DropUploadLayer'
 import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 
@@ -127,6 +129,35 @@ export function TmuxControlView({
   const closeComposer = useCallback((paneId: string | null) => {
     setTarget(null)
     if (paneId) writers.current.get(paneId)?.term.focus()
+  }, [])
+
+  // Drop-to-upload. The status is per tab (one batch at a time), but the hover
+  // affordance is per pane — a tab can show four terminals at once and "drop
+  // here" has to mean one of them. Behind a ref because each pane's mount-once
+  // effect captures these and would otherwise pin the closures from mount.
+  const upload = useDropUpload(connectionId, password)
+  const uploadRef = useRef(upload)
+  uploadRef.current = upload
+  const [overPane, setOverPane] = useState<string | null>(null)
+
+  const onPaneDragFiles = useCallback((paneId: string, over: boolean) => {
+    // Guarded on identity: leaving pane A after entering pane B arrives out of
+    // order often enough to clear the wrong one.
+    setOverPane((cur) => (over ? paneId : cur === paneId ? null : cur))
+  }, [])
+
+  const onPaneDropFiles = useCallback(
+    (paneId: string, paths: string[]) => {
+      // A drop fires no mousedown, so nothing else tells tmux which pane the
+      // user just aimed at — and the path is about to be typed into it.
+      window.api.tmuxSelectPane(sessionId, paneId)
+      uploadRef.current.drop(paths, writers.current.get(paneId)?.term ?? null)
+    },
+    [sessionId]
+  )
+
+  const onPanePasteImage = useCallback((paneId: string) => {
+    uploadRef.current.pasteImage(writers.current.get(paneId)?.term ?? null)
   }, [])
 
   // Measure the pane area, convert to a tmux cell grid, and push it as this
@@ -399,7 +430,7 @@ export function TmuxControlView({
               }}
             >
               <div
-                className={`h-full w-full overflow-hidden rounded-sm ring-1 ${
+                className={`relative h-full w-full overflow-hidden rounded-sm ring-1 ${
                   isActivePane ? 'ring-signal/70' : 'ring-line/50'
                 }`}
               >
@@ -414,8 +445,12 @@ export function TmuxControlView({
                   settings={settings}
                   register={registerPane}
                   onCompose={openComposer}
+                  onDragFiles={onPaneDragFiles}
+                  onDropFiles={onPaneDropFiles}
+                  onPasteImage={onPanePasteImage}
                   onSelect={() => window.api.tmuxSelectPane(sessionId, pane.paneId)}
                 />
+                {overPane === pane.paneId && <DropHint />}
               </div>
             </div>
           )
@@ -427,6 +462,7 @@ export function TmuxControlView({
           </div>
         )}
         {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
+        <DropStatusBar status={upload.status} onDismiss={upload.dismiss} />
         {/* Inside the pane area and overlaid on it. Docking it below would shrink
             areaRef, and this view turns that box straight into the tmux client
             size — every other client attached to the session would see the
@@ -509,6 +545,9 @@ function TmuxPane({
   settings,
   register,
   onCompose,
+  onDragFiles,
+  onDropFiles,
+  onPasteImage,
   onSelect
 }: {
   sessionId: string
@@ -520,6 +559,12 @@ function TmuxPane({
   register: (paneId: string, handle: PaneHandle) => () => void
   /** Stable across renders — the mount-once effect closes over it. */
   onCompose: (paneId: string) => void
+  /** Stable across renders, as above. */
+  onDragFiles: (paneId: string, over: boolean) => void
+  /** Stable across renders, as above. */
+  onDropFiles: (paneId: string, paths: string[]) => void
+  /** Stable across renders, as above. */
+  onPasteImage: (paneId: string) => void
   onSelect: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -538,7 +583,10 @@ function TmuxPane({
     const detachTerminal = attachTerminal(term, containerRef.current!, {
       sendData: send,
       settings: () => settingsRef.current,
-      onCompose: () => onCompose(paneId)
+      onCompose: () => onCompose(paneId),
+      onDragFiles: (over) => onDragFiles(paneId, over),
+      onDropFiles: (paths) => onDropFiles(paneId, paths),
+      onPasteImage: () => onPasteImage(paneId)
     })
     const unregister = register(paneId, { write: (data) => term.write(data), term })
     return () => {

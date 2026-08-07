@@ -712,6 +712,33 @@ export class SshManager extends EventEmitter {
     return new Promise((res, rej) => sftp.mkdir(p, (e) => (e ? rej(e) : res())))
   }
 
+  /**
+   * `mkdir -p` with a mode: create every missing parent, and treat "it's already
+   * there" as success. SFTP has no recursive mkdir, so this walks the path.
+   *
+   * Already-exists is the *normal* case for a staging directory, not an error,
+   * and it can't be detected from the status code alone — servers disagree on
+   * whether EEXIST is FAILURE or PERMISSION_DENIED — so a failed mkdir is
+   * re-checked with a stat and only rejected when there's really no directory
+   * there. The mode is set at creation rather than chmod'd afterwards: a chmod
+   * leaves a window where the directory exists group/world-readable.
+   */
+  async sftpEnsureDir(id: string, p: string, mode?: number): Promise<void> {
+    const sftp = this.sftpOf(id)
+    const attrs = mode === undefined ? {} : { mode }
+    let cur = p.startsWith('/') ? '' : '.'
+    for (const part of p.split('/').filter(Boolean)) {
+      cur = `${cur}/${part}`
+      const at = cur
+      await new Promise<void>((res, rej) =>
+        sftp.mkdir(at, attrs, (e) => {
+          if (!e) return res()
+          sftp.stat(at, (se, st) => (!se && st.isDirectory() ? res() : rej(e)))
+        })
+      )
+    }
+  }
+
   sftpRename(id: string, from: string, to: string): Promise<void> {
     const sftp = this.sftpOf(id)
     return new Promise((res, rej) => sftp.rename(from, to, (e) => (e ? rej(e) : res())))
@@ -801,7 +828,20 @@ export class SshManager extends EventEmitter {
     })
   }
 
-  sftpUpload(id: string, local: string, remote: string, transferId: string, name: string): Promise<void> {
+  /**
+   * `mode` sets the remote file's permissions as it is created. Left undefined
+   * the server applies the account's umask, which is right for a file the user
+   * dropped into a directory they chose; staged uploads pass it explicitly so
+   * the file is never briefly readable by everyone on a shared host.
+   */
+  sftpUpload(
+    id: string,
+    local: string,
+    remote: string,
+    transferId: string,
+    name: string,
+    mode?: number
+  ): Promise<void> {
     const sftp = this.sftpOf(id)
     return new Promise((res, rej) => {
       let last = 0
@@ -809,6 +849,7 @@ export class SshManager extends EventEmitter {
         local,
         remote,
         {
+          ...(mode === undefined ? {} : { mode }),
           step: (transferred: number, _chunk: number, total: number) => {
             const now = Date.now()
             if (now - last > 100 || transferred >= total) {

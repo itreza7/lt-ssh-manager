@@ -31,6 +31,17 @@ export interface TerminalAttachOptions {
    * is owned here; the caller owns the drafting UI and what it sends.
    */
   onCompose?: () => void
+  /**
+   * OS files are hovering over this terminal (`true`), or have left it / been
+   * dropped (`false`). Only the hover state is reported — the caller draws
+   * whatever affordance it likes. The app's own drags (tabs, which carry
+   * `text/plain`) never trigger this.
+   */
+  onDragFiles?: (over: boolean) => void
+  /** OS files were dropped on this terminal, as absolute local paths. */
+  onDropFiles?: (paths: string[]) => void
+  /** The image-paste chord was pressed (see IMAGE_PASTE_ACCEL). */
+  onPasteImage?: () => void
 }
 
 /** Longest remote-set title we'll surface — a tab is not a billboard. */
@@ -45,6 +56,17 @@ const TITLE_MAX = 80
  * (copy and paste live there).
  */
 export const COMPOSE_ACCEL = isMac ? fmtAccel('Cmd+Enter') : 'Ctrl+Shift+Enter'
+
+/**
+ * The chord that uploads the clipboard's image and puts its remote path on the
+ * line — screenshot to a terminal agent in one gesture.
+ *
+ * ⌘⇧V on macOS, where ⌘V is the OS text paste and xterm already owns it. On
+ * Windows/Linux Ctrl+Shift+V is *this app's* text paste, so the image chord
+ * moves one key over rather than breaking paste for anyone who happens to have
+ * an image on the clipboard.
+ */
+export const IMAGE_PASTE_ACCEL = isMac ? fmtAccel('Cmd+Shift+V') : 'Ctrl+Shift+U'
 
 const isComposeChord = (e: KeyboardEvent): boolean =>
   isMac
@@ -69,6 +91,28 @@ const isComposeChord = (e: KeyboardEvent): boolean =>
 export function sendComposed(term: XTerm, body: string, submit = true): void {
   term.paste(body)
   if (submit) term.input('\r')
+}
+
+/**
+ * Put a remote path on the terminal's input line, with one trailing space and
+ * never a carriage return.
+ *
+ * The no-CR rule is the contract, not a detail. This is called by a *drop*, and
+ * dropping a file is not a decision to run anything — the path lands where the
+ * cursor is and the user decides what to do with it. xterm's paste path rewrites
+ * `\n` to `\r` before the bytes reach the wire, so a single newline anywhere in
+ * the string would submit whatever is on the line; control characters are
+ * therefore stripped here rather than trusted from the caller, because the
+ * guarantee belongs next to the thing that would break it.
+ *
+ * The trailing space is what makes several dropped files read as several
+ * arguments, and it's safe under both bracketed-paste states: a lone space is
+ * inert text either way.
+ */
+export function injectPath(term: XTerm, path: string): void {
+  // eslint-disable-next-line no-control-regex
+  const clean = path.replace(/[\u0000-\u001f\u007f]/g, '')
+  if (clean) term.paste(`${clean} `)
 }
 
 /**
@@ -152,6 +196,20 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
       opts.sendData(mode === 'escape-cr' ? '\x1b\r' : '\n')
       return false
     }
+    // Image paste — see IMAGE_PASTE_ACCEL. Claimed ahead of the copy/paste
+    // branches below, which share its modifier prefix on both platforms.
+    // preventDefault matters on macOS: ⌘⇧V is Chromium's paste-as-plain-text, so
+    // without it the clipboard's *text* would also land on the line.
+    if (
+      opts.onPasteImage &&
+      (isMac
+        ? e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && k === 'v'
+        : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && k === 'u')
+    ) {
+      e.preventDefault()
+      opts.onPasteImage()
+      return false
+    }
     // Explicit copy: ⌘C on macOS, Ctrl+Shift+C elsewhere (bare Ctrl+C is SIGINT).
     const copyChord = isMac ? e.metaKey && !e.shiftKey && k === 'c' : e.ctrlKey && e.shiftKey && k === 'c'
     if (copyChord) {
@@ -189,12 +247,62 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
       paste()
     }
   }
+  // OS file drops. Both handlers below run whether or not the caller wants the
+  // files, and that is the point: Chromium's default action for an unhandled
+  // file drop is to *navigate* the window to `file:///…`, which unmounts the
+  // React tree and kills every live session in the app. Swallowing it here is
+  // the near end of the same rule the main process enforces on `will-navigate`.
+  //
+  // `dataTransfer.files` is empty during a drag — only `types` is readable —
+  // which is also what keeps the app's own tab drags (they carry `text/plain`)
+  // from lighting up a drop affordance.
+  const hasFiles = (e: DragEvent): boolean => !!e.dataTransfer?.types.includes('Files')
+  // dragenter/dragleave fire again for every child element the pointer crosses,
+  // and xterm's host is several nested layers, so count them instead of toggling
+  // — otherwise the affordance strobes as the pointer moves across the pane.
+  let depth = 0
+  const setOver = (v: boolean): void => {
+    depth = v ? depth : 0
+    opts.onDragFiles?.(v)
+  }
+  const onDragEnter = (e: DragEvent): void => {
+    e.preventDefault()
+    if (!hasFiles(e)) return
+    if (++depth === 1) opts.onDragFiles?.(true)
+  }
+  const onDragOver = (e: DragEvent): void => {
+    e.preventDefault()
+    if (e.dataTransfer && hasFiles(e)) e.dataTransfer.dropEffect = 'copy'
+  }
+  const onDragLeave = (e: DragEvent): void => {
+    if (!hasFiles(e)) return
+    if (--depth <= 0) setOver(false)
+  }
+  const onDrop = (e: DragEvent): void => {
+    e.preventDefault()
+    setOver(false)
+    if (!opts.onDropFiles) return
+    // Electron 33 removed File.path; the preload resolves it via webUtils.
+    const paths = Array.from(e.dataTransfer?.files ?? [])
+      .map((f) => window.api.pathForFile(f))
+      .filter((p): p is string => !!p)
+    if (paths.length) opts.onDropFiles(paths)
+  }
+
   el.addEventListener('contextmenu', onContextMenu)
   el.addEventListener('mousedown', onMouseDown)
+  el.addEventListener('dragenter', onDragEnter)
+  el.addEventListener('dragover', onDragOver)
+  el.addEventListener('dragleave', onDragLeave)
+  el.addEventListener('drop', onDrop)
 
   return () => {
     el.removeEventListener('contextmenu', onContextMenu)
     el.removeEventListener('mousedown', onMouseDown)
+    el.removeEventListener('dragenter', onDragEnter)
+    el.removeEventListener('dragover', onDragOver)
+    el.removeEventListener('dragleave', onDragLeave)
+    el.removeEventListener('drop', onDrop)
     offSelection.dispose()
     offTitle?.dispose()
     offOsc52.dispose()

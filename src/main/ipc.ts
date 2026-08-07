@@ -1,12 +1,15 @@
 // Wires the renderer <-> main bridge: connection CRUD, secrets, and SSH session
 // lifecycle. SSH events are pushed to the focused window via webContents.send.
-import { ipcMain, dialog, shell, BrowserWindow, type WebContents } from 'electron'
-import { basename } from 'node:path'
+import { app, ipcMain, clipboard, dialog, shell, BrowserWindow, type WebContents } from 'electron'
+import { basename, dirname, join, resolve } from 'node:path'
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import type {
   ConnectionDraft,
   ServerStats,
   SettingsPatch,
   SftpList,
+  StageResult,
   TmuxIntent,
   TmuxSession,
   TunnelDef,
@@ -33,6 +36,62 @@ const TMUX_LIST = `tmux list-sessions -F '#{session_name}|#{session_windows}|#{s
 
 /** Single-quote a value for safe interpolation into a remote shell command. */
 const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
+
+// ---- staged uploads (drop a file on a terminal) ----
+
+/**
+ * Where staged files land, under the SSH account's home directory.
+ *
+ * Home, not /tmp: on a shared host /tmp is world-writable, so another user can
+ * pre-create the directory we're about to use and read whatever gets dropped
+ * into it. The per-user temp dirs ($TMPDIR, $XDG_RUNTIME_DIR) aren't reachable
+ * over SFTP without a shell to expand them, and XDG_RUNTIME_DIR is destroyed at
+ * the user's last logout — which would delete files out from under a running
+ * agent. Home is readable, stable, and already the user's own space.
+ */
+const STAGE_DIR = '.lt-ssh-manager/uploads'
+/** Staging directories and the files in them are the dropping user's business only. */
+const STAGE_DIR_MODE = 0o700
+const STAGE_FILE_MODE = 0o600
+/** Largest file we'll stage. Anything bigger is a file-manager job, not a drop. */
+const MAX_STAGE_BYTES = 512 * 1024 * 1024
+
+/** Local scratch directory for clipboard images we materialize ourselves. */
+const pasteDir = (): string => join(app.getPath('temp'), 'lt-ssh-manager')
+
+/**
+ * Drop the clipboard images we materialized for this batch. The remote has them
+ * now, or never will — either way our scratch copies shouldn't outlive the drop,
+ * including when the batch dies before the upload loop runs at all. Never fatal:
+ * a scratch file we couldn't remove is no reason to fail a drop that worked.
+ */
+async function discardScratch(paths: string[]): Promise<void> {
+  const scratch = resolve(pasteDir())
+  for (const p of paths) {
+    if (dirname(resolve(p)) === scratch) await rm(p, { force: true }).catch(() => undefined)
+  }
+}
+
+/** Join two remote path segments (always `/`, never the host OS's separator). */
+const rjoin = (a: string, b: string): string => (a.endsWith('/') ? a + b : `${a}/${b}`)
+
+/**
+ * The name a file is staged under.
+ *
+ * The name ends up typed at the user's cursor, so it is restricted to characters
+ * that need no quoting at all — that way it is safe no matter what the terminal
+ * does with it, and it stays readable. (Only this segment is ours to pick; the
+ * directory prefix is whatever the server reports as home.) Control
+ * characters are the ones that actually bite: xterm rewrites a `\n` into the CR
+ * that submits the line, and no amount of shell quoting prevents that.
+ */
+function stageName(local: string): string {
+  const safe = basename(local)
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^[-.]+/, '_') // no leading dash (reads as a flag) and no dotfiles
+    .slice(0, 96)
+  return safe && safe !== '_' ? safe : 'file'
+}
 
 // One-shot host vitals probe. Emits `key=value` lines; everything degrades
 // gracefully (missing tools just yield empty fields). Linux-oriented.
@@ -371,6 +430,112 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       return { count: args.paths.length }
     }
   )
+
+  // Stage local files on the host so a terminal can point at them: upload into a
+  // private per-drop directory under the user's home, then hand back absolute
+  // remote paths. This is drop-to-upload's whole main-side story.
+  //
+  // Unlike the file-manager uploads above, this brackets the SFTP channel
+  // itself. Those free-ride on an open Files tab; a terminal tab has none, and
+  // `sftpOf` throws outright when the pool is empty. The `opened` flag is the
+  // load-bearing part: closing after a *failed* open would decrement a
+  // reference some other tab is holding and yank the channel out from under it.
+  ipcMain.handle(
+    'sftp:upload-to',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; paths: string[]; transferId: string }
+    ): Promise<StageResult> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+
+      const files: StageResult['files'] = []
+      const errors: StageResult['errors'] = []
+      let opened = false
+      try {
+        await ssh.openSftp(
+          args.connectionId,
+          connection,
+          passwordFor(args.connectionId, args.password),
+          undefined,
+          30000
+        )
+        opened = true
+
+        // A fresh directory per drop, so the same name dropped twice — or two
+        // files that slug to the same name — never overwrite each other.
+        const dir = rjoin(
+          rjoin(await ssh.sftpRealpath(args.connectionId, '.'), STAGE_DIR),
+          randomBytes(6).toString('hex')
+        )
+        await ssh.sftpEnsureDir(args.connectionId, dir, STAGE_DIR_MODE)
+
+        const taken = new Set<string>()
+        for (const local of args.paths) {
+          const label = basename(local)
+          // Reserve the `.part` scratch name alongside the final one. A batch
+          // holding both `report` and `report.part` would otherwise have the
+          // second file's upload land on the first one's already-staged bytes,
+          // and its cleanup delete a file the user was told had arrived.
+          let name = stageName(local)
+          for (let i = 2; taken.has(name) || taken.has(`${name}.part`); i++) {
+            name = `${i}_${stageName(local)}`
+          }
+          taken.add(name).add(`${name}.part`)
+          const remote = rjoin(dir, name)
+          const part = `${remote}.part`
+          try {
+            const st = await stat(local)
+            if (st.isDirectory()) {
+              throw new Error('Folders have to go through the Files tab.')
+            }
+            if (!st.isFile()) throw new Error('Not a regular file.')
+            if (st.size > MAX_STAGE_BYTES) {
+              throw new Error(
+                `Larger than the ${MAX_STAGE_BYTES / 1024 / 1024} MB drop limit — use the Files tab.`
+              )
+            }
+            // Upload under a `.part` name and rename once it lands. A path is
+            // only ever injected after all the bytes are there, so a command run
+            // against it can't read a half-written file — `fastPut` leaves the
+            // truncated remainder behind when it fails.
+            await ssh.sftpUpload(
+              args.connectionId,
+              local,
+              part,
+              `${args.transferId}:${name}`,
+              label,
+              STAGE_FILE_MODE
+            )
+            await ssh.sftpRename(args.connectionId, part, remote)
+            files.push({ name: label, path: remote })
+          } catch (e) {
+            errors.push({ name: label, error: e instanceof Error ? e.message : String(e) })
+            await ssh.sftpDelete(args.connectionId, part, false).catch(() => undefined)
+          }
+        }
+      } finally {
+        if (opened) ssh.closeSftp(args.connectionId)
+        await discardScratch(args.paths)
+      }
+      return { files, errors }
+    }
+  )
+
+  // Write the clipboard's image to a local PNG and return its path, for the
+  // caller to stage like any dropped file. In main on purpose: a NativeImage
+  // can't cross the context bridge, and pushing raw image bytes through the
+  // renderer just to hand them back would copy them through a process that has
+  // no reason to hold them. Null when the clipboard has no image — the usual case.
+  ipcMain.handle('clipboard:imageToTemp', async (): Promise<string | null> => {
+    const img = clipboard.readImage()
+    if (img.isEmpty()) return null
+    const dir = pasteDir()
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const file = join(dir, `paste-${randomBytes(6).toString('hex')}.png`)
+    await writeFile(file, img.toPNG(), { mode: 0o600 })
+    return file
+  })
 
   ipcMain.on('sftp:close', (_e, connectionId: string) => ssh.closeSftp(connectionId))
 

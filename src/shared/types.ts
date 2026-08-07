@@ -149,6 +149,28 @@ export interface TransferProgress {
   error?: string
 }
 
+/**
+ * Result of staging local files onto a host for a terminal to refer to
+ * (`sftp:upload-to`). Per-file, because a batch that half-succeeds should still
+ * hand back the paths that made it rather than throwing the lot away.
+ */
+export interface StagedUpload {
+  /** The original local basename, for the UI to name. */
+  name: string
+  /**
+   * The absolute remote path, for typing at the cursor. Only the last segment is
+   * ours — the directory prefix is the home the server reported, so on a host
+   * whose home has a space in it this is not a single shell word.
+   */
+  path: string
+}
+
+export interface StageResult {
+  files: StagedUpload[]
+  /** One entry per file that didn't make it; the rest still did. */
+  errors: { name: string; error: string }[]
+}
+
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */
 export interface ServerStats {
   hostname?: string
