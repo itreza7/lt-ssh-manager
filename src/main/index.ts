@@ -51,6 +51,16 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // Nothing in this app ever navigates — the UI is one React tree that lives for
+  // the life of the window — so any navigation is something going wrong, and the
+  // usual cause is a file dropped somewhere the renderer didn't handle it.
+  // Chromium's default for that is to load `file:///…` in place, which unmounts
+  // the app and takes every live SSH session with it. Same-URL navigations are
+  // let through so the dev server's reload still works.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== mainWindow?.webContents.getURL()) event.preventDefault()
+  })
+
   // Without a native menu we keep the useful accelerators ourselves.
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return

@@ -6,6 +6,8 @@ import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
+import { useDropUpload } from '../lib/useDropUpload'
+import { DropUploadLayer } from './DropUploadLayer'
 import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 
@@ -76,6 +78,13 @@ export function TerminalView({
   // Read by the focus effect, which must not re-run when the composer opens.
   const composingRef = useRef(false)
   composingRef.current = composing
+
+  // Drop-to-upload. Behind a ref for the same reason as the connect args: the
+  // mount-once effect below hands these to attachTerminal and would otherwise
+  // pin whichever closures existed at mount.
+  const upload = useDropUpload(connectionId, password)
+  const uploadRef = useRef(upload)
+  uploadRef.current = upload
 
   // Overscroll bookkeeping: whether the view is pinned to the bottom, and a
   // guard so our own programmatic scrolls don't read as the user scrolling away.
@@ -241,14 +250,17 @@ export function TerminalView({
     term.onData(send)
     const offRender = term.onRender(() => stickToBottom())
 
-    // Clipboard, Shift+Enter encoding, remote-set title, composer chord. `send`
-    // is shared with onData above so synthesized keys take the same path as
-    // typed ones.
+    // Clipboard, Shift+Enter encoding, remote-set title, composer chord, file
+    // drops. `send` is shared with onData above so synthesized keys take the
+    // same path as typed ones.
     const detachTerminal = attachTerminal(term, host, {
       sendData: send,
       settings: () => settingsRef.current,
       onTitle: (t) => onTitle?.(sessionId, t),
-      onCompose: openComposer
+      onCompose: openComposer,
+      onDragFiles: (o) => uploadRef.current.setOver(o),
+      onDropFiles: (paths) => uploadRef.current.drop(paths, termRef.current),
+      onPasteImage: () => uploadRef.current.pasteImage(termRef.current)
     })
 
     // Overscroll scroll plumbing. Let the browser scroll the outer host natively
@@ -458,6 +470,7 @@ export function TerminalView({
         </div>
       )}
       {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
+      <DropUploadLayer over={upload.over} status={upload.status} onDismiss={upload.dismiss} />
       {/* Overlaid on the terminal, never docked beside it: a sibling would change
           the scroll host's box, and the ResizeObserver above turns that into a PTY
           resize — under tmux, a reflow for every attached client. */}

@@ -20,7 +20,7 @@ import {
 import { Button } from './Modal'
 import { Select } from './Select'
 import { isMac } from '../lib/platform'
-import { COMPOSE_ACCEL } from '../lib/xtermAttach'
+import { COMPOSE_ACCEL, IMAGE_PASTE_ACCEL } from '../lib/xtermAttach'
 
 interface Props {
   settings: AppSettings
@@ -392,6 +392,19 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                   <span className="font-mono text-xs text-signal">{COMPOSE_ACCEL}</span>
                   <span className="text-right text-muted">
                     Prompt composer — draft a multi-line prompt, then send it as one paste
+                  </span>
+                </div>
+                <div className="eyebrow py-2 pt-4">Files</div>
+                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-signal">Drag &amp; drop</span>
+                  <span className="text-right text-muted">
+                    Upload onto a terminal — the remote path is typed at your cursor, never run
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-signal">{IMAGE_PASTE_ACCEL}</span>
+                  <span className="text-right text-muted">
+                    Upload the clipboard&apos;s image the same way — a screenshot in one gesture
                   </span>
                 </div>
               </div>

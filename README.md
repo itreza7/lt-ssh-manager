@@ -29,6 +29,11 @@ in the main process.
 - **tmux control mode** — optional `tmux -CC` integration renders each tmux pane as
   its own native terminal: real scrollback and copy with no mouse-mode, while tmux
   keeps your sessions alive across drops.
+- **Built for terminal agents** — Shift+Enter sends a real newline instead of submitting;
+  a prompt composer drafts multi-line prompts locally and delivers them as one bracketed
+  paste; and dropping a file (or pasting an image with ⌘⇧V / Ctrl+Shift+U) on a terminal
+  uploads it to a private folder on the host and types the remote path at your cursor —
+  the path is typed, never run.
 - **Connection manager** — add/edit/delete connections; key, password, or agent auth.
 - **Server dashboard** — at-a-glance host vitals (OS, kernel, uptime, CPU/memory/disk
   meters, load) from a one-shot probe, plus a tmux session list with one-click attach.

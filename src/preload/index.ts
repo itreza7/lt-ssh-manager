@@ -9,6 +9,7 @@ import type {
   SettingsPatch,
   SftpList,
   SftpReadResult,
+  StageResult,
   TmuxControlState,
   TmuxIntent,
   TmuxSession,
@@ -126,6 +127,17 @@ const api = {
     paths: string[]
     transferId: string
   }): Promise<{ count: number }> => ipcRenderer.invoke('sftp:uploadPaths', args),
+  /**
+   * Stage files on the host for a terminal to refer to. Picks the destination
+   * itself (a private per-drop directory under the remote home) and opens and
+   * closes its own SFTP channel, so it works from a tab that has none.
+   */
+  sftpUploadTo: (args: {
+    connectionId: string
+    password?: string
+    paths: string[]
+    transferId: string
+  }): Promise<StageResult> => ipcRenderer.invoke('sftp:upload-to', args),
   sftpClose: (connectionId: string): void => ipcRenderer.send('sftp:close', connectionId),
   // Electron 33 removed File.path; resolve a dropped File's absolute path here.
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
@@ -138,6 +150,12 @@ const api = {
   // clipboard + links
   clipboardWrite: (text: string): void => clipboard.writeText(text),
   clipboardRead: (): string => clipboard.readText(),
+  /**
+   * Write the clipboard's image to a local PNG and return its path, or null when
+   * there isn't one. Done in main: a NativeImage can't cross the bridge, and the
+   * renderer never needs to hold the bytes.
+   */
+  clipboardImageToTemp: (): Promise<string | null> => ipcRenderer.invoke('clipboard:imageToTemp'),
   openExternal: (url: string): void => void ipcRenderer.invoke('app:openExternal', url),
 
   // window controls (custom title bar)
