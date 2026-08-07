@@ -16,9 +16,11 @@ interface Props {
   onNewSession: (name: string) => void
   onKillSession: (name: string) => Promise<void>
   onRenameSession: (from: string, to: string) => Promise<void>
-  fetchHookStatus: () => Promise<ClaudeHookStatus>
+  /** Resolve this connection's password once, for both reads below. */
+  resolvePassword: () => Promise<string | null | undefined>
+  fetchHookStatus: (password?: string) => Promise<ClaudeHookStatus>
   applyHook: (action: 'install' | 'uninstall') => Promise<ClaudeHookStatus>
-  fetchRuntime: () => Promise<ClaudeRuntime>
+  fetchRuntime: (password?: string) => Promise<ClaudeRuntime>
   onOpenClaude: (dir: string) => void
 }
 
@@ -159,6 +161,7 @@ export function Dashboard({
   onNewSession,
   onKillSession,
   onRenameSession,
+  resolvePassword,
   fetchHookStatus,
   applyHook,
   fetchRuntime,
@@ -230,14 +233,30 @@ export function Dashboard({
     setClaudeLoading(true)
     setRuntimeError(null)
     setHookError(null)
+    // Once, for both. Resolving inside each read prompted twice for the same
+    // password, and the two prompts must never be able to overlap regardless.
+    let password: string | undefined
     try {
-      setRuntime(await fetchRuntime())
+      const pw = await resolvePassword()
+      if (pw === null) throw new Error('Password required to check Claude Code.')
+      password = pw ?? undefined
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setRuntimeError(msg)
+      setRuntime(null)
+      setHookError(msg)
+      setHook(null)
+      setClaudeLoading(false)
+      return
+    }
+    try {
+      setRuntime(await fetchRuntime(password))
     } catch (e) {
       setRuntimeError(e instanceof Error ? e.message : String(e))
       setRuntime(null)
     }
     try {
-      setHook(await fetchHookStatus())
+      setHook(await fetchHookStatus(password))
     } catch (e) {
       setHookError(e instanceof Error ? e.message : String(e))
       setHook(null)
@@ -575,7 +594,14 @@ export function Dashboard({
         <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '120ms' }}>
           <div className="mb-3.5 flex items-center justify-between">
             <span className="eyebrow">Claude Code</span>
-            {(runtime || hook) && <RefreshButton loading={claudeLoading} onClick={() => void loadClaude()} />}
+            {/* Also on the error states, not just the good ones. A failed check
+                sets an error and leaves both answers null, and gating this on
+                the answers alone left the panel with two red boxes and no way
+                to try again — on the single most likely first click, an
+                unreachable host or a cancelled password prompt. */}
+            {(runtime || hook || runtimeError || hookError) && (
+              <RefreshButton loading={claudeLoading} onClick={() => void loadClaude()} />
+            )}
           </div>
 
           {runtimeError && (
@@ -584,13 +610,17 @@ export function Dashboard({
             </p>
           )}
 
-          {!runtime && !runtimeError && (
+          {!runtime && (
             <div className="mb-4 flex items-center justify-between gap-4">
               <p className="min-w-0 text-sm leading-relaxed text-fg/75">
-                {claudeLoading ? 'Looking for the CLI…' : 'Find out which Claude Code this host has, and whether it is signed in.'}
+                {claudeLoading
+                  ? 'Looking for the CLI…'
+                  : runtimeError
+                    ? 'Nothing was learned about this host.'
+                    : 'Find out which Claude Code this host has, and whether it is signed in.'}
               </p>
               <Button variant="primary" disabled={claudeLoading} onClick={() => void loadClaude()}>
-                Check ▸
+                {runtimeError ? 'Try again ▸' : 'Check ▸'}
               </Button>
             </div>
           )}

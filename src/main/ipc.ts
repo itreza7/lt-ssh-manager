@@ -33,7 +33,7 @@ import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
-import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT, shWrap } from '../shared/claude'
+import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT, SEP as CLAUDE_SEP, shWrap } from '../shared/claude'
 import { shQuote } from '../shared/tmux'
 
 // Native macOS fullscreen leaves a black bar above a frameless window and pushes
@@ -152,7 +152,13 @@ function kv(text: string): Map<string, string> {
 const CLAUDE_PROBE = [
   CLAUDE_TIMEOUT,
   CLAUDE_RESOLVE,
-  'echo "home=$HOME"',
+  // Canonicalised, not raw. `Claude here ▸` names its tmux session after this
+  // path, and the file browser names its own after the SFTP realpath — which is
+  // always symlink-resolved. On a host where /home is a symlink (Fedora
+  // Silverblue, or any box with /home on a data volume) a raw $HOME would hash
+  // to a different name than /var/home/…, and the two buttons would open two
+  // live agents on one directory.
+  'H=$(cd "$HOME" 2>/dev/null && pwd -P); echo "home=${H:-$HOME}"',
   'CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}',
   '[ -f "$CFG/.credentials.json" ] && echo "creds=1" || echo "creds=0"',
   '[ -n "$CLI" ] || { echo "end=1"; exit 0; }',
@@ -173,7 +179,10 @@ const CLAUDE_PROBE = [
   // indistinguishable from a host with nothing installed, and the card would
   // tell someone with a working agent to reinstall it.
   'echo "end=1"'
-].join('\n')
+  // `'; '`, not a newline, and for a reason worth knowing: shWrap single-quotes
+  // this for a possibly-csh login shell, and csh cannot carry a single-quoted
+  // word across a line break. See SEP in shared/claude.ts.
+].join(CLAUDE_SEP)
 
 function parseProbe(text: string): ServerStats {
   const map = kv(text)
@@ -759,7 +768,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
       const started = Date.now()
-      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}\n${CLAUDE_PROBE}`
+      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}${CLAUDE_SEP}${CLAUDE_PROBE}`
       const res = await ssh.exec(connection, {
         command: shWrap(script),
         password: passwordFor(args.connectionId, args.password),
@@ -779,8 +788,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const method = m.get('method') ?? ''
       const version = /^(\d+\.\d+\.\d+[A-Za-z0-9.+-]*) \(Claude Code\)$/.exec(m.get('version') ?? '')
       return {
-        home: /^\/\S*$/.test(home) ? home : undefined,
-        path: /^\/\S+$/.test(path) ? path : null,
+        // Absolute, and free of control characters — nothing more. `\S` would
+        // have been wrong: /opt/My Tools/claude is a perfectly good install, and
+        // rejecting it would make the card say "not installed" about a binary
+        // the probe had just run `--version` on. The remote `case` and `[ -x ]`
+        // are what decide it is real; this only keeps terminal escapes out of a
+        // string the UI renders.
+        home: /^\/[^\u0000-\u001f\u007f]{0,4096}$/.test(home) ? home : undefined,
+        path: /^\/[^\u0000-\u001f\u007f]{1,4096}$/.test(path) ? path : null,
         version: version ? version[1] : null,
         loggedIn: auth === 'true' ? true : auth === 'false' ? false : null,
         authMethod: /^[A-Za-z0-9_.@:+-]{1,32}$/.test(method) ? method : undefined,

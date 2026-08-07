@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
+  ClaudeHookStatus,
+  ClaudeRuntime,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
@@ -981,22 +983,31 @@ export default function App() {
     return window.api.probeServer({ connectionId: conn.id, password: password ?? undefined })
   }
 
-  const fetchHookStatusFor = (conn: Connection) => async () => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to read the Claude settings file.')
-    return window.api.claudeHookStatus({ connectionId: conn.id, password: password ?? undefined })
-  }
+  // The two dashboard reads take an already-resolved password rather than each
+  // resolving its own. One click on Check runs both, back to back, and a
+  // connection with no saved secret used to raise the identical prompt twice for
+  // the same password — which reads as "it didn't take the first one". The
+  // caller resolving once also makes it structurally impossible for the two to
+  // overlap, and askPassword holds exactly one slot: a second prompt raised over
+  // a live one orphans the first promise for good.
+  const resolvePasswordFor = (conn: Connection) => () => resolvePassword(conn)
 
+  const fetchHookStatusFor =
+    (conn: Connection) =>
+    (password?: string): Promise<ClaudeHookStatus> =>
+      window.api.claudeHookStatus({ connectionId: conn.id, password })
+
+  const fetchRuntimeFor =
+    (conn: Connection) =>
+    (password?: string): Promise<ClaudeRuntime> =>
+      window.api.claudeRuntime({ connectionId: conn.id, password })
+
+  // Install/uninstall stays self-resolving: it is a separate deliberate click,
+  // and it is the only one of the three, so it cannot collide with itself.
   const applyHookFor = (conn: Connection) => async (action: 'install' | 'uninstall') => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required to write the Claude settings file.')
     return window.api.claudeHookApply({ connectionId: conn.id, password: password ?? undefined, action })
-  }
-
-  const fetchRuntimeFor = (conn: Connection) => async () => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to look for Claude Code.')
-    return window.api.claudeRuntime({ connectionId: conn.id, password: password ?? undefined })
   }
 
   // Open Claude Code in a directory, as a new tab.
@@ -1313,6 +1324,7 @@ export default function App() {
                     onNewSession={(name) => attachTmux(conn, tmuxSessionName(name))}
                     onKillSession={killTmux(conn)}
                     onRenameSession={renameTmux(conn)}
+                    resolvePassword={resolvePasswordFor(conn)}
                     fetchHookStatus={fetchHookStatusFor(conn)}
                     applyHook={applyHookFor(conn)}
                     fetchRuntime={fetchRuntimeFor(conn)}

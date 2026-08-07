@@ -27,6 +27,20 @@ import { shQuote, tmuxCreateCommand } from './tmux'
 export const CLAUDE_TIMEOUT = 'TMO=; command -v timeout >/dev/null 2>&1 && TMO="timeout 6"'
 
 /**
+ * Statement separator for every script that goes through shWrap — `'; '`, never
+ * a newline.
+ *
+ * shWrap single-quotes the script so a fish or csh login shell hands it to
+ * /bin/sh intact. csh cannot carry a single-quoted word across a newline:
+ * `tcsh -c "/bin/sh -c 'echo A<LF>echo B'"` prints `Unmatched '.` and then runs
+ * the remaining lines as csh. So a newline-joined script fails on exactly the
+ * shell the wrapper is there to survive — the tab fills with csh parse errors,
+ * and the probe emits a partial answer that the handler rejects, on a host
+ * where Claude Code is installed and fine. Keep every builder below on one line.
+ */
+export const SEP = '; '
+
+/**
  * Resolve `claude` into `$CLI`, or leave `$CLI` empty. Expects `$CLI` to already
  * hold the per-connection override, or the empty string.
  *
@@ -50,33 +64,47 @@ export const CLAUDE_RESOLVE = [
   '[ -n "$CLI" ] || for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/claude /usr/bin/claude /opt/homebrew/bin/claude /snap/bin/claude; do [ -x "$c" ] && CLI=$c && break; done',
   '[ -n "$CLI" ] || CLI=$($TMO "${SHELL:-/bin/sh}" -lc "command -v claude" 2>/dev/null | tail -n 1)',
   'case "$CLI" in /*) [ -x "$CLI" ] || CLI= ;; *) CLI= ;; esac'
-].join('\n')
+].join(SEP)
 
-/** Wrap a POSIX script for a remote login shell that may be fish or csh. */
+/**
+ * Wrap a POSIX script for a remote login shell that may be fish or csh.
+ *
+ * The wrapped script must be a single LINE — see SEP. csh cannot carry a
+ * single-quoted word across a newline, so a multi-line script here fails on
+ * precisely the shell this wrapper exists to defend against.
+ */
 export const shWrap = (script: string): string => `/bin/sh -c ${shQuote(script)}`
 
 /**
  * The script an agent tab runs: resolve the binary, `cd`, hand the pane to Claude.
  *
- * The ending branches on exit status, and both halves are deliberate. On a clean
- * exit the pane dies, a tmux session dies with it, and the next launch on that
- * directory starts a fresh agent instead of attaching to a husk. On a non-zero
- * exit the pane must NOT die: tmux restores the alternate screen the instant it
- * does, so a bad install's error message would scroll away before anyone read it.
- * Only the failure case lingers, which is exactly when lingering is useful.
+ * Every ending — clean, failed, or never-started — exits the pane. `die` holds
+ * the message on screen first, because tmux restores the alternate screen the
+ * instant a pane dies and an unread error is no error at all.
+ *
+ * What it must NOT do is drop to a login shell, however useful that looks. The
+ * pane's tmux session is named after the directory, and `tmux new -A` attaches
+ * to a session that already exists. A husk left behind by a failed launch would
+ * therefore capture that name: after installing Claude Code, clicking `Claude
+ * here` on that directory would attach to the old plain shell, forever, with no
+ * error to explain it and no way back short of killing the session by hand.
+ * Exiting frees the name, so the next click is a real launch. A shell on that
+ * host is one click away on the dashboard regardless.
  */
 export function claudeScript(dir: string, pin?: string): string {
   return [
-    `cd ${shQuote(dir)} || exit 1`,
+    // `%b` so callers can put a line break in a message without putting one in
+    // the script; `read` falls back to a sleep where stdin is not a terminal.
+    'die() { echo; printf "%b\\n\\n" "$1"; printf "[Enter to close] "; read _ 2>/dev/null || sleep 60; exit 1; }',
+    `cd ${shQuote(dir)} 2>/dev/null || die ${shQuote(`Cannot enter ${dir}\\nIt may have been moved, removed, or never existed.`)}`,
     CLAUDE_TIMEOUT,
     `CLI=${pin ? shQuote(pin) : ''}`,
     CLAUDE_RESOLVE,
-    `[ -n "$CLI" ] || { echo 'Claude Code was not found on this host.'; echo 'Install it with:  curl -fsSL https://claude.ai/install.sh | bash'; exec "\${SHELL:-/bin/sh}" -l; }`,
+    `[ -n "$CLI" ] || die 'Claude Code was not found on this host.\\nInstall it with:  curl -fsSL https://claude.ai/install.sh | bash\\nOr, if it lives behind a version manager, set its full path in Edit > Claude Code binary.'`,
     '"$CLI"; rc=$?',
     '[ "$rc" = 0 ] && exit 0',
-    'echo "claude exited with status $rc"',
-    'exec "${SHELL:-/bin/sh}" -l'
-  ].join('\n')
+    'die "claude exited with status $rc"'
+  ].join(SEP)
 }
 
 /** What an agent tab's `command` is set to, tmux or not. */
