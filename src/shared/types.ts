@@ -171,6 +171,26 @@ export interface StageResult {
   errors: { name: string; error: string }[]
 }
 
+/**
+ * The state of our Claude Code notification hook on one server, plus both
+ * candidate outcomes so the UI can show the exact change before it happens.
+ * Everything here is already pretty-printed JSON — the diff is a text diff.
+ */
+export interface ClaudeHookStatus {
+  /** Absolute remote path of the settings file, resolved from the server's home. */
+  path: string
+  /** The file as it stands. `{}` when the server has none yet. */
+  before: string
+  /** What installing would write. Equal to `before` when it's already current. */
+  install: string
+  /** What removing would write. Equal to `before` when nothing of ours is there. */
+  uninstall: string
+  /** Our hook is present and up to date. */
+  installed: boolean
+  /** Some hook of ours is present — possibly an older command that needs updating. */
+  present: boolean
+}
+
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */
 export interface ServerStats {
   hostname?: string
@@ -230,7 +250,25 @@ export interface TerminalSettings {
    * what it's working on — which is what you want to read off a background tab.
    */
   liveTitles: boolean
+  /** How loudly to report an attention signal from a session — see AgentAlerts. */
+  agentAlerts: AgentAlerts
 }
+
+/**
+ * What happens when a program in a session says it needs a human (see
+ * lib/xtermAgentSignal for what it listens to):
+ * - `dot`: an amber dot on the tab, and nothing else. The default — it's the
+ *   part that says *which* session wants you, and it costs no attention until
+ *   you happen to look at the tab strip.
+ * - `notify`: the dot, plus an OS notification and a dock badge while the window
+ *   is in the background. Clicking the notification opens that tab.
+ * - `off`: ignore them.
+ *
+ * Dot-only by default because an agent that asks a question every few minutes
+ * would otherwise be a notification every few minutes, and the ones that matter
+ * would be indistinguishable from the ones that don't.
+ */
+export type AgentAlerts = 'off' | 'dot' | 'notify'
 
 export interface EditorSettings {
   fontFamily: string // id from the renderer's font list (shared with terminal)
@@ -278,7 +316,8 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   // Newline rather than submit: it costs a plain shell nothing (which accepts LF
   // as Enter) and it's what lets a terminal agent take a multi-line prompt.
   shiftEnter: 'newline',
-  liveTitles: true
+  liveTitles: true,
+  agentAlerts: 'dot'
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {

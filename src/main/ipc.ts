@@ -1,10 +1,20 @@
 // Wires the renderer <-> main bridge: connection CRUD, secrets, and SSH session
 // lifecycle. SSH events are pushed to the focused window via webContents.send.
-import { app, ipcMain, clipboard, dialog, shell, BrowserWindow, type WebContents } from 'electron'
+import {
+  app,
+  ipcMain,
+  clipboard,
+  dialog,
+  shell,
+  BrowserWindow,
+  Notification,
+  type WebContents
+} from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import type {
+  ClaudeHookStatus,
   ConnectionDraft,
   ServerStats,
   SettingsPatch,
@@ -21,6 +31,7 @@ import { settingsStore } from './store/settings'
 import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager } from './ssh/manager'
+import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
 
 // Native macOS fullscreen leaves a black bar above a frameless window and pushes
 // it into a separate Space; simple fullscreen covers the whole screen in place.
@@ -565,6 +576,125 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
   ipcMain.on('ssh:hostkey-response', (_e, requestId: string, accept: boolean) =>
     ssh.resolveHostKey(requestId, accept)
+  )
+
+  // ---- agent attention ----
+  // One live Notification per leaf, so a session that signals twice replaces its
+  // own banner instead of stacking. Electron has no notification tag or replace
+  // key; re-showing the same instance is the only collapse there is.
+  const notices = new Map<string, Notification>()
+
+  ipcMain.on('agent:notify', (_e, leafId: string, title: string, body: string) => {
+    if (!Notification.isSupported()) return
+    const w = getWindow()
+    if (w && !w.isDestroyed() && w.isFocused()) return // the renderer already showed it
+
+    notices.get(leafId)?.close()
+    const n = new Notification({ title: title || 'Claude Code', body, silent: false })
+    n.on('click', () => {
+      const win = getWindow()
+      if (!win || win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      // Raising the window is not the same as becoming the frontmost app when
+      // something else owns the foreground, which is exactly the situation a
+      // notification click starts from.
+      app.focus({ steal: true })
+      send('agent:focus', leafId)
+    })
+    n.on('close', () => {
+      if (notices.get(leafId) === n) notices.delete(leafId)
+    })
+    notices.set(leafId, n)
+    n.show()
+  })
+
+  // The renderer owns the truth about which leaves are waiting, so it pushes the
+  // count rather than main trying to keep a parallel tally.
+  ipcMain.on('agent:badge', (_e, count: number) => {
+    if (process.platform === 'win32') return // no count badge; the taskbar wants an overlay icon
+    app.setBadgeCount(Math.max(0, Math.trunc(count)))
+  })
+
+  // ---- Claude Code hooks on the remote ----
+  // Read `~/.claude/settings.json`, work out what installing or removing our
+  // Notification hook would do, and (for apply) write it back atomically.
+  //
+  // The merge happens here rather than in the renderer for two reasons: a
+  // missing file has to read as `{}`, and the SFTP status code that says
+  // "missing" rather than "unreadable" is a number on the ssh2 error that does
+  // not survive ipcMain's error serialization. Like `sftp:upload-to`, this
+  // brackets its own SFTP channel — a Dashboard has no Files tab behind it.
+  const withClaudeSettings = async <T,>(
+    connectionId: string,
+    password: string | undefined,
+    fn: (home: string, raw: string | null) => Promise<T>
+  ): Promise<T> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    let opened = false
+    try {
+      await ssh.openSftp(connectionId, connection, passwordFor(connectionId, password), undefined, 30000)
+      opened = true
+      const home = await ssh.sftpRealpath(connectionId, '.')
+      const path = rjoin(home, CLAUDE_SETTINGS_PATH)
+      let raw: string | null = null
+      try {
+        raw = (await ssh.sftpReadFile(connectionId, path)).content
+      } catch (e) {
+        // SFTP status 2 is NO_SUCH_FILE. A server that has never run Claude Code
+        // has no settings file, and that is a normal starting state, not an
+        // error — anything else (permissions, a directory, a dead link) is real.
+        if ((e as { code?: number }).code !== 2) throw e
+      }
+      return await fn(path, raw)
+    } finally {
+      if (opened) ssh.closeSftp(connectionId)
+    }
+  }
+
+  ipcMain.handle(
+    'claude:hook-status',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeHookStatus> =>
+      withClaudeSettings(args.connectionId, args.password, async (path, raw) => {
+        const install = planHooks(raw, 'install')
+        const uninstall = planHooks(raw, 'uninstall')
+        return {
+          path,
+          before: install.before,
+          install: install.after,
+          uninstall: uninstall.after,
+          installed: install.installed,
+          present: install.present
+        }
+      })
+  )
+
+  ipcMain.handle(
+    'claude:hook-apply',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; action: 'install' | 'uninstall' }
+    ): Promise<ClaudeHookStatus> =>
+      withClaudeSettings(args.connectionId, args.password, async (path, raw) => {
+        // Re-planned from a fresh read rather than trusting the preview the user
+        // approved: the file may have moved under us, and the alternative is
+        // writing back a document that no longer reflects what's on the server.
+        const plan = planHooks(raw, args.action)
+        if (plan.after !== plan.before) {
+          await ssh.sftpEnsureDir(args.connectionId, dirname(path), 0o700)
+          await ssh.sftpWriteFileAtomic(args.connectionId, path, plan.after, 0o600)
+        }
+        const after = planHooks(plan.after, 'install')
+        return {
+          path,
+          before: plan.after,
+          install: after.after,
+          uninstall: planHooks(plan.after, 'uninstall').after,
+          installed: after.installed,
+          present: after.present
+        }
+      })
   )
 
   // ---- misc ----

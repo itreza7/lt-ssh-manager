@@ -34,9 +34,14 @@ in the main process.
   paste; and dropping a file (or pasting an image with ⌘⇧V / Ctrl+Shift+U) on a terminal
   uploads it to a private folder on the host and types the remote path at your cursor —
   the path is typed, never run.
+- **Agent attention** — when a program in a tab you aren't watching asks for you, its tab
+  gets an amber dot; optionally a system notification (clicking it focuses that exact tab)
+  and a dock badge. The dashboard installs the matching Notification hook into a host's
+  `~/.claude/settings.json` for you, showing the before/after JSON before it writes.
 - **Connection manager** — add/edit/delete connections; key, password, or agent auth.
 - **Server dashboard** — at-a-glance host vitals (OS, kernel, uptime, CPU/memory/disk
-  meters, load) from a one-shot probe, plus a tmux session list with one-click attach.
+  meters, load) from a one-shot probe, a tmux session list with one-click attach, and the
+  Claude Code hook installer.
 - **SFTP file manager** — browse, upload (incl. drag-and-drop), download with progress,
   rename, chmod, mkdir, and recursive delete over a pooled per-connection channel.
 - **Remote file editor** — edit remote files in an embedded Monaco editor, with markdown

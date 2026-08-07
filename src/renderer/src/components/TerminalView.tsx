@@ -3,6 +3,7 @@ import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
+import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
@@ -24,6 +25,12 @@ interface Props {
   onStatus: (sessionId: string, status: SessionStatus) => void
   /** The remote set its window title — used as the tab's live label. */
   onTitle?: (sessionId: string, title: string) => void
+  /**
+   * Something in this session asked for a human. `onScreen` is the tmux-control
+   * case and is left unset here: a plain terminal *is* its leaf, so if the leaf
+   * is showing, so is the thing that rang.
+   */
+  onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
 }
 
 export function TerminalView({
@@ -36,7 +43,8 @@ export function TerminalView({
   tmux,
   settings,
   onStatus,
-  onTitle
+  onTitle,
+  onAgentSignal
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
   // xterm mounts and is sized to overscroll× the visible height.
@@ -263,6 +271,11 @@ export function TerminalView({
       onPasteImage: () => uploadRef.current.pasteImage(termRef.current)
     })
 
+    // Attention signals. Separate from attachTerminal because it is purely
+    // inbound and control-mode panes want it too, where most of the above
+    // doesn't apply.
+    const detachSignal = attachAgentSignal(term, (s) => onAgentSignal?.(sessionId, s))
+
     // Overscroll scroll plumbing. Let the browser scroll the outer host natively
     // (so it keeps its smooth/inertial feel) — we only stop xterm from also
     // seeing the wheel, since in the alt-screen (e.g. under tmux) it would
@@ -361,6 +374,7 @@ export function TerminalView({
       scroll.removeEventListener('wheel', onWheel, { capture: true })
       scroll.removeEventListener('scroll', onScroll)
       detachTerminal()
+      detachSignal()
       window.api.closeSession(sessionId)
       term.dispose()
     }
