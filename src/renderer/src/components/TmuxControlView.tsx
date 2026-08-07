@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type {
   CloseReason,
@@ -8,9 +8,10 @@ import type {
   TmuxWindowInfo
 } from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
-import { attachTerminal } from '../lib/xtermAttach'
+import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
+import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 
 interface Props {
@@ -31,6 +32,17 @@ interface Props {
 
 /** A registry that routes per-pane output, buffering until a pane mounts. */
 type PaneWriter = (data: Uint8Array) => void
+
+/**
+ * What a mounted pane hands back to the view. The terminal itself is part of it
+ * because sending isn't only "write bytes to the wire": bracketed paste is a
+ * mode xterm tracks per instance, and the composer needs the pane's own terminal
+ * both to wrap its text correctly and to hand focus back afterwards.
+ */
+interface PaneHandle {
+  write: PaneWriter
+  term: XTerm
+}
 
 /**
  * tmux control-mode (`tmux -CC`) view. One SSH stream multiplexes every tmux
@@ -70,8 +82,19 @@ export function TmuxControlView({
 
   // Per-pane output routing. Output can arrive before a pane mounts (the attach
   // repaint), so buffer by pane id until its writer registers.
-  const writers = useRef(new Map<string, PaneWriter>())
+  const writers = useRef(new Map<string, PaneHandle>())
   const buffers = useRef(new Map<string, Uint8Array[]>())
+
+  // Prompt composer. `target` is the pane being drafted for and doubles as the
+  // open flag; drafts are kept per pane, so moving between panes never hands one
+  // pane's half-written prompt to another.
+  const [target, setTarget] = useState<string | null>(null)
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [bracketed, setBracketed] = useState(true)
+  // See TerminalView: bumped on every request to compose so the textarea is
+  // re-focused even when the panel was already open. Stable dispatch, because
+  // openComposer is captured by each pane's mount-once effect.
+  const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
 
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -81,16 +104,29 @@ export function TmuxControlView({
   connectArgsRef.current = { connectionId, retries, password, command, tmux }
   const lastSizeRef = useRef({ cols: 0, rows: 0 })
 
-  const registerPane = useCallback((paneId: string, write: PaneWriter): (() => void) => {
-    writers.current.set(paneId, write)
+  const registerPane = useCallback((paneId: string, handle: PaneHandle): (() => void) => {
+    writers.current.set(paneId, handle)
     const queued = buffers.current.get(paneId)
     if (queued) {
       buffers.current.delete(paneId)
-      for (const d of queued) write(d)
+      for (const d of queued) handle.write(d)
     }
     return () => {
-      if (writers.current.get(paneId) === write) writers.current.delete(paneId)
+      if (writers.current.get(paneId) === handle) writers.current.delete(paneId)
     }
+  }, [])
+
+  const openComposer = useCallback((paneId: string) => {
+    // Sampled per pane at open time: one window can hold a shell and an agent,
+    // and only one of them keeps the newlines.
+    setBracketed(writers.current.get(paneId)?.term.modes.bracketedPasteMode ?? false)
+    setTarget(paneId)
+    bumpFocus()
+  }, [])
+
+  const closeComposer = useCallback((paneId: string | null) => {
+    setTarget(null)
+    if (paneId) writers.current.get(paneId)?.term.focus()
   }, [])
 
   // Measure the pane area, convert to a tmux cell grid, and push it as this
@@ -150,7 +186,7 @@ export function TmuxControlView({
       if (sid !== sessionId) return
       const w = writers.current.get(paneId)
       if (w) {
-        w(data)
+        w.write(data)
         return
       }
       const queued = buffers.current.get(paneId)
@@ -177,8 +213,8 @@ export function TmuxControlView({
           // no alternate buffer here — each pane is a plain xterm we append to — so
           // a line of text is both safe and the clearest signal that what follows
           // came from a new client.
-          for (const write of writers.current.values())
-            write(new TextEncoder().encode('\r\n\x1b[90m── reconnected ──\x1b[0m\r\n'))
+          for (const h of writers.current.values())
+            h.write(new TextEncoder().encode('\r\n\x1b[90m── reconnected ──\x1b[0m\r\n'))
         }
       } else if (status.kind === 'reattaching') {
         reattachingRef.current = true
@@ -259,6 +295,46 @@ export function TmuxControlView({
     [windows]
   )
 
+  // The composer is drafting for `target` when open, and shows the focused
+  // pane's saved draft as a strip when it isn't.
+  const draftPane = target ?? focusedPane ?? null
+  const draft = (draftPane && drafts[draftPane]) || ''
+
+  const setDraft = useCallback(
+    (v: string) => {
+      if (draftPane) setDrafts((d) => ({ ...d, [draftPane]: v }))
+    },
+    [draftPane]
+  )
+
+  const sendDraft = useCallback(
+    (submit: boolean) => {
+      const term = target ? writers.current.get(target)?.term : undefined
+      const body = ((target && drafts[target]) || '').replace(/\s+$/, '')
+      if (!target || !term || !body) return
+      sendComposed(term, body, submit)
+      setDrafts(({ [target]: _sent, ...rest }) => rest)
+      setTarget(null)
+      term.focus()
+    },
+    [target, drafts]
+  )
+
+  // A pane can be killed from the remote — by tmux itself, or from another
+  // client — while its composer is open. Close rather than leave a drafting
+  // panel pointed at a pane that no longer exists.
+  useEffect(() => {
+    if (target && !allPanes.some((p) => p.pane.paneId === target)) setTarget(null)
+  }, [target, allPanes])
+
+  // Coming back to a parked tab. App hides a leaf with `display: none`, which
+  // drops DOM focus altogether, and no pane will take it back while the composer
+  // is up (`focused` is false for all of them) — so the composer has to ask for
+  // it, or the user returns to a draft that swallows every keystroke.
+  useEffect(() => {
+    if (active && target) bumpFocus()
+  }, [active, target])
+
   const isReady = windows.length > 0
   // See TerminalView: a session that is *gone* must not offer "Reattach", since
   // reattaching there means running the create-or-attach command again.
@@ -332,9 +408,12 @@ export function TmuxControlView({
                   paneId={pane.paneId}
                   cols={pane.w}
                   rows={pane.h}
-                  focused={active && isActivePane}
+                  // Not focused while the composer is up, or the pane would take
+                  // keyboard focus back from the textarea on the next re-render.
+                  focused={active && isActivePane && !target}
                   settings={settings}
                   register={registerPane}
+                  onCompose={openComposer}
                   onSelect={() => window.api.tmuxSelectPane(sessionId, pane.paneId)}
                 />
               </div>
@@ -348,6 +427,22 @@ export function TmuxControlView({
           </div>
         )}
         {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
+        {/* Inside the pane area and overlaid on it. Docking it below would shrink
+            areaRef, and this view turns that box straight into the tmux client
+            size — every other client attached to the session would see the
+            windows reflow because someone here opened a text box. */}
+        <PromptComposer
+          open={!!target}
+          focusKey={focusKey}
+          draft={draft}
+          onDraft={setDraft}
+          onSend={sendDraft}
+          onOpen={() => draftPane && openComposer(draftPane)}
+          onClose={() => closeComposer(draftPane)}
+          onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
+          target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
+          bracketed={bracketed}
+        />
       </div>
 
       {overlay && (
@@ -413,6 +508,7 @@ function TmuxPane({
   focused,
   settings,
   register,
+  onCompose,
   onSelect
 }: {
   sessionId: string
@@ -421,7 +517,9 @@ function TmuxPane({
   rows: number
   focused: boolean
   settings: TerminalSettings
-  register: (paneId: string, write: PaneWriter) => () => void
+  register: (paneId: string, handle: PaneHandle) => () => void
+  /** Stable across renders — the mount-once effect closes over it. */
+  onCompose: (paneId: string) => void
   onSelect: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -439,9 +537,10 @@ function TmuxPane({
     // names itself (%window-renamed) — the window bar above already shows them.
     const detachTerminal = attachTerminal(term, containerRef.current!, {
       sendData: send,
-      settings: () => settingsRef.current
+      settings: () => settingsRef.current,
+      onCompose: () => onCompose(paneId)
     })
-    const unregister = register(paneId, (data) => term.write(data))
+    const unregister = register(paneId, { write: (data) => term.write(data), term })
     return () => {
       unregister()
       detachTerminal()

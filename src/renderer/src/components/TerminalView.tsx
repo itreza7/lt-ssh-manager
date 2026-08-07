@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
-import { attachTerminal } from '../lib/xtermAttach'
+import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
+import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 
 interface Props {
@@ -61,6 +62,20 @@ export function TerminalView({
   } | null>(null)
   // Read from event handlers that must not re-subscribe when it changes.
   const reattachingRef = useRef(false)
+
+  // Prompt composer. The draft lives here — nothing reaches the remote until
+  // it's sent — and survives closing the panel, so a half-written prompt isn't
+  // lost to a stray Esc.
+  const [composing, setComposing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [bracketed, setBracketed] = useState(true)
+  // Every request to compose bumps this, so the textarea is re-focused even when
+  // the panel was already open. useReducer because its dispatch is guaranteed
+  // stable, and openComposer below is captured by a mount-once effect.
+  const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
+  // Read by the focus effect, which must not re-run when the composer opens.
+  const composingRef = useRef(false)
+  composingRef.current = composing
 
   // Overscroll bookkeeping: whether the view is pinned to the bottom, and a
   // guard so our own programmatic scrolls don't read as the user scrolling away.
@@ -175,6 +190,35 @@ export function TerminalView({
     [sessionId]
   )
 
+  const openComposer = useCallback(() => {
+    // Sampled at open time rather than at send: whether newlines survive is a
+    // property of whatever program is running *now*, and a shell at its prompt
+    // and an agent waiting for input answer differently.
+    setBracketed(termRef.current?.modes.bracketedPasteMode ?? false)
+    setComposing(true)
+    bumpFocus()
+  }, [])
+
+  const closeComposer = useCallback(() => {
+    setComposing(false)
+    termRef.current?.focus()
+  }, [])
+
+  const sendDraft = useCallback(
+    (submit: boolean) => {
+      const term = termRef.current
+      // Trailing whitespace is what a textarea collects on the way to the Send
+      // button; sending it would submit a blank line after the prompt.
+      const body = draft.replace(/\s+$/, '')
+      if (!term || !body) return
+      sendComposed(term, body, submit)
+      setDraft('')
+      setComposing(false)
+      term.focus()
+    },
+    [draft]
+  )
+
   // Create the terminal + SSH session exactly once per sessionId.
   useEffect(() => {
     const scroll = scrollRef.current!
@@ -197,12 +241,14 @@ export function TerminalView({
     term.onData(send)
     const offRender = term.onRender(() => stickToBottom())
 
-    // Clipboard, Shift+Enter encoding, remote-set title. `send` is shared with
-    // onData above so synthesized keys take the same path as typed ones.
+    // Clipboard, Shift+Enter encoding, remote-set title, composer chord. `send`
+    // is shared with onData above so synthesized keys take the same path as
+    // typed ones.
     const detachTerminal = attachTerminal(term, host, {
       sendData: send,
       settings: () => settingsRef.current,
-      onTitle: (t) => onTitle?.(sessionId, t)
+      onTitle: (t) => onTitle?.(sessionId, t),
+      onCompose: openComposer
     })
 
     // Overscroll scroll plumbing. Let the browser scroll the outer host natively
@@ -326,12 +372,18 @@ export function TerminalView({
     layout
   ])
 
-  // Re-fit and focus when this tab becomes the active one.
+  // Re-fit and focus when this tab becomes the active one. Clicking a pane goes
+  // through App's focusPane, so this also fires on a click *inside* the open
+  // composer — hence the branch, or the terminal would steal focus mid-sentence.
+  // A parked tab is `display: none`, which drops focus entirely, so coming back
+  // has to restore it to *something*: the composer if one is open, else the
+  // terminal as before.
   useEffect(() => {
     if (!active) return
     requestAnimationFrame(() => {
       layout()
-      termRef.current?.focus()
+      if (composingRef.current) bumpFocus()
+      else termRef.current?.focus()
     })
   }, [active, sessionId, layout])
 
@@ -406,6 +458,20 @@ export function TerminalView({
         </div>
       )}
       {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
+      {/* Overlaid on the terminal, never docked beside it: a sibling would change
+          the scroll host's box, and the ResizeObserver above turns that into a PTY
+          resize — under tmux, a reflow for every attached client. */}
+      <PromptComposer
+        open={composing}
+        focusKey={focusKey}
+        draft={draft}
+        onDraft={setDraft}
+        onSend={sendDraft}
+        onOpen={openComposer}
+        onClose={closeComposer}
+        onDiscard={() => setDraft('')}
+        bracketed={bracketed}
+      />
     </div>
   )
 }

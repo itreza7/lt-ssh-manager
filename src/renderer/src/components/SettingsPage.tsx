@@ -20,6 +20,7 @@ import {
 import { Button } from './Modal'
 import { Select } from './Select'
 import { isMac } from '../lib/platform'
+import { COMPOSE_ACCEL } from '../lib/xtermAttach'
 
 interface Props {
   settings: AppSettings
@@ -386,6 +387,12 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
                   <span className="font-mono text-xs text-signal">Ctrl+J</span>
                   <span className="text-right text-muted">Newline — always, whatever Shift+Enter is set to</span>
+                </div>
+                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-signal">{COMPOSE_ACCEL}</span>
+                  <span className="text-right text-muted">
+                    Prompt composer — draft a multi-line prompt, then send it as one paste
+                  </span>
                 </div>
               </div>
             )}
