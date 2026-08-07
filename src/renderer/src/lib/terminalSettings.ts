@@ -5,6 +5,7 @@ export type {
   CursorStyle,
   EditorSettings,
   SettingsPatch,
+  ShiftEnterMode,
   TerminalSettings
 } from '../../../shared/types'
 import { DEFAULT_APP_SETTINGS } from '../../../shared/types'

@@ -3,7 +3,7 @@ import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
-import { attachTerminalClipboard } from '../lib/xtermClipboard'
+import { attachTerminal } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { ReattachBanner } from './ReattachBanner'
@@ -19,6 +19,8 @@ interface Props {
   tmux?: TmuxIntent
   settings: TerminalSettings
   onStatus: (sessionId: string, status: SessionStatus) => void
+  /** The remote set its window title — used as the tab's live label. */
+  onTitle?: (sessionId: string, title: string) => void
 }
 
 export function TerminalView({
@@ -30,7 +32,8 @@ export function TerminalView({
   command,
   tmux,
   settings,
-  onStatus
+  onStatus,
+  onTitle
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
   // xterm mounts and is sized to overscroll× the visible height.
@@ -190,11 +193,17 @@ export function TerminalView({
     // Keystrokes typed while a reattach is in flight are dropped by the main
     // process (no session is held under this id yet). That is deliberate: buffering
     // them would replay a burst into whatever pane tmux happens to restore focus to.
-    term.onData((d) => window.api.sendInput(sessionId, d))
+    const send = (d: string): void => window.api.sendInput(sessionId, d)
+    term.onData(send)
     const offRender = term.onRender(() => stickToBottom())
 
-    // Copy-on-select, copy/paste keys, right/middle-click paste, OSC 52 writes.
-    const detachClipboard = attachTerminalClipboard(term, host)
+    // Clipboard, Shift+Enter encoding, remote-set title. `send` is shared with
+    // onData above so synthesized keys take the same path as typed ones.
+    const detachTerminal = attachTerminal(term, host, {
+      sendData: send,
+      settings: () => settingsRef.current,
+      onTitle: (t) => onTitle?.(sessionId, t)
+    })
 
     // Overscroll scroll plumbing. Let the browser scroll the outer host natively
     // (so it keeps its smooth/inertial feel) — we only stop xterm from also
@@ -293,7 +302,7 @@ export function TerminalView({
       ro.disconnect()
       scroll.removeEventListener('wheel', onWheel, { capture: true })
       scroll.removeEventListener('scroll', onScroll)
-      detachClipboard()
+      detachTerminal()
       window.api.closeSession(sessionId)
       term.dispose()
     }
