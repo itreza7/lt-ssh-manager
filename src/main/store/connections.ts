@@ -48,6 +48,7 @@ export const connectionStore = {
       // editing a connection must not wipe the remembered browse location
       lastSftpPath: draft.lastSftpPath ?? existing?.lastSftpPath,
       notes: draft.notes?.trim() || undefined,
+      claudePath: draft.claudePath?.trim() || undefined,
       tmux: draft.tmux || undefined,
       tmuxSession: draft.tmuxSession?.trim() || undefined,
       tmuxDetachOthers: draft.tmuxDetachOthers || undefined,

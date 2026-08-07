@@ -11,6 +11,14 @@ export interface Connection {
   authMethod: AuthMethod
   keyPath?: string
   notes?: string
+  /**
+   * Absolute path to the `claude` binary, for the hosts where the resolver ladder
+   * cannot find it — typically a version-manager shim (nvm, asdf, mise, bun) that
+   * lives on a PATH only a login shell knows. Re-validated with `[ -x ]` on every
+   * use, so a path orphaned by an upgrade falls back to the ladder instead of
+   * dead-ending. Blank on almost every connection; see shared/claude.ts.
+   */
+  claudePath?: string
   /** Directory the SFTP file manager opens to by default (blank = home). */
   sftpPath?: string
   /** Last directory browsed in the file manager; restored on reopen. */
@@ -189,6 +197,47 @@ export interface ClaudeHookStatus {
   installed: boolean
   /** Some hook of ours is present — possibly an older command that needs updating. */
   present: boolean
+}
+
+/**
+ * What the Claude Code CLI looks like on one server, as of the last probe.
+ *
+ * Every field is nullable or optional on purpose: a probe that reaches the host
+ * but cannot answer a question reports "unknown", never a guess. A `false` here
+ * means the remote shell actually said so. That distinction is load-bearing,
+ * because the card turns these into advice — install this, sign in — and advice
+ * is worse than useless when it is wrong about a working install.
+ *
+ * Nothing in this shape can carry a secret. `credsFile` is the result of a bare
+ * `[ -f ]`, and `loggedIn`/`authMethod` are the only two scalars taken from
+ * `claude auth status --json`; the account email, org id and org name are
+ * dropped inside the remote shell, so they never reach stdout, IPC, or a log.
+ */
+export interface ClaudeRuntime {
+  /**
+   * The remote `$HOME`, absolute, as the probe saw it. Not cosmetic: a dashboard
+   * launch hashes this path into the tmux session name, and hashing a guessed
+   * `~` would name a different session than a file-browser launch on the very
+   * same directory — two agents in one home, which is the failure the whole
+   * path-derived naming scheme exists to prevent. Undefined hides that button.
+   */
+  home?: string
+  /** Absolute path to the resolved binary, or null when no rung of the ladder matched. */
+  path: string | null
+  /**
+   * Semver only, taken from the `<semver> (Claude Code)` line. Null when the
+   * output did not match that exact shape — a shell wrapper or some future
+   * banner must read as "unknown version", not as a version we invented.
+   */
+  version: string | null
+  /** Tri-state: null means `auth status` gave no parsable answer, not signed out. */
+  loggedIn: boolean | null
+  /** e.g. "claude.ai". Charset-clamped on both sides; undefined when unrecognized. */
+  authMethod?: string
+  /** Presence of `$CLAUDE_CONFIG_DIR/.credentials.json`. Existence only, never contents. */
+  credsFile: boolean
+  /** Round-trip in ms. Diagnostic only. */
+  probeMs?: number
 }
 
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */

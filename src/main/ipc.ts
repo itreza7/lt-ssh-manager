@@ -15,6 +15,7 @@ import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import type {
   ClaudeHookStatus,
+  ClaudeRuntime,
   ConnectionDraft,
   ServerStats,
   SettingsPatch,
@@ -32,6 +33,8 @@ import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
+import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT, shWrap } from '../shared/claude'
+import { shQuote } from '../shared/tmux'
 
 // Native macOS fullscreen leaves a black bar above a frameless window and pushes
 // it into a separate Space; simple fullscreen covers the whole screen in place.
@@ -44,9 +47,6 @@ export function toggleFullScreen(w: BrowserWindow): void {
 // tmux list-sessions with a parseable format (pipe-delimited; tab isn't honored
 // inside tmux format strings).
 const TMUX_LIST = `tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}'`
-
-/** Single-quote a value for safe interpolation into a remote shell command. */
-const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
 // ---- staged uploads (drop a file on a terminal) ----
 
@@ -121,12 +121,62 @@ const PROBE = [
   `echo "users=$(who 2>/dev/null | wc -l | tr -d ' ')"`
 ].join('\n')
 
-function parseProbe(text: string): ServerStats {
+/**
+ * Read `key=value` probe output. Split on the *first* `=` only, so a value may
+ * contain one; last line wins, so a probe that retries a key overrides it.
+ *
+ * One implementation, used by every probe: two would drift, and the difference
+ * would show up as a field that silently reads empty on one panel.
+ */
+function kv(text: string): Map<string, string> {
   const map = new Map<string, string>()
   for (const line of text.split('\n')) {
     const i = line.indexOf('=')
     if (i > 0) map.set(line.slice(0, i).trim(), line.slice(i + 1).trim())
   }
+  return map
+}
+
+// One-shot probe for the Claude Code CLI on a host: which binary the launch will
+// actually run, what version it is, and whether it is signed in.
+//
+// The resolver block is CLAUDE_RESOLVE verbatim — the same text the launch script
+// uses — because a card that describes a different install than the tab starts is
+// worse than no card. `$CLI` is seeded by the caller with the connection's pin.
+//
+// Credentials: `[ -f ]` on the credentials file and nothing else — never cat'd,
+// stat'd for size, hashed, or fetched over the SFTP channel. Of `auth status
+// --json` only two scalars are extracted, inside the remote shell, so the account
+// email, org id and org name never enter stdout and there is nothing to strip at
+// the IPC boundary.
+const CLAUDE_PROBE = [
+  CLAUDE_TIMEOUT,
+  CLAUDE_RESOLVE,
+  'echo "home=$HOME"',
+  'CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}',
+  '[ -f "$CFG/.credentials.json" ] && echo "creds=1" || echo "creds=0"',
+  '[ -n "$CLI" ] || { echo "end=1"; exit 0; }',
+  'echo "path=$CLI"',
+  // `</dev/null` on every claude call: a subcommand that decides to prompt would
+  // otherwise inherit the exec channel's stdin, block, and burn the whole window.
+  `echo "version=$($TMO "$CLI" --version </dev/null 2>/dev/null | tr -d '\\n\\r')"`,
+  `A=$($TMO "$CLI" auth status --json </dev/null 2>/dev/null | tr -d '\\n\\r')`,
+  // Anchored on the key, not a substring search of the payload. The org name is
+  // free text and could contain `"loggedIn": false` — but JSON escapes a quote
+  // inside a string as `\"`, so the literal `"loggedIn"` can only ever be the
+  // real key. That also makes key *order* irrelevant. Verified against payloads
+  // with a hostile org name in both positions.
+  `echo "auth=$(printf '%s' "$A" | grep -o '"loggedIn"[[:space:]]*:[[:space:]]*[a-z]*' | head -n 1 | sed 's/.*://; s/[[:space:]]//g')"`,
+  `echo "method=$(printf '%s' "$A" | grep -o '"authMethod"[[:space:]]*:[[:space:]]*"[A-Za-z0-9_.@:+-]*"' | head -n 1 | sed 's/.*"\\([^"]*\\)"$/\\1/')"`,
+  // The completeness sentinel. exec() truncates at EXEC_MAX_BYTES and its
+  // deadline can cut the stream mid-line; without this a partial read is
+  // indistinguishable from a host with nothing installed, and the card would
+  // tell someone with a working agent to reinstall it.
+  'echo "end=1"'
+].join('\n')
+
+function parseProbe(text: string): ServerStats {
+  const map = kv(text)
   const num = (k: string): number | undefined => {
     const v = map.get(k)
     if (!v) return undefined
@@ -695,6 +745,49 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           present: after.present
         }
       })
+  )
+
+  // Describe the Claude Code CLI on one host.
+  //
+  // Every value is re-validated here rather than trusted from the wire: the probe
+  // runs in a shell we do not control, on a host we do not control, and a field
+  // that fails its shape check becomes "unknown" — never a guess, and never a
+  // fabricated version string.
+  ipcMain.handle(
+    'claude:runtime',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeRuntime> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const started = Date.now()
+      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}\n${CLAUDE_PROBE}`
+      const res = await ssh.exec(connection, {
+        command: shWrap(script),
+        password: passwordFor(args.connectionId, args.password),
+        timeoutMs: 15000,
+        // The 20s default is *smaller* than this probe's worst case: 15s to
+        // connect, plus three remotely-bounded `claude` calls at 6s each. Leaving
+        // it would time out a slow-but-healthy host and render the card as "not
+        // installed" — the one wrong answer that makes someone break a working
+        // setup. First caller to need this; the rest are a single fast command.
+        deadlineMs: 35000
+      })
+      const m = kv(res.stdout)
+      if (m.get('end') !== '1') throw new Error('Probe did not complete')
+      const home = m.get('home') ?? ''
+      const path = m.get('path') ?? ''
+      const auth = m.get('auth')
+      const method = m.get('method') ?? ''
+      const version = /^(\d+\.\d+\.\d+[A-Za-z0-9.+-]*) \(Claude Code\)$/.exec(m.get('version') ?? '')
+      return {
+        home: /^\/\S*$/.test(home) ? home : undefined,
+        path: /^\/\S+$/.test(path) ? path : null,
+        version: version ? version[1] : null,
+        loggedIn: auth === 'true' ? true : auth === 'false' ? false : null,
+        authMethod: /^[A-Za-z0-9_.@:+-]{1,32}$/.test(method) ? method : undefined,
+        credsFile: m.get('creds') === '1',
+        probeMs: Date.now() - started
+      }
+    }
   )
 
   // ---- misc ----

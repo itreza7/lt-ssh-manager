@@ -73,7 +73,15 @@ interface ExecOpts {
   password?: string
   passphrase?: string
   command: string
+  /** Connect deadline (ssh2 `readyTimeout`). Covers the handshake, nothing after it. */
   timeoutMs?: number
+  /**
+   * Deadline for the whole operation, connect *and* command. Without one, a
+   * command that never closes its channel — a probe that blocks on a prompt, a
+   * server wedged mid-write — leaves the caller's promise pending forever, and
+   * every caller here is a UI panel waiting on it. Defaults to EXEC_DEADLINE_MS.
+   */
+  deadlineMs?: number
 }
 
 interface Session {
@@ -532,31 +540,66 @@ export class SshManager extends EventEmitter {
     return session.outputTail.toString('utf-8').replace(ANSI_RE, '')
   }
 
+  /** Whole-operation ceiling for a one-shot command when the caller sets none. */
+  private static readonly EXEC_DEADLINE_MS = 20000
+
+  /**
+   * Most output one command may produce before we give up on it.
+   *
+   * Every caller of exec() parses a short, known-shaped reply; none of them
+   * stream. A remote that answers with gigabytes would otherwise be accumulated
+   * whole in the main process. Exceeding it *fails* rather than truncating —
+   * a half-read `key=value` probe parses cleanly into wrong values, which is
+   * worse than an error the UI can show.
+   */
+  private static readonly EXEC_MAX_BYTES = 1_000_000
+
   /** One-shot command: connect, run, collect output, disconnect. */
   exec(connection: Connection, opts: ExecOpts): Promise<{ code: number | null; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const client = new Client()
       let settled = false
-      const fail = (e: unknown) => {
+      const deadline = opts.deadlineMs ?? SshManager.EXEC_DEADLINE_MS
+      // Cleared on every exit path: a pending timer would hold the event loop
+      // open and then fire against an already-settled promise.
+      let timer: NodeJS.Timeout | undefined
+      const fail = (e: unknown): void => {
         if (settled) return
         settled = true
+        clearTimeout(timer)
         try {
           client.end()
+          // The deadline case is a connection that is *not* answering, where a
+          // polite disconnect can itself hang. destroy() drops the socket.
+          client.destroy()
         } catch {
           /* ignore */
         }
         reject(e)
       }
+      timer = setTimeout(
+        () => fail(new Error(`Command timed out after ${Math.round(deadline / 1000)}s`)),
+        deadline
+      )
       client.on('ready', () => {
         client.exec(opts.command, (err, stream) => {
           if (err) return fail(err)
           let stdout = ''
           let stderr = ''
-          stream.on('data', (d: Buffer) => (stdout += d.toString('utf-8')))
-          stream.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf-8')))
+          const take = (d: Buffer, to: 'out' | 'err'): void => {
+            if (settled) return
+            if (to === 'out') stdout += d.toString('utf-8')
+            else stderr += d.toString('utf-8')
+            if (stdout.length + stderr.length > SshManager.EXEC_MAX_BYTES) {
+              fail(new Error('Command produced far more output than expected'))
+            }
+          }
+          stream.on('data', (d: Buffer) => take(d, 'out'))
+          stream.stderr.on('data', (d: Buffer) => take(d, 'err'))
           stream.on('close', (code: number | null) => {
             if (settled) return
             settled = true
+            clearTimeout(timer)
             client.end()
             resolve({ code, stdout, stderr })
           })
