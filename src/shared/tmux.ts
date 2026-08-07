@@ -36,9 +36,25 @@ export function tmuxSessionName(raw: string): string {
  *
  * The exact byte form is load-bearing: it is persisted in workspace.json and read
  * back by parseTmuxIntent() when a tab is restored. Change it and add a case there.
+ *
+ * `run` is the shell-command tmux should start the session's first pane with —
+ * what an agent tab uses instead of a login shell. Two things about it:
+ *
+ *  - tmux runs it as `default-shell -c`, i.e. non-login and possibly fish or csh,
+ *    which is why the only caller passes a `/bin/sh -c …` wrapper rather than a
+ *    bare script (see shared/claude.ts).
+ *  - **`new -A` discards it when the session already exists.** That is the point,
+ *    not a caveat: relaunching an agent on a directory attaches to the one
+ *    already running there instead of starting a second in the same pane.
+ *
+ * CREATE_RE below is anchored at `$` and so does not parse the `run` form. Left
+ * that way on purpose — parseTmuxIntent is the pre-0.2.4 legacy path, tabs saved
+ * since carry their intent directly, and teaching it to accept a trailing command
+ * would make a restored tab re-run that command.
  */
-export function tmuxCreateCommand(i: TmuxIntent): string {
-  return `tmux${i.control ? ' -CC' : ''} new -A${i.detachOthers ? ' -D' : ''} -s ${shQuote(i.session)}`
+export function tmuxCreateCommand(i: TmuxIntent, run?: string): string {
+  const base = `tmux${i.control ? ' -CC' : ''} new -A${i.detachOthers ? ' -D' : ''} -s ${shQuote(i.session)}`
+  return run ? `${base} ${shQuote(run)}` : base
 }
 
 /**

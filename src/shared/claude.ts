@@ -1,0 +1,152 @@
+// Builders for running Claude Code on a remote server: the script a tab launches
+// it with, the probe the dashboard describes it with, and the tmux session name
+// that keeps one directory to one agent.
+//
+// Shared, not renderer-only, for the same reason shared/tmux.ts is: the main
+// process builds the probe out of CLAUDE_RESOLVE and the renderer builds the
+// launch script out of the same text. If the two drift, the card describes one
+// install and the tab starts another.
+//
+// One fact shapes almost everything here. sshd runs an exec channel as
+// `$SHELL -c <cmd>`, and tmux runs a shell-command as `default-shell -c <cmd>` —
+// both non-login and non-interactive. Neither reads ~/.profile, and Debian and
+// Ubuntu's stock ~/.bashrc returns early when non-interactive, so `~/.local/bin`
+// is off PATH. `ssh host 'claude --version'` therefore exits 127 on a machine
+// where Claude Code plainly works in a terminal. Hence the resolver ladder below
+// and the `/bin/sh -c` wrapper: the remote login shell may also be fish or csh,
+// neither of which can parse `$( )`, `for…do…done` or `case`.
+import type { TmuxIntent } from './types'
+import { shQuote, tmuxCreateCommand } from './tmux'
+
+/**
+ * `$TMO` is used UNQUOTED at every call site so it word-splits into `timeout 6`
+ * when coreutils is there and vanishes when it is not; `"$TMO"` would try to
+ * exec a program named "". It is probed rather than assumed because `timeout`
+ * ships with coreutils/busybox and is absent on stock macOS and some BSDs.
+ */
+export const CLAUDE_TIMEOUT = 'TMO=; command -v timeout >/dev/null 2>&1 && TMO="timeout 6"'
+
+/**
+ * Statement separator for every script that goes through shWrap — `'; '`, never
+ * a newline.
+ *
+ * shWrap single-quotes the script so a fish or csh login shell hands it to
+ * /bin/sh intact. csh cannot carry a single-quoted word across a newline:
+ * `tcsh -c "/bin/sh -c 'echo A<LF>echo B'"` prints `Unmatched '.` and then runs
+ * the remaining lines as csh. So a newline-joined script fails on exactly the
+ * shell the wrapper is there to survive — the tab fills with csh parse errors,
+ * and the probe emits a partial answer that the handler rejects, on a host
+ * where Claude Code is installed and fine. Keep every builder below on one line.
+ */
+export const SEP = '; '
+
+/**
+ * Resolve `claude` into `$CLI`, or leave `$CLI` empty. Expects `$CLI` to already
+ * hold the per-connection override, or the empty string.
+ *
+ * Four rungs, cheapest first. The last pays for a whole login shell exactly once,
+ * because that is the only way to see a version-manager shim — nvm, asdf, mise,
+ * bun — which lives on a PATH no rung can enumerate. It is the one rung that runs
+ * another program, so it is the one rung that is time-bounded: a login shell whose
+ * rc file blocks on a prompt would otherwise hang the tab with no visible cause.
+ *
+ * The trailing `case` is the security boundary, not a tidy-up. `command -v` inside
+ * a login shell can hand back an alias, a function body, or whatever the rc file
+ * printed first — and a `$SHELL` of /usr/sbin/nologin prints a refusal message.
+ * Anything that is not an absolute path to an executable file is discarded, and
+ * the caller takes its not-found branch instead of exec'ing that text.
+ */
+export const CLAUDE_RESOLVE = [
+  // A pin saved when the binary existed, then orphaned by an upgrade that moved
+  // it, must not skip the ladder and dead-end on a path that no longer resolves.
+  '[ -n "$CLI" ] && [ ! -x "$CLI" ] && CLI=',
+  '[ -n "$CLI" ] || CLI=$(command -v claude 2>/dev/null)',
+  '[ -n "$CLI" ] || for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /usr/local/bin/claude /usr/bin/claude /opt/homebrew/bin/claude /snap/bin/claude; do [ -x "$c" ] && CLI=$c && break; done',
+  '[ -n "$CLI" ] || CLI=$($TMO "${SHELL:-/bin/sh}" -lc "command -v claude" 2>/dev/null | tail -n 1)',
+  'case "$CLI" in /*) [ -x "$CLI" ] || CLI= ;; *) CLI= ;; esac'
+].join(SEP)
+
+/**
+ * Wrap a POSIX script for a remote login shell that may be fish or csh.
+ *
+ * The wrapped script must be a single LINE — see SEP. csh cannot carry a
+ * single-quoted word across a newline, so a multi-line script here fails on
+ * precisely the shell this wrapper exists to defend against.
+ */
+export const shWrap = (script: string): string => `/bin/sh -c ${shQuote(script)}`
+
+/**
+ * The script an agent tab runs: resolve the binary, `cd`, hand the pane to Claude.
+ *
+ * Every ending — clean, failed, or never-started — exits the pane. `die` holds
+ * the message on screen first, because tmux restores the alternate screen the
+ * instant a pane dies and an unread error is no error at all.
+ *
+ * What it must NOT do is drop to a login shell, however useful that looks. The
+ * pane's tmux session is named after the directory, and `tmux new -A` attaches
+ * to a session that already exists. A husk left behind by a failed launch would
+ * therefore capture that name: after installing Claude Code, clicking `Claude
+ * here` on that directory would attach to the old plain shell, forever, with no
+ * error to explain it and no way back short of killing the session by hand.
+ * Exiting frees the name, so the next click is a real launch. A shell on that
+ * host is one click away on the dashboard regardless.
+ */
+export function claudeScript(dir: string, pin?: string): string {
+  return [
+    // `%b` so callers can put a line break in a message without putting one in
+    // the script; `read` falls back to a sleep where stdin is not a terminal.
+    'die() { echo; printf "%b\\n\\n" "$1"; printf "[Enter to close] "; read _ 2>/dev/null || sleep 60; exit 1; }',
+    `cd ${shQuote(dir)} 2>/dev/null || die ${shQuote(`Cannot enter ${dir}\\nIt may have been moved, removed, or never existed.`)}`,
+    CLAUDE_TIMEOUT,
+    `CLI=${pin ? shQuote(pin) : ''}`,
+    CLAUDE_RESOLVE,
+    `[ -n "$CLI" ] || die 'Claude Code was not found on this host.\\nInstall it with:  curl -fsSL https://claude.ai/install.sh | bash\\nOr, if it lives behind a version manager, set its full path in Edit > Claude Code binary.'`,
+    '"$CLI"; rc=$?',
+    '[ "$rc" = 0 ] && exit 0',
+    'die "claude exited with status $rc"'
+  ].join(SEP)
+}
+
+/** What an agent tab's `command` is set to, tmux or not. */
+export function claudeTabCommand(dir: string, pin?: string, tmux?: TmuxIntent): string {
+  const inner = shWrap(claudeScript(dir, pin))
+  // `exec` on the non-tmux path so the wrapper shell does not linger as a third
+  // process between sshd and the agent, swallowing a signal on disconnect.
+  return tmux ? tmuxCreateCommand(tmux, inner) : `exec ${inner}`
+}
+
+/**
+ * FNV-1a, 32-bit. A hash with no dependency, because the name it produces has to
+ * come out byte-identical in the renderer today and in any future main-process
+ * caller — a different hash is a different session, which is a second agent.
+ */
+export function fnv1a32(s: string): string {
+  let h = 0x811c9dc5
+  for (const b of new TextEncoder().encode(s)) {
+    h ^= b
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/**
+ * Name a session after the ABSOLUTE directory, never after a display string.
+ *
+ * tmuxSessionName() collapses `.`, `:` and whitespace all to `-`, so /srv/a.b,
+ * /srv/a-b and /srv/a b would flatten to one name — and `tmux new -A` would then
+ * attach the user to another project's *running* agent, in the wrong working
+ * tree, with no error and a perfectly plausible prompt. The slug is for the eye;
+ * the hash is what makes the name unique, and what makes it identical for a
+ * dashboard launch and a file-browser launch on the same path. That identity is
+ * the whole mechanism that stops two agents opening on one directory.
+ */
+export function claudeSessionName(dir: string): string {
+  const base = dir.replace(/\/+$/, '').split('/').pop() ?? ''
+  const slug = base.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 16)
+  return slug ? `claude-${slug}-${fnv1a32(dir)}` : 'claude-home'
+}
+
+/** Display only — drives the dashboard's `agent` chip. Never gates an action. */
+export function isClaudeSession(name: string): boolean {
+  return /^claude-(home|[a-z0-9_-]{1,16}-[0-9a-f]{8})$/.test(name)
+}

@@ -23,6 +23,7 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
   const [password, setPassword] = useState('')
   const [sftpPath, setSftpPath] = useState(initial?.sftpPath ?? '')
   const [notes, setNotes] = useState(initial?.notes ?? '')
+  const [claudePath, setClaudePath] = useState(initial?.claudePath ?? '')
   const [tmux, setTmux] = useState(initial?.tmux ?? false)
   const [tmuxSession, setTmuxSession] = useState(initial?.tmuxSession ?? '')
   const [tmuxDetachOthers, setTmuxDetachOthers] = useState(initial?.tmuxDetachOthers ?? false)
@@ -40,6 +41,7 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
       keyPath: authMethod === 'key' ? keyPath : undefined,
       sftpPath: sftpPath.trim() || undefined,
       notes,
+      claudePath: claudePath.trim() || undefined,
       tmux,
       tmuxSession: tmux ? tmuxSession.trim() || undefined : undefined,
       tmuxDetachOthers: tmux ? tmuxDetachOthers : undefined,
@@ -186,6 +188,19 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
               </label>
             </div>
           )}
+        </div>
+        <div>
+          <div className={label}>Claude Code binary</div>
+          <input
+            className={`${field} font-mono`}
+            value={claudePath}
+            onChange={(e) => setClaudePath(e.target.value)}
+            placeholder="blank = find it automatically"
+          />
+          <div className="mt-1 text-[11px] text-faint">
+            Only needed when it lives on a version manager&rsquo;s path (nvm, asdf, mise) that a
+            non-login shell cannot see. The dashboard shows where it was found.
+          </div>
         </div>
         <div>
           <div className={label}>Notes</div>

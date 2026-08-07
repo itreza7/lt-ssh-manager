@@ -11,6 +11,8 @@ interface Props {
   onOpenFile: (path: string, name: string) => void
   /** Report the current directory so it can be remembered per connection. */
   onCwdChange: (path: string) => void
+  /** Start Claude Code in a directory, in its own tab. */
+  onOpenClaude?: (dir: string) => void
 }
 
 // SFTP realpath resolves relative paths against the login dir, so a leading
@@ -191,7 +193,8 @@ export function FileManager({
   initialPath,
   active,
   onOpenFile,
-  onCwdChange
+  onCwdChange,
+  onOpenClaude
 }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [openError, setOpenError] = useState<string | null>(null)
@@ -516,6 +519,16 @@ export function FileManager({
         <ToolBtn label="Upload" onClick={() => void doUploadPick()}>
           ⤓
         </ToolBtn>
+        {/* Not gated on a probe: asking for it IS the authorization, and a missing
+            binary reads far better as a message in the agent's own pane than as a
+            greyed-out button here. Gated on cwd, though — that stays '' when the
+            first listing fails, and an agent started in a directory we cannot name
+            would land in $HOME under a session nobody can reach again. */}
+        {onOpenClaude && (
+          <ToolBtn label="Claude here" disabled={!cwd} onClick={() => onOpenClaude(cwd)}>
+            ✻
+          </ToolBtn>
+        )}
         <button
           onClick={() => setShowHidden((v) => !v)}
           title="Toggle hidden files"
@@ -697,6 +710,7 @@ export function FileManager({
           <div className="my-1 border-t border-line-soft" />
           <MenuItem onClick={() => setPrompt({ kind: 'mkdir' })}>New folder</MenuItem>
           <MenuItem onClick={() => void doUploadPick()}>Upload here</MenuItem>
+          {onOpenClaude && cwd && <MenuItem onClick={() => onOpenClaude(cwd)}>Claude here</MenuItem>}
           <MenuItem onClick={() => void list(cwd)}>Refresh</MenuItem>
         </div>
       )}

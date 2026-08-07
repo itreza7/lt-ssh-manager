@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import type { ClaudeHookStatus, Connection, ServerStats, TmuxSession } from '../../../shared/types'
+import type { ClaudeHookStatus, ClaudeRuntime, Connection, ServerStats, TmuxSession } from '../../../shared/types'
 import { Button, Modal } from './Modal'
+import { isClaudeSession } from '../lib/claude'
 
 interface Props {
   connection: Connection
@@ -15,8 +16,12 @@ interface Props {
   onNewSession: (name: string) => void
   onKillSession: (name: string) => Promise<void>
   onRenameSession: (from: string, to: string) => Promise<void>
-  fetchHookStatus: () => Promise<ClaudeHookStatus>
+  /** Resolve this connection's password once, for both reads below. */
+  resolvePassword: () => Promise<string | null | undefined>
+  fetchHookStatus: (password?: string) => Promise<ClaudeHookStatus>
   applyHook: (action: 'install' | 'uninstall') => Promise<ClaudeHookStatus>
+  fetchRuntime: (password?: string) => Promise<ClaudeRuntime>
+  onOpenClaude: (dir: string) => void
 }
 
 const authLabel: Record<Connection['authMethod'], string> = {
@@ -107,6 +112,14 @@ function IconButton({
 /** Add to `~/.tmux.conf`, or run against a live server as `tmux set -g …`. */
 const TMUX_PASSTHROUGH = 'set -g allow-passthrough all'
 
+/**
+ * Offered for copying, never run for you. Installing software on someone's server
+ * is not a thing a dashboard button should do quietly, and the shape of the right
+ * install differs per host — this is the one the docs give, and the user is the
+ * one who knows whether it is right for theirs.
+ */
+const CLAUDE_INSTALL = 'curl -fsSL https://claude.ai/install.sh | bash'
+
 /** A remote file's contents, verbatim — what we read, or what we're about to write. */
 function JsonBlock({ label, body, tone }: { label: string; body: string; tone?: 'signal' | 'danger' }) {
   const edge = tone === 'signal' ? 'border-signal/30' : tone === 'danger' ? 'border-danger/30' : 'border-line'
@@ -148,8 +161,11 @@ export function Dashboard({
   onNewSession,
   onKillSession,
   onRenameSession,
+  resolvePassword,
   fetchHookStatus,
-  applyHook
+  applyHook,
+  fetchRuntime,
+  onOpenClaude
 }: Props) {
   const [tmux, setTmux] = useState<TmuxSession[] | null>(null)
   const [tmuxLoading, setTmuxLoading] = useState(false)
@@ -167,11 +183,15 @@ export function Dashboard({
   // most hosts have no ~/.claude at all. It also keeps the panel to one password
   // prompt at a time — two concurrent prompts would clobber each other.
   const [hook, setHook] = useState<ClaudeHookStatus | null>(null)
-  const [hookLoading, setHookLoading] = useState(false)
+  const [claudeLoading, setClaudeLoading] = useState(false)
   const [hookError, setHookError] = useState<string | null>(null)
   const [hookAction, setHookAction] = useState<'install' | 'uninstall' | null>(null)
   const [hookBusy, setHookBusy] = useState(false)
   const [passCopied, setPassCopied] = useState(false)
+
+  const [runtime, setRuntime] = useState<ClaudeRuntime | null>(null)
+  const [runtimeError, setRuntimeError] = useState<string | null>(null)
+  const [installCopied, setInstallCopied] = useState(false)
 
   const loadTmux = useCallback(async () => {
     setTmuxLoading(true)
@@ -201,11 +221,42 @@ export function Dashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.id])
 
-  const loadHook = useCallback(async () => {
-    setHookLoading(true)
+  // One button for the whole panel, and the two halves run one after the other —
+  // never together. Both resolve a password, and askPassword holds a single
+  // pending request: a second concurrent call replaces the first, whose promise
+  // then never settles and whose caller spins forever with nothing to show.
+  //
+  // They also fail independently. A host with Claude Code installed but no
+  // ~/.claude yet is normal, and so is the reverse, so one error must not blank
+  // the other's answer.
+  const loadClaude = useCallback(async () => {
+    setClaudeLoading(true)
+    setRuntimeError(null)
     setHookError(null)
+    // Once, for both. Resolving inside each read prompted twice for the same
+    // password, and the two prompts must never be able to overlap regardless.
+    let password: string | undefined
     try {
-      setHook(await fetchHookStatus())
+      const pw = await resolvePassword()
+      if (pw === null) throw new Error('Password required to check Claude Code.')
+      password = pw ?? undefined
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setRuntimeError(msg)
+      setRuntime(null)
+      setHookError(msg)
+      setHook(null)
+      setClaudeLoading(false)
+      return
+    }
+    try {
+      setRuntime(await fetchRuntime(password))
+    } catch (e) {
+      setRuntimeError(e instanceof Error ? e.message : String(e))
+      setRuntime(null)
+    }
+    try {
+      setHook(await fetchHookStatus(password))
     } catch (e) {
       setHookError(e instanceof Error ? e.message : String(e))
       setHook(null)
@@ -213,7 +264,7 @@ export function Dashboard({
       // leaving it set would re-open the confirm modal over the next good read.
       setHookAction(null)
     } finally {
-      setHookLoading(false)
+      setClaudeLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.id])
@@ -225,6 +276,8 @@ export function Dashboard({
     setHook(null)
     setHookError(null)
     setHookAction(null)
+    setRuntime(null)
+    setRuntimeError(null)
     void loadTmux()
     void loadStats()
   }, [loadTmux, loadStats])
@@ -317,6 +370,13 @@ export function Dashboard({
             <Button onClick={onEdit}>Edit</Button>
             <Button onClick={onOpenTunnels}>Tunnels</Button>
             <Button onClick={onOpenFiles}>Browse Files</Button>
+            {/* Only once the probe has reported a real $HOME. The session name is
+                hashed from the absolute directory, so launching against a guessed
+                `~` would name a different session than a Files launch on the very
+                same directory — two agents, one home. */}
+            {runtime?.home && (
+              <Button onClick={() => onOpenClaude(runtime.home as string)}>Claude here ▸</Button>
+            )}
             <Button variant="primary" onClick={onOpenTerminal}>
               Open Terminal ▸
             </Button>
@@ -475,6 +535,14 @@ export function Dashboard({
                       <>
                         <div className="flex items-center gap-2">
                           <span className="truncate font-mono text-sm text-fg">{s.name}</span>
+                          {/* Derived from the name's own shape, so it survives an
+                              app restart with no bookkeeping. Display only: the
+                              Attach ▸ already here is the way back to the agent. */}
+                          {isClaudeSession(s.name) && (
+                            <span className="rounded-full bg-fg/10 px-2 py-0.5 text-[10px] font-medium text-fg/70">
+                              agent
+                            </span>
+                          )}
                           {s.attached && (
                             <span className="flex items-center gap-1 rounded-full bg-signal/15 px-2 py-0.5 text-[10px] font-medium text-signal">
                               <span className="h-1 w-1 rounded-full bg-signal" />
@@ -522,11 +590,108 @@ export function Dashboard({
           )}
         </div>
 
-        {/* claude code attention hook */}
+        {/* claude code runtime + attention hook */}
         <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '120ms' }}>
           <div className="mb-3.5 flex items-center justify-between">
             <span className="eyebrow">Claude Code</span>
-            {hook && <RefreshButton loading={hookLoading} onClick={() => void loadHook()} />}
+            {/* Also on the error states, not just the good ones. A failed check
+                sets an error and leaves both answers null, and gating this on
+                the answers alone left the panel with two red boxes and no way
+                to try again — on the single most likely first click, an
+                unreachable host or a cancelled password prompt. */}
+            {(runtime || hook || runtimeError || hookError) && (
+              <RefreshButton loading={claudeLoading} onClick={() => void loadClaude()} />
+            )}
+          </div>
+
+          {runtimeError && (
+            <p className="mb-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+              {runtimeError}
+            </p>
+          )}
+
+          {!runtime && (
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <p className="min-w-0 text-sm leading-relaxed text-fg/75">
+                {claudeLoading
+                  ? 'Looking for the CLI…'
+                  : runtimeError
+                    ? 'Nothing was learned about this host.'
+                    : 'Find out which Claude Code this host has, and whether it is signed in.'}
+              </p>
+              <Button variant="primary" disabled={claudeLoading} onClick={() => void loadClaude()}>
+                {runtimeError ? 'Try again ▸' : 'Check ▸'}
+              </Button>
+            </div>
+          )}
+
+          {runtime && (
+            <div className="mb-4">
+              {runtime.path ? (
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  <Fact label="Version" value={runtime.version ?? 'unknown'} mono />
+                  <Fact
+                    label="Sign-in"
+                    value={
+                      runtime.loggedIn === true ? (
+                        <span className="text-signal">
+                          signed in{runtime.authMethod ? ` · ${runtime.authMethod}` : ''}
+                        </span>
+                      ) : runtime.loggedIn === false ? (
+                        <span className="text-amber">not signed in</span>
+                      ) : (
+                        // Tri-state, and this is the third: the CLI gave no answer
+                        // we could parse. Saying "not signed in" here would send
+                        // someone to re-authenticate a session that works fine.
+                        <span className="text-faint">
+                          unknown{runtime.credsFile ? ' · credentials file present' : ''}
+                        </span>
+                      )
+                    }
+                  />
+                  <Fact label="Binary" value={runtime.path} mono />
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm leading-relaxed text-fg/75">
+                    No <span className="font-mono text-[12px] text-fg/90">claude</span> on this host — not on{' '}
+                    <span className="font-mono text-[12px]">$PATH</span>, not in the usual places, and not in a login
+                    shell. If it lives behind a version manager (nvm, asdf, mise, bun), set its full path under Edit ▸
+                    Claude binary.
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <code className="min-w-0 flex-1 truncate rounded-md border border-line bg-ink/60 px-2 py-1 font-mono text-[11px] text-fg/70">
+                      {CLAUDE_INSTALL}
+                    </code>
+                    <Button
+                      onClick={() => {
+                        void navigator.clipboard.writeText(CLAUDE_INSTALL)
+                        setInstallCopied(true)
+                        window.setTimeout(() => setInstallCopied(false), 1500)
+                      }}
+                    >
+                      {installCopied ? 'Copied' : 'Copy'}
+                    </Button>
+                  </div>
+                </>
+              )}
+
+              {runtime.loggedIn === false && (
+                <p className="mt-3 text-[12px] leading-relaxed text-faint">
+                  Open a terminal here and run <span className="font-mono">/login</span> inside Claude Code to sign in.
+                </p>
+              )}
+              {runtime.loggedIn === true && (
+                <p className="mt-3 text-[12px] leading-relaxed text-faint">
+                  “Signed in” means credentials are on the host, not that they still work — an expired plan looks the
+                  same from here.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="mb-3.5 border-t border-line-soft pt-3.5">
+            <span className="eyebrow">Attention hook</span>
           </div>
 
           <p className="text-sm leading-relaxed text-fg/75">
@@ -541,7 +706,7 @@ export function Dashboard({
             </p>
           )}
 
-          {!hook && !hookError && hookLoading && (
+          {!hook && !hookError && claudeLoading && (
             <p className="mt-3 font-mono text-xs text-faint">reading remote settings…</p>
           )}
 
@@ -554,28 +719,25 @@ export function Dashboard({
               )}
               {hook && !hook.present && <span className="text-faint">○ not installed</span>}
             </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {!hook ? (
-                <Button variant="primary" disabled={hookLoading} onClick={() => void loadHook()}>
-                  Check ▸
-                </Button>
-              ) : (
-                <>
-                  {hook.present && (
-                    <Button variant="danger" disabled={hookBusy} onClick={() => setHookAction('uninstall')}>
-                      Uninstall
-                    </Button>
-                  )}
-                  <Button
-                    variant="primary"
-                    disabled={hookBusy || hook.installed}
-                    onClick={() => setHookAction('install')}
-                  >
-                    {hook.present ? 'Update ▸' : 'Install ▸'}
+            {/* No Check ▸ of its own — the panel's single one reads both halves,
+                because each resolves a password and two at once clobber each
+                other. These appear only once there is a status to act on. */}
+            {hook && (
+              <div className="flex shrink-0 items-center gap-2">
+                {hook.present && (
+                  <Button variant="danger" disabled={hookBusy} onClick={() => setHookAction('uninstall')}>
+                    Uninstall
                   </Button>
-                </>
-              )}
-            </div>
+                )}
+                <Button
+                  variant="primary"
+                  disabled={hookBusy || hook.installed}
+                  onClick={() => setHookAction('install')}
+                >
+                  {hook.present ? 'Update ▸' : 'Install ▸'}
+                </Button>
+              </div>
+            )}
           </div>
 
           <div className="mt-3 border-t border-line-soft pt-3">

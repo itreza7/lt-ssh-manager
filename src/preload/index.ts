@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type {
   AppSettings,
   ClaudeHookStatus,
+  ClaudeRuntime,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
@@ -265,7 +266,13 @@ const api = {
     connectionId: string
     password?: string
     action: 'install' | 'uninstall'
-  }): Promise<ClaudeHookStatus> => ipcRenderer.invoke('claude:hook-apply', args)
+  }): Promise<ClaudeHookStatus> => ipcRenderer.invoke('claude:hook-apply', args),
+
+  /** What the Claude Code CLI looks like on a remote host. Carries no secrets. */
+  claudeRuntime: (args: {
+    connectionId: string
+    password?: string
+  }): Promise<ClaudeRuntime> => ipcRenderer.invoke('claude:runtime', args)
 }
 
 export type Api = typeof api

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
+  ClaudeHookStatus,
+  ClaudeRuntime,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
@@ -27,6 +29,7 @@ import { PaneDividers } from './components/PaneDividers'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
+import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
 
 const SETTINGS_TAB_ID = 'settings'
@@ -848,21 +851,30 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { session?: string; title?: string }
+    opts?: { session?: string; title?: string; agent?: { dir: string } }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
     let { title } = opts ?? {}
     const control = !!(conn.tmux && conn.tmuxControl)
+    const agentDir = opts?.agent?.dir
     // The session name, if any: an explicit one (already exactly as tmux spells it)
-    // wins over the connection's own.
-    const session = opts?.session ?? (conn.tmux ? tmuxSessionName(conn.tmuxSession || conn.name) : undefined)
+    // wins over the connection's own. An agent's name comes from the directory it
+    // runs in, so every entry point that opens on that directory lands on one
+    // session instead of forking a second agent into the same working tree.
+    const session =
+      opts?.session ??
+      (agentDir
+        ? claudeSessionName(agentDir)
+        : conn.tmux
+          ? tmuxSessionName(conn.tmuxSession || conn.name)
+          : undefined)
     // Kept structured rather than re-sniffed from the command string later, because
     // reattaching after a drop needs an attach-*only* command built from it.
     const tmux: TmuxIntent | undefined = session
       ? { session, control, detachOthers: !!conn.tmuxDetachOthers }
       : undefined
-    if (tmux) title = title ?? `${conn.name} · ${session}`
+    if (tmux) title = title ?? `${conn.name} · ${agentDir ? 'claude' : session}`
     const sessionId = crypto.randomUUID()
     const base = {
       id: sessionId,
@@ -870,8 +882,15 @@ export default function App() {
       title: title ?? conn.name,
       status: { kind: 'connecting' as const, attempt: 1, retries: appSettings.connectRetries },
       password: password ?? undefined,
-      command: tmux ? tmuxCreateCommand(tmux) : undefined,
-      tmux
+      command: agentDir
+        ? claudeTabCommand(agentDir, conn.claudePath, conn.tmux ? tmux : undefined)
+        : tmux
+          ? tmuxCreateCommand(tmux)
+          : undefined,
+      // An agent on a non-tmux connection has no session to attach to, so it must
+      // not claim one: a TmuxIntent here would send the reattach path after a drop
+      // to `attach -t` a session that was never created.
+      tmux: agentDir && !conn.tmux ? undefined : tmux
     }
     const tab: Tab = control ? { kind: 'tmux', ...base } : { kind: 'session', ...base }
     setTabs((t) => [...t, tab])
@@ -964,16 +983,43 @@ export default function App() {
     return window.api.probeServer({ connectionId: conn.id, password: password ?? undefined })
   }
 
-  const fetchHookStatusFor = (conn: Connection) => async () => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to read the Claude settings file.')
-    return window.api.claudeHookStatus({ connectionId: conn.id, password: password ?? undefined })
-  }
+  // The two dashboard reads take an already-resolved password rather than each
+  // resolving its own. One click on Check runs both, back to back, and a
+  // connection with no saved secret used to raise the identical prompt twice for
+  // the same password — which reads as "it didn't take the first one". The
+  // caller resolving once also makes it structurally impossible for the two to
+  // overlap, and askPassword holds exactly one slot: a second prompt raised over
+  // a live one orphans the first promise for good.
+  const resolvePasswordFor = (conn: Connection) => () => resolvePassword(conn)
 
+  const fetchHookStatusFor =
+    (conn: Connection) =>
+    (password?: string): Promise<ClaudeHookStatus> =>
+      window.api.claudeHookStatus({ connectionId: conn.id, password })
+
+  const fetchRuntimeFor =
+    (conn: Connection) =>
+    (password?: string): Promise<ClaudeRuntime> =>
+      window.api.claudeRuntime({ connectionId: conn.id, password })
+
+  // Install/uninstall stays self-resolving: it is a separate deliberate click,
+  // and it is the only one of the three, so it cannot collide with itself.
   const applyHookFor = (conn: Connection) => async (action: 'install' | 'uninstall') => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required to write the Claude settings file.')
     return window.api.claudeHookApply({ connectionId: conn.id, password: password ?? undefined, action })
+  }
+
+  // Open Claude Code in a directory, as a new tab.
+  //
+  // Fails closed on anything that isn't an absolute path. The file manager's cwd
+  // starts empty and stays empty when the first listing throws — its catch sets
+  // only `listError` while status is already 'ready' — so without this guard a
+  // click there would silently start an agent in $HOME under a session name
+  // hashed from '', which no later launch on any real directory would ever match.
+  const openClaude = (conn: Connection, dir: string): void => {
+    if (!dir.startsWith('/')) return
+    void openSession(conn, { agent: { dir } })
   }
 
   // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
@@ -1278,8 +1324,11 @@ export default function App() {
                     onNewSession={(name) => attachTmux(conn, tmuxSessionName(name))}
                     onKillSession={killTmux(conn)}
                     onRenameSession={renameTmux(conn)}
+                    resolvePassword={resolvePasswordFor(conn)}
                     fetchHookStatus={fetchHookStatusFor(conn)}
                     applyHook={applyHookFor(conn)}
+                    fetchRuntime={fetchRuntimeFor(conn)}
+                    onOpenClaude={(dir) => openClaude(conn, dir)}
                   />
                   {paneTools(tab.id)}
                 </div>
@@ -1360,6 +1409,10 @@ export default function App() {
                     onCwdChange={(path) => {
                       rememberSftpPath(tab.connectionId, path)
                       updateSftpTabPath(tab.id, path)
+                    }}
+                    onOpenClaude={(dir) => {
+                      const conn = connections.find((c) => c.id === tab.connectionId)
+                      if (conn) openClaude(conn, dir)
                     }}
                   />
                   {paneTools(tab.id)}
