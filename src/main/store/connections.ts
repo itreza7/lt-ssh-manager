@@ -50,7 +50,8 @@ export const connectionStore = {
       notes: draft.notes?.trim() || undefined,
       tmux: draft.tmux || undefined,
       tmuxSession: draft.tmuxSession?.trim() || undefined,
-      tmuxDetachOthers: draft.tmuxDetachOthers || undefined
+      tmuxDetachOthers: draft.tmuxDetachOthers || undefined,
+      tmuxControl: draft.tmuxControl || undefined
     }
     const idx = list.findIndex((c) => c.id === conn.id)
     if (idx >= 0) list[idx] = conn
