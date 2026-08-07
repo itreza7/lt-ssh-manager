@@ -63,7 +63,12 @@ const NOTIFY_TMUX =
  */
 export const HOOK_COMMAND =
   `if [ -n "$TMUX" ]; then printf '${NOTIFY_TMUX}'; else printf '${NOTIFY}'; fi ` +
-  `>/dev/tty 2>/dev/null; exit 0 # ${HOOK_MARKER}`
+  // stderr is silenced *before* /dev/tty is opened, because the failure being
+  // silenced is the opening of /dev/tty. Redirections apply left to right, so
+  // the other way round the shell's "cannot create /dev/tty" lands on Claude
+  // Code's still-inherited stderr — the one place this hook must never be heard,
+  // and the one case (a session with no controlling terminal) where it happens.
+  `2>/dev/null >/dev/tty; exit 0 # ${HOOK_MARKER}`
 
 /** One command inside a hook entry. Unknown keys are preserved on write. */
 interface HookCommand extends Record<string, unknown> {
