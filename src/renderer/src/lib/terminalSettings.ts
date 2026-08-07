@@ -1,6 +1,7 @@
 // UI-side helpers for settings. The settings themselves are persisted on disk
 // by the main process (see main/store/settings.ts), not in the browser.
 export type {
+  AgentAlerts,
   AppSettings,
   CursorStyle,
   EditorSettings,

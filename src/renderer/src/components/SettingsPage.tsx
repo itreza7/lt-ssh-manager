@@ -1,5 +1,11 @@
 import { useState, type ReactNode } from 'react'
-import type { AppSettings, CursorStyle, SettingsPatch, ShiftEnterMode } from '../lib/terminalSettings'
+import type {
+  AgentAlerts,
+  AppSettings,
+  CursorStyle,
+  SettingsPatch,
+  ShiftEnterMode
+} from '../lib/terminalSettings'
 import {
   clampFont,
   clampOverscroll,
@@ -46,6 +52,12 @@ const SHIFT_ENTERS: { value: ShiftEnterMode; label: string }[] = [
   { value: 'newline', label: 'Newline' },
   { value: 'escape-cr', label: 'Esc+Enter' },
   { value: 'submit', label: 'Submit' }
+]
+
+const AGENT_ALERTS: { value: AgentAlerts; label: string }[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'dot', label: 'Dot' },
+  { value: 'notify', label: 'Notify' }
 ]
 
 /** What Shift+Enter actually does right now — the setting above decides. */
@@ -282,6 +294,16 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                     hint="Label a session tab with the title the remote sets — the working directory, or what's running — instead of the connection name."
                   >
                     <Toggle on={t.liveTitles} onChange={(b) => setT({ liveTitles: b })} />
+                  </Row>
+                  <Row
+                    label="Agent attention"
+                    hint="When a program in a tab you aren't looking at asks for you — Claude Code's Notification hook, or any bell. Dot marks the tab; Notify adds a system notification and a dock badge while the window is in the background."
+                  >
+                    <Segmented
+                      value={t.agentAlerts}
+                      options={AGENT_ALERTS}
+                      onChange={(v) => setT({ agentAlerts: v })}
+                    />
                   </Row>
                   <Row
                     label="Overscroll height"

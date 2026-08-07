@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import type { Connection, ServerStats, TmuxSession } from '../../../shared/types'
-import { Button } from './Modal'
+import type { ClaudeHookStatus, Connection, ServerStats, TmuxSession } from '../../../shared/types'
+import { Button, Modal } from './Modal'
 
 interface Props {
   connection: Connection
@@ -15,6 +15,8 @@ interface Props {
   onNewSession: (name: string) => void
   onKillSession: (name: string) => Promise<void>
   onRenameSession: (from: string, to: string) => Promise<void>
+  fetchHookStatus: () => Promise<ClaudeHookStatus>
+  applyHook: (action: 'install' | 'uninstall') => Promise<ClaudeHookStatus>
 }
 
 const authLabel: Record<Connection['authMethod'], string> = {
@@ -102,6 +104,21 @@ function IconButton({
   )
 }
 
+/** A remote file's contents, verbatim — what we read, or what we're about to write. */
+function JsonBlock({ label, body, tone }: { label: string; body: string; tone?: 'signal' | 'danger' }) {
+  const edge = tone === 'signal' ? 'border-signal/30' : tone === 'danger' ? 'border-danger/30' : 'border-line'
+  return (
+    <div className="min-w-0">
+      <div className="eyebrow mb-1.5">{label}</div>
+      <pre
+        className={`max-h-56 overflow-auto rounded-lg border ${edge} bg-ink/60 p-3 font-mono text-xs leading-relaxed whitespace-pre text-fg/85`}
+      >
+        {body}
+      </pre>
+    </div>
+  )
+}
+
 function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => void }) {
   return (
     <button
@@ -127,7 +144,9 @@ export function Dashboard({
   onAttach,
   onNewSession,
   onKillSession,
-  onRenameSession
+  onRenameSession,
+  fetchHookStatus,
+  applyHook
 }: Props) {
   const [tmux, setTmux] = useState<TmuxSession[] | null>(null)
   const [tmuxLoading, setTmuxLoading] = useState(false)
@@ -140,6 +159,15 @@ export function Dashboard({
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
+
+  // Deliberately *not* loaded with the two above: it reads a file over SFTP, and
+  // most hosts have no ~/.claude at all. It also keeps the panel to one password
+  // prompt at a time — two concurrent prompts would clobber each other.
+  const [hook, setHook] = useState<ClaudeHookStatus | null>(null)
+  const [hookLoading, setHookLoading] = useState(false)
+  const [hookError, setHookError] = useState<string | null>(null)
+  const [hookAction, setHookAction] = useState<'install' | 'uninstall' | null>(null)
+  const [hookBusy, setHookBusy] = useState(false)
 
   const loadTmux = useCallback(async () => {
     setTmuxLoading(true)
@@ -169,13 +197,50 @@ export function Dashboard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.id])
 
+  const loadHook = useCallback(async () => {
+    setHookLoading(true)
+    setHookError(null)
+    try {
+      setHook(await fetchHookStatus())
+    } catch (e) {
+      setHookError(e instanceof Error ? e.message : String(e))
+      setHook(null)
+      // The pending action was planned against the status we just threw away —
+      // leaving it set would re-open the confirm modal over the next good read.
+      setHookAction(null)
+    } finally {
+      setHookLoading(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c.id])
+
   useEffect(() => {
     setTmux(null)
     setStats(null)
     setEditing(null)
+    setHook(null)
+    setHookError(null)
+    setHookAction(null)
     void loadTmux()
     void loadStats()
   }, [loadTmux, loadStats])
+
+  // Write the planned file, then show what's actually there now — main re-plans
+  // from a fresh read, so the returned status is the file as it stands, not a
+  // guess assembled from the plan we showed.
+  const confirmHook = async (): Promise<void> => {
+    if (!hookAction) return
+    setHookBusy(true)
+    setHookError(null)
+    try {
+      setHook(await applyHook(hookAction))
+    } catch (e) {
+      setHookError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setHookBusy(false)
+      setHookAction(null)
+    }
+  }
 
   // Run a one-shot tmux mutation, surface its error, then refresh the list.
   const runTmux = async (fn: () => Promise<void>): Promise<void> => {
@@ -453,6 +518,69 @@ export function Dashboard({
           )}
         </div>
 
+        {/* claude code attention hook */}
+        <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '120ms' }}>
+          <div className="mb-3.5 flex items-center justify-between">
+            <span className="eyebrow">Claude Code</span>
+            {hook && <RefreshButton loading={hookLoading} onClick={() => void loadHook()} />}
+          </div>
+
+          <p className="text-sm leading-relaxed text-fg/75">
+            Install a Notification hook in <span className="font-mono text-[12px] text-fg/90">~/.claude/settings.json</span>{' '}
+            on this host and Claude Code will mark its tab — and, if you turn on notifications in Settings ▸ Terminal,
+            raise a system notification — whenever it stops to ask you something.
+          </p>
+
+          {hookError && (
+            <p className="mt-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+              {hookError}
+            </p>
+          )}
+
+          {!hook && !hookError && hookLoading && (
+            <p className="mt-3 font-mono text-xs text-faint">reading remote settings…</p>
+          )}
+
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <div className="min-w-0 font-mono text-xs">
+              {!hook && <span className="text-faint">not checked</span>}
+              {hook?.installed && <span className="text-signal">● hook installed</span>}
+              {hook && !hook.installed && hook.present && (
+                <span className="text-amber">● older hook installed — update it</span>
+              )}
+              {hook && !hook.present && <span className="text-faint">○ not installed</span>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {!hook ? (
+                <Button variant="primary" disabled={hookLoading} onClick={() => void loadHook()}>
+                  Check ▸
+                </Button>
+              ) : (
+                <>
+                  {hook.present && (
+                    <Button variant="danger" disabled={hookBusy} onClick={() => setHookAction('uninstall')}>
+                      Uninstall
+                    </Button>
+                  )}
+                  <Button
+                    variant="primary"
+                    disabled={hookBusy || hook.installed}
+                    onClick={() => setHookAction('install')}
+                  >
+                    {hook.present ? 'Update ▸' : 'Install ▸'}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <p className="mt-3 border-t border-line-soft pt-3 text-[12px] leading-relaxed text-faint">
+            Under tmux you get the tab dot, but not the notification text: tmux drops the sequence carrying it unless
+            the server has <span className="font-mono">set -g allow-passthrough all</span> — off by default since tmux
+            3.3. Control mode (<span className="font-mono">tmux -CC</span>) tabs and plain shells are unaffected.
+          </p>
+        </div>
+
         {/* details */}
         <div className="panel animate-rise p-5" style={{ animationDelay: '140ms' }}>
           <div className="eyebrow mb-1.5">Connection details</div>
@@ -470,6 +598,41 @@ export function Dashboard({
           </div>
         )}
       </div>
+
+      {/* Nothing is written until this is confirmed, and it shows the file both
+          ways round first — it's the user's config, and it may hold hooks of
+          their own that we're merging alongside. */}
+      {hook && hookAction && (
+        <Modal
+          width={720}
+          title={hookAction === 'install' ? 'Install attention hook' : 'Remove attention hook'}
+          onClose={() => !hookBusy && setHookAction(null)}
+          footer={
+            <>
+              <Button onClick={() => setHookAction(null)} disabled={hookBusy}>
+                Cancel
+              </Button>
+              <Button
+                variant={hookAction === 'install' ? 'primary' : 'danger'}
+                disabled={hookBusy}
+                onClick={() => void confirmHook()}
+              >
+                {hookBusy ? 'Writing…' : hookAction === 'install' ? 'Write file' : 'Remove'}
+              </Button>
+            </>
+          }
+        >
+          <p className="mb-4 font-mono text-xs text-muted">{hook.path}</p>
+          <div className="grid grid-cols-2 gap-4">
+            <JsonBlock label="Now" body={hook.before} />
+            <JsonBlock
+              label="After"
+              tone={hookAction === 'install' ? 'signal' : 'danger'}
+              body={hookAction === 'install' ? hook.install : hook.uninstall}
+            />
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }

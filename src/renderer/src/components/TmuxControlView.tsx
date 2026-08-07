@@ -8,6 +8,7 @@ import type {
   TmuxWindowInfo
 } from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
+import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
@@ -30,6 +31,11 @@ interface Props {
   retries: number
   settings: TerminalSettings
   onStatus: (sessionId: string, status: SessionStatus) => void
+  /**
+   * A pane in this tab asked for a human. `onScreen` is false when that pane
+   * sits in a tmux window the user isn't currently looking at.
+   */
+  onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
 }
 
 /** A registry that routes per-pane output, buffering until a pane mounts. */
@@ -65,7 +71,8 @@ export function TmuxControlView({
   tmux,
   retries,
   settings,
-  onStatus
+  onStatus,
+  onAgentSignal
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<TmuxControlState | null>(null)
@@ -158,6 +165,22 @@ export function TmuxControlView({
 
   const onPanePasteImage = useCallback((paneId: string) => {
     uploadRef.current.pasteImage(writers.current.get(paneId)?.term ?? null)
+  }, [])
+
+  // Collapse every pane's signals onto this tab. Which pane rang is knowable but
+  // not showable: the tab strip has one dot per leaf, and a tmux tab is a leaf.
+  //
+  // Whether it was *visible* does have to travel, though. Every window's panes
+  // stay mounted and keep parsing output, so a pane in a tmux window you aren't
+  // looking at can ring while this tab is front and centre — and that is exactly
+  // the case the dot exists for. Without this bit the caller would read "tab on
+  // screen" as "you've seen it" and drop the signal on the floor.
+  const onAgentSignalRef = useRef(onAgentSignal)
+  onAgentSignalRef.current = onAgentSignal
+  const shownPanesRef = useRef<ReadonlySet<string>>(new Set())
+  const onPaneAgentSignal = useCallback((paneId: string, signal: AgentSignal) => {
+    onAgentSignalRef.current?.(sessionId, signal, shownPanesRef.current.has(paneId))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Measure the pane area, convert to a tmux cell grid, and push it as this
@@ -318,6 +341,8 @@ export function TmuxControlView({
   const activeWindowId = state?.activeWindow
   const activeWindow = windows.find((w) => w.windowId === activeWindowId) ?? windows.find((w) => w.active)
   const focusedPane = activeWindow?.activePane
+  // Read by onPaneAgentSignal, which is mount-stable and so can't close over this.
+  shownPanesRef.current = new Set(activeWindow?.panes.map((p) => p.paneId) ?? [])
 
   // Render every pane across every window (kept mounted so content persists), but
   // only the active window's panes are visible.
@@ -448,6 +473,7 @@ export function TmuxControlView({
                   onDragFiles={onPaneDragFiles}
                   onDropFiles={onPaneDropFiles}
                   onPasteImage={onPanePasteImage}
+                  onAgentSignal={onPaneAgentSignal}
                   onSelect={() => window.api.tmuxSelectPane(sessionId, pane.paneId)}
                 />
                 {overPane === pane.paneId && <DropHint />}
@@ -548,6 +574,7 @@ function TmuxPane({
   onDragFiles,
   onDropFiles,
   onPasteImage,
+  onAgentSignal,
   onSelect
 }: {
   sessionId: string
@@ -565,6 +592,8 @@ function TmuxPane({
   onDropFiles: (paneId: string, paths: string[]) => void
   /** Stable across renders, as above. */
   onPasteImage: (paneId: string) => void
+  /** Stable across renders, as above. */
+  onAgentSignal: (paneId: string, signal: AgentSignal) => void
   onSelect: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -588,10 +617,14 @@ function TmuxPane({
       onDropFiles: (paths) => onDropFiles(paneId, paths),
       onPasteImage: () => onPasteImage(paneId)
     })
+    // Every pane in this tab reports to the same leaf: the dot lives on the tab,
+    // and a tab is one tmux session no matter how many panes it holds.
+    const detachSignal = attachAgentSignal(term, (s) => onAgentSignal(paneId, s))
     const unregister = register(paneId, { write: (data) => term.write(data), term })
     return () => {
       unregister()
       detachTerminal()
+      detachSignal()
       term.dispose()
       termRef.current = null
     }

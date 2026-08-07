@@ -787,6 +787,57 @@ export class SshManager extends EventEmitter {
     )
   }
 
+  /**
+   * Replace a file's contents without ever leaving it truncated.
+   *
+   * `sftpWriteFile` opens the real path with `w`, so a connection that drops
+   * mid-write leaves the file half-written — acceptable for a document the user
+   * is editing and watching, not for a config file we rewrite on their behalf.
+   * Write a sibling temp and move it into place instead, so the destination only
+   * ever holds the old bytes or the new ones.
+   */
+  async sftpWriteFileAtomic(id: string, p: string, content: string, mode?: number): Promise<void> {
+    const sftp = this.sftpOf(id)
+    const tmp = `${p}.${randomUUID().slice(0, 8)}.tmp`
+    await new Promise<void>((res, rej) =>
+      sftp.writeFile(
+        tmp,
+        content,
+        { encoding: 'utf-8', ...(mode === undefined ? {} : { mode }) },
+        (e) => (e ? rej(e) : res())
+      )
+    )
+    try {
+      // OpenSSH's posix-rename overwrites atomically, which is the whole point.
+      // It throws *synchronously* when the server never advertised the extension,
+      // so it has to be called outside the executor — inside, the Promise
+      // constructor would convert that throw into a rejection indistinguishable
+      // from the rename itself failing, and we'd fall back for the wrong reason.
+      let posix: Promise<void> | null = null
+      try {
+        let settle!: (e?: Error) => void
+        const done = new Promise<void>((res, rej) => {
+          settle = (e) => (e ? rej(e) : res())
+        })
+        sftp.ext_openssh_rename(tmp, p, (e) => settle(e ?? undefined))
+        posix = done
+      } catch {
+        posix = null // no posix-rename@openssh.com on this server
+      }
+      if (posix) return await posix
+
+      // Plain SFTP rename fails outright when the destination exists, so the old
+      // file has to go first. That leaves a window where neither name resolves —
+      // still strictly better than a truncated file, since the new contents are
+      // already fully written and one rename away.
+      await new Promise<void>((res) => sftp.unlink(p, () => res()))
+      await new Promise<void>((res, rej) => sftp.rename(tmp, p, (e) => (e ? rej(e) : res())))
+    } catch (e) {
+      await new Promise<void>((res) => sftp.unlink(tmp, () => res()))
+      throw e
+    }
+  }
+
   private emitTransfer(
     transferId: string,
     kind: 'upload' | 'download',

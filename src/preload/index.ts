@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type {
   AppSettings,
+  ClaudeHookStatus,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
@@ -243,7 +244,28 @@ const api = {
     const h = (): void => cb()
     ipcRenderer.on('menu:open-settings', h)
     return () => ipcRenderer.removeListener('menu:open-settings', h)
-  }
+  },
+
+  // agent attention
+  agentNotify: (leafId: string, title: string, body: string): void =>
+    ipcRenderer.send('agent:notify', leafId, title, body),
+  agentBadge: (count: number): void => ipcRenderer.send('agent:badge', count),
+  onAgentFocus: (cb: (leafId: string) => void): (() => void) => {
+    const h = (_e: unknown, leafId: string): void => cb(leafId)
+    ipcRenderer.on('agent:focus', h)
+    return () => ipcRenderer.removeListener('agent:focus', h)
+  },
+
+  // Claude Code notification hook on a remote host
+  claudeHookStatus: (args: {
+    connectionId: string
+    password?: string
+  }): Promise<ClaudeHookStatus> => ipcRenderer.invoke('claude:hook-status', args),
+  claudeHookApply: (args: {
+    connectionId: string
+    password?: string
+    action: 'install' | 'uninstall'
+  }): Promise<ClaudeHookStatus> => ipcRenderer.invoke('claude:hook-apply', args)
 }
 
 export type Api = typeof api

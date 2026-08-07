@@ -27,6 +27,7 @@ import { PaneDividers } from './components/PaneDividers'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
+import type { AgentSignal } from './lib/xtermAgentSignal'
 
 const SETTINGS_TAB_ID = 'settings'
 
@@ -243,6 +244,21 @@ export default function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const selectedConnId = activeTab && 'connectionId' in activeTab ? activeTab.connectionId : null
+
+  // --- agent attention -------------------------------------------------------
+  // Leaves that have rung since you last looked at them. Deliberately not
+  // persisted with the workspace: an alert you never saw before quitting is not
+  // one worth restoring three days later.
+  const [waiting, setWaiting] = useState<ReadonlySet<string>>(() => new Set())
+  const [winFocused, setWinFocused] = useState(() => document.hasFocus())
+  const shownLeaves = activeView?.panes.filter((p): p is string => p !== null) ?? []
+  const attnRef = useRef({ alerts: appSettings.terminal.agentAlerts, visible: new Set(shownLeaves) })
+  attnRef.current = {
+    alerts: appSettings.terminal.agentAlerts,
+    visible: new Set(shownLeaves)
+  }
+  const viewsRef = useRef(views)
+  viewsRef.current = views
 
   const refresh = async (): Promise<void> => setConnections(await window.api.listConnections())
   const nameOf = (id: string): string => connections.find((c) => c.id === id)?.name ?? 'Connection'
@@ -545,6 +561,69 @@ export default function App() {
     if (activeViewId && views.some((v) => v.id === activeViewId)) return
     setActiveViewId(views.length ? views[views.length - 1].id : null)
   }, [views, activeViewId])
+
+  // --- agent attention effects ----------------------------------------------
+  // Whether the window has focus decides both whether a signal is worth a
+  // banner and whether looking at a tab counts as reading it. `document` is the
+  // authority here, and asking it saves a main→renderer channel that would only
+  // ever say the same thing.
+  useEffect(() => {
+    const on = (): void => setWinFocused(true)
+    const off = (): void => setWinFocused(false)
+    window.addEventListener('focus', on)
+    window.addEventListener('blur', off)
+    return () => {
+      window.removeEventListener('focus', on)
+      window.removeEventListener('blur', off)
+    }
+  }, [])
+
+  // Looking at a leaf is the acknowledgement — there is no separate dismiss, and
+  // a dot that outlived the glance that answered it would train you to ignore
+  // dots. Splits clear every leaf they show, since all of them are on screen.
+  useEffect(() => {
+    if (!winFocused) return
+    setWaiting((w) => {
+      if (!shownLeaves.some((id) => w.has(id))) return w
+      const next = new Set(w)
+      for (const id of shownLeaves) next.delete(id)
+      return next
+    })
+    // shownLeaves is derived per render; activeView is the thing that changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [winFocused, activeView])
+
+  // Drop signals whose leaf is gone, so a closed tab can't hold the dock badge lit.
+  useEffect(() => {
+    setWaiting((w) => {
+      if (w.size === 0) return w
+      const live = new Set(tabs.map((t) => t.id))
+      const kept = [...w].filter((id) => live.has(id))
+      return kept.length === w.size ? w : new Set(kept)
+    })
+  }, [tabs])
+
+  // The badge counts sessions, not signals — five questions from one agent is
+  // still one session waiting on you. Only in `notify` mode: dot-only means the
+  // tab strip is the whole surface, dock included.
+  useEffect(() => {
+    window.api.agentBadge(appSettings.terminal.agentAlerts === 'notify' ? waiting.size : 0)
+  }, [waiting, appSettings.terminal.agentAlerts])
+
+  // A clicked notification has to land on the session that sent it, which may be
+  // a pane inside a split rather than a tab of its own.
+  useEffect(
+    () =>
+      window.api.onAgentFocus((leafId) => {
+        const v = viewsRef.current.find((x) => x.panes.includes(leafId))
+        if (!v) return
+        setActiveViewId(v.id)
+        setViews((vs) =>
+          vs.map((x) => (x.id === v.id ? { ...x, focused: Math.max(0, x.panes.indexOf(leafId)) } : x))
+        )
+      }),
+    []
+  )
 
   // Persist the open tabs + tab-bar views whenever they change (after restore).
   useEffect(() => {
@@ -885,6 +964,18 @@ export default function App() {
     return window.api.probeServer({ connectionId: conn.id, password: password ?? undefined })
   }
 
+  const fetchHookStatusFor = (conn: Connection) => async () => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required to read the Claude settings file.')
+    return window.api.claudeHookStatus({ connectionId: conn.id, password: password ?? undefined })
+  }
+
+  const applyHookFor = (conn: Connection) => async (action: 'install' | 'uninstall') => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required to write the Claude settings file.')
+    return window.api.claudeHookApply({ connectionId: conn.id, password: password ?? undefined, action })
+  }
+
   // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
   // session that died between listing and clicking won't error — it's recreated.
   // `name` comes from the server's own session list (or the user's new-session
@@ -980,6 +1071,28 @@ export default function App() {
     )
   }
 
+  // A program in a session asked for a human (see lib/xtermAgentSignal).
+  //
+  // Each terminal's mount-once effect captures this callback, so everything it
+  // reads comes from a ref — the render closure it was born in is long stale by
+  // the time an agent actually rings.
+  const onAgentSignal = (sessionId: string, signal: AgentSignal, onScreen = true): void => {
+    const { alerts, visible } = attnRef.current
+    if (alerts === 'off') return
+    // A signal from the pane already in front of you isn't attention, it's noise
+    // — you are, definitionally, already looking. `onScreen` is how a tmux
+    // control tab says otherwise: its leaf can be showing while the pane that
+    // rang sits in a tmux window you can't see.
+    const seen = onScreen && visible.has(sessionId) && document.hasFocus()
+    if (!seen) setWaiting((w) => (w.has(sessionId) ? w : new Set(w).add(sessionId)))
+    // Only a sequence that carried text raises an OS notification. A bare bell
+    // says *something* happened and nothing more, and shells ring for tab
+    // completion — a banner reading "Claude Code" over that would be a lie.
+    if (alerts === 'notify' && signal.kind === 'message' && !document.hasFocus()) {
+      window.api.agentNotify(sessionId, signal.title, signal.body)
+    }
+  }
+
   // A shell re-sets its title on every prompt, so bail out on an unchanged one:
   // returning the same array lets React skip the render entirely.
   const onTitle = (sessionId: string, title: string): void => {
@@ -1032,6 +1145,7 @@ export default function App() {
                   const active = view.id === activeViewId
                   const split = view.panes.length > 1
                   const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
+                  const waitingLeaves = leaves.filter((l): l is Tab => !!l && waiting.has(l.id))
                   const label = split
                     ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
                     : leaves[0]
@@ -1086,6 +1200,22 @@ export default function App() {
                       ) : leaves[0] ? (
                         leafIcon(leaves[0], active)
                       ) : null}
+                      {/* One dot per leaf of this tab that's waiting on you. In a
+                          split they read left to right in the same order as the
+                          joined label, so the dot and the name line up. */}
+                      {waitingLeaves.length > 0 && (
+                        <span
+                          className="flex items-center gap-1"
+                          title={`Waiting: ${waitingLeaves.map(leafLabel).join(', ')}`}
+                        >
+                          {waitingLeaves.map((l) => (
+                            <span
+                              key={l.id}
+                              className="dot-glow h-1.5 w-1.5 shrink-0 rounded-full bg-amber text-amber"
+                            />
+                          ))}
+                        </span>
+                      )}
                       <span className="max-w-[260px] truncate font-mono text-[12px]">{label}</span>
                       <button
                         onClick={(e) => {
@@ -1148,6 +1278,8 @@ export default function App() {
                     onNewSession={(name) => attachTmux(conn, tmuxSessionName(name))}
                     onKillSession={killTmux(conn)}
                     onRenameSession={renameTmux(conn)}
+                    fetchHookStatus={fetchHookStatusFor(conn)}
+                    applyHook={applyHookFor(conn)}
                   />
                   {paneTools(tab.id)}
                 </div>
@@ -1180,6 +1312,7 @@ export default function App() {
                   settings={appSettings.terminal}
                   onStatus={onStatus}
                   onTitle={onTitle}
+                  onAgentSignal={onAgentSignal}
                 />
                 {paneTools(tab.id)}
               </div>
@@ -1203,6 +1336,7 @@ export default function App() {
                   retries={appSettings.connectRetries}
                   settings={appSettings.terminal}
                   onStatus={onStatus}
+                  onAgentSignal={onAgentSignal}
                 />
                 {paneTools(tab.id)}
               </div>
