@@ -16,7 +16,8 @@
 // and the `/bin/sh -c` wrapper: the remote login shell may also be fish or csh,
 // neither of which can parse `$( )`, `for…do…done` or `case`.
 import type { TmuxIntent } from './types'
-import { shQuote, tmuxCreateCommand } from './tmux'
+import { SEP, shQuote, shWrap } from './shell'
+import { tmuxCreateCommand } from './tmux'
 
 /**
  * `$TMO` is used UNQUOTED at every call site so it word-splits into `timeout 6`
@@ -25,20 +26,6 @@ import { shQuote, tmuxCreateCommand } from './tmux'
  * ships with coreutils/busybox and is absent on stock macOS and some BSDs.
  */
 export const CLAUDE_TIMEOUT = 'TMO=; command -v timeout >/dev/null 2>&1 && TMO="timeout 6"'
-
-/**
- * Statement separator for every script that goes through shWrap — `'; '`, never
- * a newline.
- *
- * shWrap single-quotes the script so a fish or csh login shell hands it to
- * /bin/sh intact. csh cannot carry a single-quoted word across a newline:
- * `tcsh -c "/bin/sh -c 'echo A<LF>echo B'"` prints `Unmatched '.` and then runs
- * the remaining lines as csh. So a newline-joined script fails on exactly the
- * shell the wrapper is there to survive — the tab fills with csh parse errors,
- * and the probe emits a partial answer that the handler rejects, on a host
- * where Claude Code is installed and fine. Keep every builder below on one line.
- */
-export const SEP = '; '
 
 /**
  * Resolve `claude` into `$CLI`, or leave `$CLI` empty. Expects `$CLI` to already
@@ -65,15 +52,6 @@ export const CLAUDE_RESOLVE = [
   '[ -n "$CLI" ] || CLI=$($TMO "${SHELL:-/bin/sh}" -lc "command -v claude" 2>/dev/null | tail -n 1)',
   'case "$CLI" in /*) [ -x "$CLI" ] || CLI= ;; *) CLI= ;; esac'
 ].join(SEP)
-
-/**
- * Wrap a POSIX script for a remote login shell that may be fish or csh.
- *
- * The wrapped script must be a single LINE — see SEP. csh cannot carry a
- * single-quoted word across a newline, so a multi-line script here fails on
- * precisely the shell this wrapper exists to defend against.
- */
-export const shWrap = (script: string): string => `/bin/sh -c ${shQuote(script)}`
 
 /**
  * The script an agent tab runs: resolve the binary, `cd`, hand the pane to Claude.

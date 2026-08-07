@@ -5,6 +5,8 @@ import type {
   ClaudeRuntime,
   Connection,
   ConnectionDraft,
+  GitFileDiff,
+  GitReview,
   HostKeyPrompt,
   ServerStats,
   SessionStatus,
@@ -272,7 +274,31 @@ const api = {
   claudeRuntime: (args: {
     connectionId: string
     password?: string
-  }): Promise<ClaudeRuntime> => ipcRenderer.invoke('claude:runtime', args)
+  }): Promise<ClaudeRuntime> => ipcRenderer.invoke('claude:runtime', args),
+
+  // Reviewing a remote git working tree. Read-only in both directions: there is
+  // no stage, no revert, no commit — the tree may be mid-write by an agent, and
+  // a mutation issued from here would race whatever it is doing.
+
+  /** What changed in the repo containing `dir`, plus the commit to diff against. */
+  gitReview: (args: {
+    connectionId: string
+    dir: string
+    password?: string
+  }): Promise<GitReview> => ipcRenderer.invoke('git:review', args),
+
+  /**
+   * Both sides of one file: the blob at `base`, and the working-tree copy.
+   * `basePath` is the pre-rename path, when there is one.
+   */
+  gitFile: (args: {
+    connectionId: string
+    root: string
+    base: string
+    path: string
+    basePath?: string
+    password?: string
+  }): Promise<GitFileDiff> => ipcRenderer.invoke('git:file', args)
 }
 
 export type Api = typeof api

@@ -424,11 +424,69 @@ export interface TunnelStatus {
   conns: number
 }
 
+// ---- Git review ----
+
+/**
+ * One record from `git status --porcelain`.
+ *
+ * `x` and `y` are kept as the raw letters rather than being reduced to a single
+ * "state", because they answer different questions — X is what the index holds
+ * and Y is what the working tree holds — and a file can be both staged and
+ * modified again since. Collapsing them would hide exactly the case worth seeing
+ * while an agent is mid-edit.
+ */
+export interface GitChange {
+  /** Index status letter: one of MADRCU, or `?` when untracked. */
+  x: string
+  /** Working-tree status letter: one of MADRCU, or `?` when untracked. */
+  y: string
+  /** Repo-relative path. For a rename or copy, the destination. */
+  path: string
+  /** The source path, when this record is a rename or a copy. */
+  from?: string
+  /** `??` — no base side exists, so the whole file reads as an addition. */
+  untracked: boolean
+}
+
+/** What one review pass found, and the commit its diffs are pinned to. */
+export interface GitReview {
+  /** Absolute path of the repository root, per `git rev-parse --show-toplevel`. */
+  root: string
+  /** Branch name, or `HEAD` when detached. Empty in a repo with no commits. */
+  branch: string
+  /**
+   * The commit every diff in this pass compares against, resolved once. Empty in
+   * a repo with no commits — then every tracked file is an addition.
+   */
+  base: string
+  files: GitChange[]
+  /** More than MAX_REVIEW_FILES changed; `files` holds the first that many. */
+  truncated: boolean
+}
+
+/**
+ * One side of a diff. `note` says why `text` is empty when it is not simply an
+ * empty file — the three cases the pane has to render differently rather than
+ * showing a blank editor and implying the file is blank.
+ */
+export interface GitBlob {
+  text: string
+  note?: 'absent' | 'binary' | 'too-large'
+  /** Size on the server, present whenever the side exists at all. */
+  bytes?: number
+}
+
+/** Both sides of one file, fetched together against the pinned base. */
+export interface GitFileDiff {
+  base: GitBlob
+  work: GitBlob
+}
+
 // ---- Persisted workspace (open tabs, restored on next launch) ----
 
 /** A tab serialized to disk. No passwords or live session ids are stored. */
 export interface PersistedTab {
-  kind: 'dashboard' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux'
+  kind: 'dashboard' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'review'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -437,7 +495,7 @@ export interface PersistedTab {
    * before that carry only `command`, which parseTmuxIntent() recovers this from.
    */
   tmux?: TmuxIntent
-  initialPath?: string // sftp: directory to open
+  initialPath?: string // sftp: directory to open; review: directory inside the repo
   path?: string // editor: remote file path
   name?: string // editor: file name
 }

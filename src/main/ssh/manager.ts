@@ -584,13 +584,19 @@ export class SshManager extends EventEmitter {
       client.on('ready', () => {
         client.exec(opts.command, (err, stream) => {
           if (err) return fail(err)
-          let stdout = ''
-          let stderr = ''
+          // Chunks are collected and decoded once at close, never per chunk. A TCP
+          // segment boundary falls wherever it falls, and decoding a chunk that
+          // ends mid-sequence turns the split character into U+FFFD in the middle
+          // of an otherwise valid reply — a corruption that only shows up on hosts
+          // whose output happens to be long enough to be split.
+          const out: Buffer[] = []
+          const errOut: Buffer[] = []
+          let bytes = 0
           const take = (d: Buffer, to: 'out' | 'err'): void => {
             if (settled) return
-            if (to === 'out') stdout += d.toString('utf-8')
-            else stderr += d.toString('utf-8')
-            if (stdout.length + stderr.length > SshManager.EXEC_MAX_BYTES) {
+            ;(to === 'out' ? out : errOut).push(d)
+            bytes += d.length
+            if (bytes > SshManager.EXEC_MAX_BYTES) {
               fail(new Error('Command produced far more output than expected'))
             }
           }
@@ -601,7 +607,11 @@ export class SshManager extends EventEmitter {
             settled = true
             clearTimeout(timer)
             client.end()
-            resolve({ code, stdout, stderr })
+            resolve({
+              code,
+              stdout: Buffer.concat(out).toString('utf-8'),
+              stderr: Buffer.concat(errOut).toString('utf-8')
+            })
           })
         })
       })
@@ -702,6 +712,87 @@ export class SshManager extends EventEmitter {
     const s = this.sftpPool.get(key)
     if (!s) throw new Error('SFTP session is not open')
     return s.sftp
+  }
+
+  /**
+   * Run a command over the SFTP pool's already-authenticated connection.
+   *
+   * exec() opens a whole connection per call — TCP, key exchange, auth — which is
+   * right for a one-shot probe and wrong for the review pane, where clicking down
+   * a list of twenty changed files would mean twenty handshakes against a server
+   * that may well rate-limit them. SSH multiplexes channels, so borrowing the
+   * connection the file browser already holds open costs one channel per call.
+   *
+   * The caller must be holding a ref on `key` (openSftp) for the whole call.
+   *
+   * Two deliberate differences from exec():
+   *
+   *  - **stdout comes back as a Buffer.** Callers here read file content, which is
+   *    arbitrary bytes and may be split across chunks at any offset; decoding is
+   *    theirs to do, once, and only for the part that is text.
+   *  - **Failure closes the channel, never the client.** The connection belongs to
+   *    the pool. end() or destroy() here would take down the file manager and
+   *    every editor tab sharing it, over one command that ran long.
+   */
+  execOnPooled(
+    key: string,
+    command: string,
+    opts?: { deadlineMs?: number; maxBytes?: number }
+  ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
+    const entry = this.sftpPool.get(key)
+    if (!entry) return Promise.reject(new Error('SFTP session is not open'))
+    const client = entry.client
+    const limit = opts?.maxBytes ?? SshManager.EXEC_MAX_BYTES
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let timer: NodeJS.Timeout | undefined
+      let channel: ClientChannel | undefined
+      const fail = (e: unknown): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          channel?.close()
+        } catch {
+          /* ignore */
+        }
+        reject(e)
+      }
+      timer = setTimeout(
+        () => fail(new Error('Command timed out')),
+        opts?.deadlineMs ?? SshManager.EXEC_DEADLINE_MS
+      )
+      try {
+        client.exec(command, (err, stream) => {
+          if (err) return fail(err)
+          channel = stream
+          const out: Buffer[] = []
+          const errOut: Buffer[] = []
+          let bytes = 0
+          const take = (d: Buffer, to: 'out' | 'err'): void => {
+            if (settled) return
+            ;(to === 'out' ? out : errOut).push(d)
+            bytes += d.length
+            if (bytes > limit) fail(new Error('Command produced far more output than expected'))
+          }
+          stream.on('data', (d: Buffer) => take(d, 'out'))
+          stream.stderr.on('data', (d: Buffer) => take(d, 'err'))
+          stream.on('error', (e: unknown) => fail(e))
+          stream.on('close', (code: number | null) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve({
+              code,
+              stdout: Buffer.concat(out),
+              stderr: Buffer.concat(errOut).toString('utf-8')
+            })
+          })
+        })
+      } catch (e) {
+        fail(e)
+      }
+    })
   }
 
   private realpath(sftp: SFTPWrapper, p: string): Promise<string> {

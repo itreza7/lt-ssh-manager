@@ -6,11 +6,7 @@
 // name, so the name travels as a TmuxIntent and neither side re-parses the other's
 // command string.
 import type { TmuxIntent } from './types'
-
-/** Single-quote a string for safe interpolation into a POSIX shell command. */
-export function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`
-}
+import { shQuote } from './shell'
 
 /**
  * Sanitize a user-supplied session name into one tmux can still address later.
