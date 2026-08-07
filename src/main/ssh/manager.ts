@@ -73,15 +73,27 @@ interface ExecOpts {
   password?: string
   passphrase?: string
   command: string
-  /** Connect deadline (ssh2 `readyTimeout`). Covers the handshake, nothing after it. */
+  /**
+   * Connect deadline (ssh2 `readyTimeout`). Covers the handshake, nothing after
+   * it — and nothing at all when the pooled connection is already up, which is
+   * the common case.
+   */
   timeoutMs?: number
   /**
-   * Deadline for the whole operation, connect *and* command. Without one, a
-   * command that never closes its channel — a probe that blocks on a prompt, a
-   * server wedged mid-write — leaves the caller's promise pending forever, and
-   * every caller here is a UI panel waiting on it. Defaults to EXEC_DEADLINE_MS.
+   * Deadline for the command itself. Without one, a command that never closes
+   * its channel — a probe that blocks on a prompt, a server wedged mid-write —
+   * leaves the caller's promise pending forever, and every caller here is a UI
+   * panel waiting on it. Defaults to EXEC_DEADLINE_MS.
+   *
+   * Connecting is *not* inside this budget any more; `timeoutMs` bounds that
+   * separately. A value sized to cover both is merely generous, never wrong.
    */
   deadlineMs?: number
+  /**
+   * Output ceiling for this call. Defaults to EXEC_MAX_BYTES, which suits a
+   * short `key=value` reply; a caller reading file content sets its own.
+   */
+  maxBytes?: number
 }
 
 interface Session {
@@ -197,14 +209,21 @@ export class SshManager extends EventEmitter {
   // Session that dropped, and it is the authority on whether a dial still matters.
   private redials = new Map<string, Redial>()
   private epoch = 0
-  // One SFTP channel shared per connection, reference-counted across the file
-  // manager + every editor tab. Kept warm briefly after the last release so
-  // reopening a file doesn't pay for a fresh SSH handshake.
+  // One authenticated connection shared per host, reference-counted across the
+  // file manager, every editor tab, the review pane, and every one-shot command.
+  // Kept warm briefly after the last release so reopening a file — or polling a
+  // server card — doesn't pay for a fresh SSH handshake.
+  //
+  // `sftp` is attached on demand rather than at connect. Most holders of this
+  // entry only ever open exec channels, and a server with the sftp subsystem
+  // disabled still serves those perfectly well; opening it eagerly would fail
+  // the whole connection over a channel that nobody in that session asks for.
   private sftpPool = new Map<
     string,
-    { client: Client; sftp: SFTPWrapper; refs: number; closeTimer?: ReturnType<typeof setTimeout> }
+    { client: Client; sftp?: SFTPWrapper; refs: number; closeTimer?: ReturnType<typeof setTimeout> }
   >()
   private sftpConnecting = new Map<string, Promise<void>>()
+  private sftpAttaching = new Map<string, Promise<SFTPWrapper>>()
   private pendingHostKeys = new Map<string, PendingHostKey>()
   // Active tunnels, keyed by their definition id (a def runs at most once).
   private tunnels = new Map<string, RunningTunnel>()
@@ -540,97 +559,107 @@ export class SshManager extends EventEmitter {
     return session.outputTail.toString('utf-8').replace(ANSI_RE, '')
   }
 
-  /** Whole-operation ceiling for a one-shot command when the caller sets none. */
+  /** Ceiling on a one-shot command's run time when the caller sets none. */
   private static readonly EXEC_DEADLINE_MS = 20000
 
   /**
    * Most output one command may produce before we give up on it.
    *
-   * Every caller of exec() parses a short, known-shaped reply; none of them
-   * stream. A remote that answers with gigabytes would otherwise be accumulated
-   * whole in the main process. Exceeding it *fails* rather than truncating —
-   * a half-read `key=value` probe parses cleanly into wrong values, which is
-   * worse than an error the UI can show.
+   * Sized for the default caller, which parses a short, known-shaped reply and
+   * does not stream; a remote answering with gigabytes would otherwise be
+   * accumulated whole in the main process. Exceeding it *fails* rather than
+   * truncating — a half-read `key=value` probe parses cleanly into wrong values,
+   * which is worse than an error the UI can show. Callers reading file content
+   * pass a ceiling of their own.
    */
   private static readonly EXEC_MAX_BYTES = 1_000_000
 
-  /** One-shot command: connect, run, collect output, disconnect. */
-  exec(connection: Connection, opts: ExecOpts): Promise<{ code: number | null; stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      const client = new Client()
-      let settled = false
-      const deadline = opts.deadlineMs ?? SshManager.EXEC_DEADLINE_MS
-      // Cleared on every exit path: a pending timer would hold the event loop
-      // open and then fire against an already-settled promise.
-      let timer: NodeJS.Timeout | undefined
-      const fail = (e: unknown): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        try {
-          client.end()
-          // The deadline case is a connection that is *not* answering, where a
-          // polite disconnect can itself hang. destroy() drops the socket.
-          client.destroy()
-        } catch {
-          /* ignore */
-        }
-        reject(e)
-      }
-      timer = setTimeout(
-        () => fail(new Error(`Command timed out after ${Math.round(deadline / 1000)}s`)),
-        deadline
-      )
-      client.on('ready', () => {
-        client.exec(opts.command, (err, stream) => {
-          if (err) return fail(err)
-          // Chunks are collected and decoded once at close, never per chunk. A TCP
-          // segment boundary falls wherever it falls, and decoding a chunk that
-          // ends mid-sequence turns the split character into U+FFFD in the middle
-          // of an otherwise valid reply — a corruption that only shows up on hosts
-          // whose output happens to be long enough to be split.
-          const out: Buffer[] = []
-          const errOut: Buffer[] = []
-          let bytes = 0
-          const take = (d: Buffer, to: 'out' | 'err'): void => {
-            if (settled) return
-            ;(to === 'out' ? out : errOut).push(d)
-            bytes += d.length
-            if (bytes > SshManager.EXEC_MAX_BYTES) {
-              fail(new Error('Command produced far more output than expected'))
-            }
-          }
-          stream.on('data', (d: Buffer) => take(d, 'out'))
-          stream.stderr.on('data', (d: Buffer) => take(d, 'err'))
-          stream.on('close', (code: number | null) => {
-            if (settled) return
-            settled = true
-            clearTimeout(timer)
-            client.end()
-            resolve({
-              code,
-              stdout: Buffer.concat(out).toString('utf-8'),
-              stderr: Buffer.concat(errOut).toString('utf-8')
-            })
-          })
-        })
+  /**
+   * One-shot command on the host's shared connection, as text.
+   *
+   * This used to dial a connection of its own per call — TCP, key exchange, auth
+   * — and hang up after. That was one handshake per probe, per tmux list, per
+   * runtime card, against servers that increasingly rate-limit exactly that
+   * pattern; a dashboard polling four hosts was re-authenticating to all four on
+   * every tick. It now borrows the pooled connection, which the file manager, the
+   * editors and the review pane are already sharing, and which stays warm for
+   * SFTP_GRACE_MS after the last holder lets go. A poll faster than that grace
+   * never handshakes twice.
+   *
+   * stdout is decoded once, at the end. A TCP segment boundary falls wherever it
+   * falls, and decoding a chunk that ends mid-sequence turns the split character
+   * into U+FFFD in the middle of an otherwise valid reply — a corruption that
+   * only shows up on hosts whose output happens to be long enough to be split.
+   */
+  async exec(
+    key: string,
+    connection: Connection,
+    opts: ExecOpts
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const res = await this.execBytes(key, connection, opts)
+    return { code: res.code, stdout: res.stdout.toString('utf-8'), stderr: res.stderr }
+  }
+
+  /**
+   * As exec(), but stdout stays raw.
+   *
+   * For callers reading file content rather than a reply: arbitrary bytes, split
+   * across chunks at any offset, where decoding is theirs to do once and only
+   * over the part that is actually text.
+   */
+  async execBytes(
+    key: string,
+    connection: Connection,
+    opts: ExecOpts
+  ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
+    // A plain ref, not openSftp: a command needs the connection, not the
+    // subsystem, and a host with sftp disabled should still answer a probe.
+    await this.acquire(key, connection, opts.password, opts.passphrase, opts.timeoutMs)
+    try {
+      return await this.execOnPooled(key, opts.command, {
+        deadlineMs: opts.deadlineMs,
+        maxBytes: opts.maxBytes
       })
-      client.on('error', (err) => fail(err))
-      try {
-        client.connect(this.baseConfig(connection, opts.password, opts.passphrase, opts.timeoutMs))
-      } catch (e) {
-        fail(e)
-      }
-    })
+    } finally {
+      this.closeSftp(key)
+    }
   }
 
   // ---- SFTP ----
 
-  /** How long an idle SFTP channel stays open after its last release. */
+  /** How long an idle pooled connection stays open after its last release. */
   private static readonly SFTP_GRACE_MS = 30000
 
-  /** Acquire the connection's shared SFTP channel (connecting once, reusing after). */
+  /**
+   * Take a ref on the connection *and* have its SFTP subsystem ready.
+   *
+   * Every file-manager and editor path wants both, and wants a server that
+   * cannot do SFTP to say so now rather than on the first directory listing.
+   * Commands take a plain ref instead — see acquire().
+   */
   async openSftp(
+    key: string,
+    connection: Connection,
+    password: string | undefined,
+    passphrase: string | undefined,
+    timeoutMs?: number
+  ): Promise<void> {
+    await this.acquire(key, connection, password, passphrase, timeoutMs)
+    try {
+      await this.attachSftp(key, timeoutMs)
+    } catch (e) {
+      // The ref is ours and the caller will never get the chance to drop it.
+      this.closeSftp(key)
+      throw e
+    }
+  }
+
+  /**
+   * Take a ref on the connection, opening it if this is the first holder.
+   *
+   * No SFTP subsystem: this is what an exec channel needs, and all it needs.
+   */
+  private async acquire(
     key: string,
     connection: Connection,
     password: string | undefined,
@@ -646,16 +675,17 @@ export class SshManager extends EventEmitter {
       }
       return
     }
-    // Coalesce concurrent opens (e.g. file manager + an editor tab at once).
+    // Coalesce concurrent opens (e.g. file manager + an editor tab at once, or a
+    // server card whose probe and tmux list fire together on a cold connection).
     const inflight = this.sftpConnecting.get(key)
     if (inflight) {
       await inflight
       const s = this.sftpPool.get(key)
-      if (!s) throw new Error('SFTP channel failed to open')
+      if (!s) throw new Error('Connection failed to open')
       s.refs++
       return
     }
-    const p = this.connectSftp(key, connection, password, passphrase, timeoutMs)
+    const p = this.connectPooled(key, connection, password, passphrase, timeoutMs)
     this.sftpConnecting.set(key, p)
     try {
       await p
@@ -663,11 +693,11 @@ export class SshManager extends EventEmitter {
       this.sftpConnecting.delete(key)
     }
     const s = this.sftpPool.get(key)
-    if (!s) throw new Error('SFTP channel failed to open')
+    if (!s) throw new Error('Connection failed to open')
     s.refs++
   }
 
-  private connectSftp(
+  private connectPooled(
     key: string,
     connection: Connection,
     password: string | undefined,
@@ -688,12 +718,9 @@ export class SshManager extends EventEmitter {
         reject(e)
       }
       client.on('ready', () => {
-        client.sftp((err, sftp) => {
-          if (err || !sftp) return fail(err ?? new Error('SFTP unavailable'))
-          this.sftpPool.set(key, { client, sftp, refs: 0 })
-          settled = true
-          resolve()
-        })
+        this.sftpPool.set(key, { client, refs: 0 })
+        settled = true
+        resolve()
       })
       client.on('error', (err) => fail(err))
       client.on('close', () => {
@@ -708,33 +735,69 @@ export class SshManager extends EventEmitter {
     })
   }
 
+  /**
+   * Open this connection's SFTP subsystem, once, and cache it on the pool entry.
+   *
+   * Bounded by a timer of its own. `readyTimeout` covers the handshake and stops
+   * there, so a server that authenticates and then never answers the subsystem
+   * request would otherwise leave this promise pending forever — and with every
+   * command now sharing this connection, one such host would hang the file
+   * manager rather than just fail it.
+   */
+  private async attachSftp(key: string, timeoutMs?: number): Promise<SFTPWrapper> {
+    const entry = this.sftpPool.get(key)
+    if (!entry) throw new Error('SFTP session is not open')
+    if (entry.sftp) return entry.sftp
+    const inflight = this.sftpAttaching.get(key)
+    if (inflight) return inflight
+    const p = new Promise<SFTPWrapper>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        reject(new Error('Timed out opening an SFTP channel'))
+      }, timeoutMs ?? 30000)
+      entry.client.sftp((err, sftp) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (err || !sftp) return reject(err ?? new Error('SFTP unavailable'))
+        // Only cache against the entry we opened it on: the connection may have
+        // dropped and been replaced while this request was in flight, and that
+        // new client's subsystem is not this one.
+        if (this.sftpPool.get(key) === entry) entry.sftp = sftp
+        resolve(sftp)
+      })
+    })
+    this.sftpAttaching.set(key, p)
+    try {
+      return await p
+    } finally {
+      this.sftpAttaching.delete(key)
+    }
+  }
+
   private sftpOf(key: string): SFTPWrapper {
     const s = this.sftpPool.get(key)
-    if (!s) throw new Error('SFTP session is not open')
+    // Absent rather than merely unopened: every caller reaches this through
+    // openSftp, which does not return until the subsystem is up.
+    if (!s?.sftp) throw new Error('SFTP session is not open')
     return s.sftp
   }
 
   /**
-   * Run a command over the SFTP pool's already-authenticated connection.
+   * Run a command on a pooled connection the caller is already holding a ref on.
    *
-   * exec() opens a whole connection per call — TCP, key exchange, auth — which is
-   * right for a one-shot probe and wrong for the review pane, where clicking down
-   * a list of twenty changed files would mean twenty handshakes against a server
-   * that may well rate-limit them. SSH multiplexes channels, so borrowing the
-   * connection the file browser already holds open costs one channel per call.
+   * SSH multiplexes channels, so this costs one channel — no TCP, no key
+   * exchange, no auth. The public entry points are exec/execBytes, which take
+   * the ref for you; this is the primitive underneath them.
    *
-   * The caller must be holding a ref on `key` (openSftp) for the whole call.
-   *
-   * Two deliberate differences from exec():
-   *
-   *  - **stdout comes back as a Buffer.** Callers here read file content, which is
-   *    arbitrary bytes and may be split across chunks at any offset; decoding is
-   *    theirs to do, once, and only for the part that is text.
-   *  - **Failure closes the channel, never the client.** The connection belongs to
-   *    the pool. end() or destroy() here would take down the file manager and
-   *    every editor tab sharing it, over one command that ran long.
+   * **Failure closes the channel, never the client.** The connection belongs to
+   * the pool. end() or destroy() here would take down the file manager, every
+   * editor tab, and every other command sharing it, over one command that ran
+   * long. That is the whole reason this exists.
    */
-  execOnPooled(
+  private execOnPooled(
     key: string,
     command: string,
     opts?: { deadlineMs?: number; maxBytes?: number }
@@ -758,9 +821,10 @@ export class SshManager extends EventEmitter {
         }
         reject(e)
       }
+      const deadline = opts?.deadlineMs ?? SshManager.EXEC_DEADLINE_MS
       timer = setTimeout(
-        () => fail(new Error('Command timed out')),
-        opts?.deadlineMs ?? SshManager.EXEC_DEADLINE_MS
+        () => fail(new Error(`Command timed out after ${Math.round(deadline / 1000)}s`)),
+        deadline
       )
       try {
         client.exec(command, (err, stream) => {
@@ -1080,7 +1144,14 @@ export class SshManager extends EventEmitter {
     })
   }
 
-  /** Release one reference; the channel closes after a grace period at zero. */
+  /**
+   * Release one reference on a pooled connection, however it was taken —
+   * openSftp for the file manager, acquire() for a command.
+   *
+   * The connection closes only after a grace period at zero refs, which is what
+   * lets a burst of one-shot commands, or a poll on a short interval, land on
+   * the same authenticated connection instead of one each.
+   */
   closeSftp(key: string): void {
     const s = this.sftpPool.get(key)
     if (!s) return
