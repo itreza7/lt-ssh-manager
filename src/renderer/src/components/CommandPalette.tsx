@@ -24,6 +24,7 @@ interface Props {
   showLeaf: (id: string) => void
   attachFromInbox: (connectionId: string, session: string) => void
   resumeFromInbox: (connectionId: string, s: ResumeSession, label: string) => void
+  openTranscript: (connectionId: string, s: ResumeSession, label: string) => void
   openInbox: () => void
 }
 
@@ -65,6 +66,7 @@ export function CommandPalette({
   showLeaf,
   attachFromInbox,
   resumeFromInbox,
+  openTranscript,
   openInbox
 }: Props) {
   const [query, setQuery] = useState('')
@@ -158,6 +160,28 @@ export function CommandPalette({
     }))
   }, [saved, q, resumeFromInbox])
 
+  // No dir filter here, unlike savedResults: viewing a transcript only reads a
+  // file, it doesn't `--resume` into a cwd, so every saved session qualifies —
+  // including the ones Resume disables for having no directory, or a gone one.
+  const transcriptResults = useMemo<ResultItem[]>(() => {
+    const rows: { connectionId: string; host: string; s: ResumeSession; label: string }[] = []
+    for (const h of saved ?? []) {
+      for (const s of h.sessions) {
+        rows.push({ connectionId: h.connectionId, host: h.name, s, label: resumeTitle(s) ?? 'Untitled session' })
+      }
+    }
+    const filtered = rows.filter((r) =>
+      `${r.host} ${r.label} ${r.s.dir ?? ''}`.toLowerCase().includes(q)
+    )
+    return filtered.slice(0, MAX_RESULTS).map((r) => ({
+      key: `transcript:${r.connectionId}:${r.s.id}`,
+      label: r.label,
+      sub: `${r.host} · transcript`,
+      icon: <span className="text-accent">▤</span>,
+      run: () => openTranscript(r.connectionId, r.s, r.label)
+    }))
+  }, [saved, q, openTranscript])
+
   const homeResult = useMemo<ResultItem | null>(() => {
     const label = 'Open Home'
     if (!label.toLowerCase().includes(q)) return null
@@ -176,9 +200,10 @@ export function CommandPalette({
         { title: 'Hosts', items: hostResults },
         { title: 'Open Tabs', items: tabResults },
         { title: 'Running Agents', items: agentResults },
-        { title: 'Saved Sessions', items: savedResults }
+        { title: 'Saved Sessions', items: savedResults },
+        { title: 'Transcripts', items: transcriptResults }
       ].filter((s) => s.items.length > 0),
-    [hostResults, tabResults, agentResults, savedResults]
+    [hostResults, tabResults, agentResults, savedResults, transcriptResults]
   )
 
   const flatResults = useMemo(

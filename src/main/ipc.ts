@@ -40,7 +40,7 @@ import { SshManager, isPermanentScanFailure } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
 import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
 import { agentScanScript, parseAgentScan } from '../shared/agents'
-import { RESUME_LIMIT, parseResumeScan, resumeScanScript } from '../shared/resume'
+import { RESUME_LIMIT, parseResumeScan, resumeReadScript, resumeScanScript } from '../shared/resume'
 import { SEP, shQuote, shWrap } from '../shared/shell'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
@@ -652,6 +652,42 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         Array.from({ length: Math.min(SCAN_FANOUT, connections.length) }, worker)
       )
       return out
+    }
+  )
+
+  /**
+   * Read one saved transcript's raw content, for the rendered-transcript tab.
+   *
+   * The scan above never learns a path, so the id has to be resolved to one
+   * first — a single glob, not the 60-file sweep resume:scan runs — before the
+   * file itself is opened over SFTP the same way every other file-reading
+   * handler in this file does.
+   */
+  ipcMain.handle(
+    'resume:read',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; id: string }
+    ): Promise<{ path: string; content: string }> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const password = passwordFor(args.connectionId, args.password)
+      const resolved = await ssh.exec(args.connectionId, connection, {
+        command: shWrap(resumeReadScript(args.id)),
+        password,
+        timeoutMs: 15000
+      })
+      const path = resolved.stdout.trim()
+      if (!path) throw new Error('Transcript not found on host')
+      let opened = false
+      try {
+        await ssh.openSftp(args.connectionId, connection, password, undefined, 30000)
+        opened = true
+        const { content } = await ssh.sftpReadFile(args.connectionId, path)
+        return { path, content }
+      } finally {
+        if (opened) ssh.closeSftp(args.connectionId)
+      }
     }
   )
 

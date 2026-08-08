@@ -252,6 +252,25 @@ export function resumeScanScript(offset = 0, limit = RESUME_LIMIT): string {
 }
 
 /**
+ * Find the on-disk path of one transcript by id.
+ *
+ * The scan above never learns a session's path — only its bucket-opaque
+ * directory is scanned, never named (see the file banner) — so resolving one
+ * id back to a path means globbing every bucket for it, not computing from
+ * `dir`. An id is a transcript filename stem, and stems are unique across a
+ * `$CLAUDE_CONFIG_DIR/projects` tree in practice, so the first match is taken.
+ * A glob that matches nothing prints nothing and exits nonzero; the caller
+ * reads that as "not found" rather than treating it as an error.
+ */
+export function resumeReadScript(id: string): string {
+  return [
+    'CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}',
+    `F=$(ls "$CFG"/projects/*/${shQuote(`${id}.jsonl`)} 2>/dev/null | head -n 1)`,
+    'printf %s "$F"'
+  ].join(SEP)
+}
+
+/**
  * Undo the escaping of one extracted value, or report it as absent.
  *
  * The value arrived as the body of a JSON string, so JSON is what decodes it —

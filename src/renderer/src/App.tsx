@@ -27,6 +27,7 @@ import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { WorktreeView } from './components/WorktreeView'
+import { TranscriptView } from './components/TranscriptView'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
@@ -131,6 +132,16 @@ interface WorktreeTab {
   password?: string
 }
 
+/** A saved Claude Code transcript, rendered read-only rather than resumed. */
+interface TranscriptTab {
+  kind: 'transcript'
+  id: string // `tx:${connectionId}:${sessionId}`
+  connectionId: string
+  sessionId: string
+  title: string
+  password?: string
+}
+
 // A "leaf" — one unit of content. Leaves live inside views (see below).
 export type Tab =
   | DashboardTab
@@ -142,6 +153,7 @@ export type Tab =
   | EditorTab
   | TunnelTab
   | WorktreeTab
+  | TranscriptTab
 
 /**
  * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
@@ -233,6 +245,8 @@ function serializeTab(t: Tab): PersistedTab {
         title: t.title,
         initialPath: t.dir
       }
+    case 'transcript':
+      return { kind: 'transcript', connectionId: t.connectionId, title: t.title, sessionId: t.sessionId }
   }
 }
 
@@ -341,6 +355,7 @@ export default function App() {
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
     if (t.kind === 'worktrees') return <span className={c}>⑂</span>
+    if (t.kind === 'transcript') return <span className={c}>▤</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
 
@@ -950,6 +965,22 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
+      } else if (pt.kind === 'transcript') {
+        if (!pt.sessionId) continue
+        const pw = await getPw(conn)
+        if (pw === null) continue
+        const id = `tx:${conn.id}:${pt.sessionId}`
+        if (!has(id))
+          built.push({
+            kind: 'transcript',
+            id,
+            connectionId: conn.id,
+            sessionId: pt.sessionId,
+            title: pt.title ?? 'Transcript',
+            password: pw ?? undefined
+          })
+        if (makeActive) activeId = id
+        idForIndex.set(i, id)
       }
     }
 
@@ -1274,6 +1305,33 @@ export default function App() {
       title: `${conn.name} · ${label.slice(0, 40)}`,
       agent: { dir: s.dir, resume: s.id }
     })
+  }
+
+  // Open a saved transcript read-only, rendered rather than resumed. Unlike
+  // resumeFromInbox this has no cwd requirement — a transcript is just a file to
+  // read — so it opens for any saved session, including ones Resume disables.
+  const openTranscript = async (connectionId: string, s: ResumeSession, label: string): Promise<void> => {
+    const conn = connections.find((c) => c.id === connectionId)
+    if (!conn) return
+    const password = await resolvePassword(conn)
+    if (password === null) return
+    const id = `tx:${connectionId}:${s.id}`
+    setTabs((t) =>
+      t.some((x) => x.id === id)
+        ? t
+        : [
+            ...t,
+            {
+              kind: 'transcript',
+              id,
+              connectionId,
+              sessionId: s.id,
+              title: `Transcript · ${label.slice(0, 40)}`,
+              password: password ?? undefined
+            }
+          ]
+    )
+    showLeaf(id)
   }
 
   // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
@@ -1607,6 +1665,7 @@ export default function App() {
                   loadMoreSaved={loadMoreSaved}
                   onAttach={attachFromInbox}
                   onResume={resumeFromInbox}
+                  onOpenTranscript={openTranscript}
                   onNewAgent={newAgentFromInbox}
                 />
                 {paneTools(INBOX_TAB_ID)}
@@ -1737,6 +1796,25 @@ export default function App() {
                 </div>
               ))}
 
+            {/* transcript panes stay mounted so switching tabs doesn't re-read
+                and re-parse the file every time */}
+            {tabs
+              .filter((t): t is TranscriptTab => t.kind === 'transcript')
+              .map((tab) => (
+                <div
+                  key={tab.id}
+                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                  {...paneProps(tab.id)}
+                >
+                  <TranscriptView
+                    connectionId={tab.connectionId}
+                    password={tab.password}
+                    sessionId={tab.sessionId}
+                  />
+                  {paneTools(tab.id)}
+                </div>
+              ))}
+
             {/* tunnel managers stay mounted so live tunnel state survives tab switches */}
             {tabs
               .filter((t): t is TunnelTab => t.kind === 'tunnels')
@@ -1837,6 +1915,7 @@ export default function App() {
         showLeaf={showLeaf}
         attachFromInbox={attachFromInbox}
         resumeFromInbox={resumeFromInbox}
+        openTranscript={openTranscript}
         openInbox={openInbox}
       />
     </div>

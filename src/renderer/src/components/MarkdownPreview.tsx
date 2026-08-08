@@ -28,6 +28,13 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+// The one markdown-to-HTML path in the app, for callers that need the HTML
+// directly rather than a mounted preview pane (e.g. TranscriptView). Reuses
+// this module's own MarkdownIt instance rather than standing up a second one.
+export function renderMarkdown(source: string): string {
+  return md.render(source)
+}
+
 export function MarkdownPreview({ source, fontSize }: { source: string; fontSize?: number }) {
   const html = useMemo(() => md.render(source), [source])
 
