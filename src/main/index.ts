@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, nativeTheme, screen } from 'electron'
 import { join } from 'node:path'
 import { registerIpc, toggleFullScreen } from './ipc'
 import { installAppMenu } from './menu'
+import { settingsStore } from './store/settings'
 import { windowBoundsStore, type WindowBounds } from './store/windowBounds'
 import appIcon from '../../resources/icon.png?asset'
 
@@ -167,7 +168,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  nativeTheme.themeSource = 'dark'
+  nativeTheme.themeSource = settingsStore.getAll().theme
   registerIpc(() => mainWindow)
   // macOS gets a real application menu (the standard commands have nothing else
   // driving them there); every other platform keeps none. See menu.ts.

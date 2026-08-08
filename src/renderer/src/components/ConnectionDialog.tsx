@@ -10,7 +10,7 @@ interface Props {
 }
 
 const field =
-  'w-full rounded-lg border border-line bg-ink/60 px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 focus:ring-2 focus:ring-signal/15'
+  'w-full rounded-lg border border-line bg-ink/60 px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15'
 const label = 'eyebrow mb-1.5 block'
 
 export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }: Props) {
@@ -141,7 +141,7 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
             </span>
             <input
               type="checkbox"
-              className="h-4 w-4 shrink-0 accent-signal"
+              className="h-4 w-4 shrink-0 accent-accent"
               checked={tmux}
               onChange={(e) => setTmux(e.target.checked)}
             />
@@ -166,7 +166,7 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
                 </span>
                 <input
                   type="checkbox"
-                  className="h-4 w-4 shrink-0 accent-signal"
+                  className="h-4 w-4 shrink-0 accent-accent"
                   checked={tmuxDetachOthers}
                   onChange={(e) => setTmuxDetachOthers(e.target.checked)}
                 />
@@ -181,7 +181,7 @@ export function ConnectionDialog({ initial, secretsAvailable, onCancel, onSave }
                 </span>
                 <input
                   type="checkbox"
-                  className="h-4 w-4 shrink-0 accent-signal"
+                  className="h-4 w-4 shrink-0 accent-accent"
                   checked={tmuxControl}
                   onChange={(e) => setTmuxControl(e.target.checked)}
                 />

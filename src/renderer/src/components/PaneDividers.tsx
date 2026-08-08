@@ -68,7 +68,7 @@ export function PaneDividers({ direction, sizes, containerRef, onResize }: Props
             }`}
           >
             <div
-              className={`rounded-full bg-line transition-colors group-hover:bg-signal/70 ${
+              className={`rounded-full bg-line transition-colors group-hover:bg-accent/70 ${
                 cols ? 'h-10 w-[2px]' : 'h-[2px] w-10'
               }`}
             />

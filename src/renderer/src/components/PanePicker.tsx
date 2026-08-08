@@ -37,7 +37,7 @@ export function PanePicker({ options, onPick, onClose }: Props) {
                 key={o.id}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => onPick(o.id)}
-                className="max-w-[220px] truncate rounded-lg border border-line bg-elevated/50 px-3 py-1.5 font-mono text-[12px] text-fg/80 transition-colors hover:border-signal/50 hover:bg-signal/15 hover:text-signal"
+                className="max-w-[220px] truncate rounded-lg border border-line bg-elevated/50 px-3 py-1.5 font-mono text-[12px] text-fg/80 transition-colors hover:border-accent/50 hover:bg-accent/15 hover:text-accent"
               >
                 {o.label}
               </button>

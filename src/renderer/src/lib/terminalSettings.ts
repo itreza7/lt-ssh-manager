@@ -7,7 +7,8 @@ export type {
   EditorSettings,
   SettingsPatch,
   ShiftEnterMode,
-  TerminalSettings
+  TerminalSettings,
+  Theme
 } from '../../../shared/types'
 import { DEFAULT_APP_SETTINGS } from '../../../shared/types'
 

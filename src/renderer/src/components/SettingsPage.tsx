@@ -4,7 +4,8 @@ import type {
   AppSettings,
   CursorStyle,
   SettingsPatch,
-  ShiftEnterMode
+  ShiftEnterMode,
+  Theme
 } from '../lib/terminalSettings'
 import {
   clampFont,
@@ -34,12 +35,19 @@ interface Props {
   onReset: () => void
 }
 
-type SectionId = 'terminal' | 'editor' | 'connections' | 'shortcuts'
+type SectionId = 'appearance' | 'terminal' | 'editor' | 'connections' | 'shortcuts'
 const SECTIONS: { id: SectionId; label: string; icon: string }[] = [
+  { id: 'appearance', label: 'Appearance', icon: '◐' },
   { id: 'terminal', label: 'Terminal', icon: '▍' },
   { id: 'editor', label: 'Editor', icon: '✎' },
   { id: 'connections', label: 'Connections', icon: '⇄' },
   { id: 'shortcuts', label: 'Shortcuts', icon: '⌨' }
+]
+
+const THEMES: { value: Theme; label: string }[] = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' }
 ]
 
 const CURSORS: { value: CursorStyle; label: string }[] = [
@@ -86,7 +94,7 @@ const KEYS: { keys: string; what: string }[] = isMac
     ]
 
 const field =
-  'rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-signal/60'
+  'rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent/60'
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -102,7 +110,7 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 
 function Stepper({ value, min, max, onChange }: { value: number; min: number; max: number; onChange: (n: number) => void }) {
   const btn =
-    'grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-30'
+    'grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-30'
   return (
     <div className="flex items-center gap-1.5">
       <button className={btn} disabled={value <= min} onClick={() => onChange(value - 1)}>
@@ -132,7 +140,7 @@ function Segmented<T extends string>({
           key={o.value}
           onClick={() => onChange(o.value)}
           className={`rounded-md px-3 py-1 text-xs transition-colors ${
-            value === o.value ? 'bg-signal/20 text-signal' : 'text-muted hover:text-fg'
+            value === o.value ? 'bg-accent/20 text-accent' : 'text-muted hover:text-fg'
           }`}
         >
           {o.label}
@@ -158,7 +166,7 @@ function NumSeg({
           key={o}
           onClick={() => onChange(o)}
           className={`rounded-md px-3 py-1 font-mono text-xs transition-colors ${
-            value === o ? 'bg-signal/20 text-signal' : 'text-muted hover:text-fg'
+            value === o ? 'bg-accent/20 text-accent' : 'text-muted hover:text-fg'
           }`}
         >
           {o}
@@ -175,7 +183,7 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (b: boolean) => void 
       aria-checked={on}
       onClick={() => onChange(!on)}
       className={`inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors ${
-        on ? 'border-signal bg-signal' : 'border-line bg-elevated'
+        on ? 'border-accent bg-accent' : 'border-line bg-elevated'
       }`}
     >
       <span
@@ -213,7 +221,7 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
               key={s.id}
               onClick={() => setSection(s.id)}
               className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-                section === s.id ? 'bg-signal/15 text-signal' : 'text-muted hover:bg-elevated/50 hover:text-fg'
+                section === s.id ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated/50 hover:text-fg'
               }`}
             >
               <span className="w-4 text-center">{s.icon}</span>
@@ -228,19 +236,27 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
         {/* content */}
         <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
           <div className="mx-auto max-w-2xl">
+            {section === 'appearance' && (
+              <div className="panel px-5 py-2">
+                <Row label="Theme" hint="Follow the system, or pin it">
+                  <Segmented value={settings.theme} options={THEMES} onChange={(v) => onChange({ theme: v })} />
+                </Row>
+              </div>
+            )}
+
             {section === 'terminal' && (
               <>
                 {/* preview */}
                 <div className="animate-rise mb-5 overflow-hidden rounded-xl border border-line bg-ink p-4">
                   <div className="eyebrow mb-2">Preview</div>
                   <div className="leading-relaxed" style={{ fontFamily: resolveFontStack(t.fontFamily), fontSize: t.fontSize }}>
-                    <span className="text-signal">reza@server</span>
+                    <span className="text-accent">reza@server</span>
                     <span className="text-muted">:</span>
                     <span className="text-[#7aa2f7]">~/app</span>
                     <span className="text-muted">$ </span>
                     <span className="text-fg">npm run dev</span>
                     <span
-                      className={`ml-0.5 inline-block align-middle bg-signal ${t.cursorBlink ? 'animate-glow' : ''} ${
+                      className={`ml-0.5 inline-block align-middle bg-accent ${t.cursorBlink ? 'animate-glow' : ''} ${
                         t.cursorStyle === 'block'
                           ? 'h-[1.05em] w-[0.55em]'
                           : t.cursorStyle === 'underline'
@@ -336,7 +352,7 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                       <span className="text-muted"> = (</span>
                       <span className="text-amber">name</span>
                       <span className="text-muted">) =&gt; </span>
-                      <span className="text-signal">`hi ${'{'}name{'}'}`</span>
+                      <span className="text-accent">`hi ${'{'}name{'}'}`</span>
                     </div>
                     <div>
                       {ed.lineNumbers && <span className="mr-3 text-faint">2</span>}
@@ -397,34 +413,34 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                 <div className="eyebrow py-2">Terminal copy &amp; paste</div>
                 {KEYS.map((k) => (
                   <div key={k.keys} className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                    <span className="font-mono text-xs text-signal">{k.keys}</span>
+                    <span className="font-mono text-xs text-accent">{k.keys}</span>
                     <span className="text-right text-muted">{k.what}</span>
                   </div>
                 ))}
                 <div className="eyebrow py-2 pt-4">Typing</div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-signal">Shift+Enter</span>
+                  <span className="font-mono text-xs text-accent">Shift+Enter</span>
                   <span className="text-right text-muted">{SHIFT_ENTER_HELP[t.shiftEnter]}</span>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-signal">Ctrl+J</span>
+                  <span className="font-mono text-xs text-accent">Ctrl+J</span>
                   <span className="text-right text-muted">Newline — always, whatever Shift+Enter is set to</span>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-signal">{COMPOSE_ACCEL}</span>
+                  <span className="font-mono text-xs text-accent">{COMPOSE_ACCEL}</span>
                   <span className="text-right text-muted">
                     Prompt composer — draft a multi-line prompt, then send it as one paste
                   </span>
                 </div>
                 <div className="eyebrow py-2 pt-4">Files</div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-signal">Drag &amp; drop</span>
+                  <span className="font-mono text-xs text-accent">Drag &amp; drop</span>
                   <span className="text-right text-muted">
                     Upload onto a terminal — the remote path is typed at your cursor, never run
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-signal">{IMAGE_PASTE_ACCEL}</span>
+                  <span className="font-mono text-xs text-accent">{IMAGE_PASTE_ACCEL}</span>
                   <span className="text-right text-muted">
                     Upload the clipboard&apos;s image the same way — a screenshot in one gesture
                   </span>

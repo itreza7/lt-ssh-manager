@@ -37,7 +37,7 @@ export function HostKeyDialog({ prompt, onRespond }: Props) {
         </p>
         <div className="rounded-lg border border-line bg-ink/60 p-3 font-mono text-xs">
           <div className="eyebrow mb-1">{prompt.keyType}</div>
-          <div className="break-all text-signal">{prompt.fingerprint}</div>
+          <div className="break-all text-accent">{prompt.fingerprint}</div>
         </div>
         <p className="text-faint">Trusting saves this key; future connections verify against it.</p>
       </div>

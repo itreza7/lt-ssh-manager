@@ -96,7 +96,7 @@ export function TerminalFindBar({
           onKeyDown={onKeyDown}
           spellCheck={false}
           placeholder="Find in terminal"
-          className="w-48 min-w-0 rounded-md border border-line bg-ink/60 px-2 py-0.5 font-mono text-[12px] text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-signal/60"
+          className="w-48 min-w-0 rounded-md border border-line bg-ink/60 px-2 py-0.5 font-mono text-[12px] text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
         />
         <span className="w-20 shrink-0 truncate text-right font-mono text-[11px]">{status}</span>
 
@@ -171,7 +171,7 @@ function Toggle({
       aria-pressed={on}
       className={`shrink-0 rounded-md border px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
         on
-          ? 'border-signal/60 bg-signal-soft text-signal'
+          ? 'border-accent/60 bg-accent-soft text-accent'
           : 'border-transparent text-faint hover:text-muted'
       }`}
     >

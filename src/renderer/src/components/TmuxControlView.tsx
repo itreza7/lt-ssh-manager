@@ -459,7 +459,7 @@ export function TmuxControlView({
             >
               <div
                 className={`relative h-full w-full overflow-hidden rounded-sm ring-1 ${
-                  isActivePane ? 'ring-signal/70' : 'ring-line/50'
+                  isActivePane ? 'ring-accent/70' : 'ring-line/50'
                 }`}
               >
                 <TmuxPane
@@ -517,7 +517,7 @@ export function TmuxControlView({
             <p className="text-sm text-muted">{overlay.body}</p>
             <button
               onClick={() => reconnect(overlay.mode)}
-              className="mt-1 rounded-lg bg-signal px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
+              className="mt-1 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
             >
               {overlay.action}
             </button>
@@ -547,7 +547,7 @@ function WindowStrip({
           key={w.windowId}
           onClick={() => onSelect(w.windowId)}
           className={`shrink-0 rounded px-2.5 py-1 text-xs transition-colors ${
-            w.windowId === activeId ? 'bg-signal/20 text-signal' : 'text-muted hover:bg-elevated/60 hover:text-fg'
+            w.windowId === activeId ? 'bg-accent/20 text-accent' : 'text-muted hover:bg-elevated/60 hover:text-fg'
           }`}
           title={w.windowId}
         >

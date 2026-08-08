@@ -530,7 +530,7 @@ export function TerminalView({
             <p className="text-sm text-muted">{overlay.body}</p>
             <button
               onClick={() => reconnect(overlay.mode)}
-              className="mt-1 rounded-lg bg-signal px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
+              className="mt-1 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
             >
               {overlay.action}
             </button>

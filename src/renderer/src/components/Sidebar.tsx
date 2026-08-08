@@ -53,9 +53,9 @@ export function Sidebar({
         <button
           onClick={onToggleCollapse}
           title="Expand connections"
-          className="grid h-8 w-8 place-items-center rounded-md bg-signal/15 ring-1 ring-signal/30 transition-colors hover:bg-signal/25"
+          className="grid h-8 w-8 place-items-center rounded-md bg-accent/15 ring-1 ring-accent/30 transition-colors hover:bg-accent/25"
         >
-          <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
+          <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
         </button>
 
         {/* Bigger and coloured, unlike the plain-bordered "+" below it — Home is
@@ -63,7 +63,7 @@ export function Sidebar({
         <button
           onClick={onOpenInbox}
           title="Home — every agent on every host"
-          className="grid h-9 w-9 place-items-center rounded-md bg-signal-soft/40 text-signal ring-1 ring-signal/30 transition-colors hover:bg-signal-soft/60"
+          className="grid h-9 w-9 place-items-center rounded-md bg-accent-soft/40 text-accent ring-1 ring-accent/30 transition-colors hover:bg-accent-soft/60"
         >
           ◎
         </button>
@@ -73,7 +73,7 @@ export function Sidebar({
         <button
           onClick={onAdd}
           title="New connection (Ctrl+N)"
-          className="grid h-7 w-7 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+          className="grid h-7 w-7 place-items-center rounded-md border border-line text-faint transition-colors hover:border-accent/40 hover:text-accent"
         >
           +
         </button>
@@ -90,12 +90,12 @@ export function Sidebar({
                 title={`${c.name} — ${c.username ? `${c.username}@` : ''}${c.host}:${c.port}`}
                 className={`relative grid h-9 w-9 shrink-0 place-items-center rounded-lg font-mono text-[11px] font-semibold transition-colors ${
                   selected
-                    ? 'bg-signal-soft/50 text-fg ring-1 ring-signal/40'
+                    ? 'bg-accent-soft/50 text-fg ring-1 ring-accent/40'
                     : 'bg-elevated/40 text-muted hover:bg-elevated/70 hover:text-fg'
                 }`}
               >
                 {selected && (
-                  <span className="absolute -left-1.5 inset-y-1.5 w-[2px] rounded-full bg-signal dot-glow text-signal" />
+                  <span className="absolute -left-1.5 inset-y-1.5 w-[2px] rounded-full bg-accent dot-glow text-accent" />
                 )}
                 {initials(c.name)}
               </button>
@@ -110,12 +110,12 @@ export function Sidebar({
     <div className="flex h-full w-72 shrink-0 flex-col border-r border-line bg-surface/80">
       {/* brand */}
       <div className="flex shrink-0 items-center gap-2.5 px-4 pb-3 pt-4">
-        <div className="grid h-7 w-7 place-items-center rounded-md bg-signal/15 ring-1 ring-signal/30">
-          <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
+        <div className="grid h-7 w-7 place-items-center rounded-md bg-accent/15 ring-1 ring-accent/30">
+          <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
         </div>
         <div className="leading-tight">
           <div className="font-mono text-[13px] font-semibold tracking-[0.14em] text-fg">
-            CLAUDE<span className="text-signal">·</span>SSH
+            CLAUDE<span className="text-accent">·</span>SSH
           </div>
           <div className="eyebrow !text-[9px]">control deck</div>
         </div>
@@ -129,9 +129,9 @@ export function Sidebar({
       <div className="shrink-0 px-2 pb-3">
         <button
           onClick={onOpenInbox}
-          className="group flex w-full items-center gap-2.5 rounded-lg border border-signal/25 bg-signal-soft/25 px-3 py-2.5 text-left transition-colors hover:bg-signal-soft/40"
+          className="group flex w-full items-center gap-2.5 rounded-lg border border-accent/25 bg-accent-soft/25 px-3 py-2.5 text-left transition-colors hover:bg-accent-soft/40"
         >
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-signal/15 text-signal ring-1 ring-signal/30">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-accent/15 text-accent ring-1 ring-accent/30">
             ◎
           </span>
           <span className="text-sm font-medium text-fg">Home</span>
@@ -151,14 +151,14 @@ export function Sidebar({
           <button
             onClick={onAdd}
             title="New connection (Ctrl+N)"
-            className="grid h-6 w-6 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+            className="grid h-6 w-6 place-items-center rounded-md border border-line text-faint transition-colors hover:border-accent/40 hover:text-accent"
           >
             +
           </button>
           <button
             onClick={onToggleCollapse}
             title="Collapse sidebar"
-            className="grid h-6 w-6 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+            className="grid h-6 w-6 place-items-center rounded-md border border-line text-faint transition-colors hover:border-accent/40 hover:text-accent"
           >
             «
           </button>
@@ -182,11 +182,11 @@ export function Sidebar({
               onClick={() => onSelect(c.id)}
               style={{ animationDelay: `${Math.min(i, 12) * 28}ms` }}
               className={`group animate-rise relative mb-1 cursor-pointer rounded-lg px-3 py-2.5 transition-colors ${
-                selected ? 'bg-signal-soft/40' : 'hover:bg-elevated/50'
+                selected ? 'bg-accent-soft/40' : 'hover:bg-elevated/50'
               }`}
             >
               {selected && (
-                <span className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-signal dot-glow text-signal" />
+                <span className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-accent dot-glow text-accent" />
               )}
               <div className="flex items-center justify-between gap-2">
                 <span className={`truncate text-sm font-medium ${selected ? 'text-fg' : 'text-fg/90'}`}>

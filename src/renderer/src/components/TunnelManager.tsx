@@ -121,7 +121,7 @@ export function TunnelManager({ connectionId, connectionName, password, active }
 
         {loaded && defs.length === 0 && (
           <div className="panel animate-rise flex flex-col items-center gap-3 px-6 py-12 text-center">
-            <div className="grid h-11 w-11 place-items-center rounded-xl bg-signal/10 font-mono text-signal ring-1 ring-signal/25">
+            <div className="grid h-11 w-11 place-items-center rounded-xl bg-accent/10 font-mono text-accent ring-1 ring-accent/25">
               ⇄
             </div>
             <p className="text-sm text-muted">No tunnels yet.</p>
@@ -141,7 +141,7 @@ export function TunnelManager({ connectionId, connectionName, password, active }
                 className="panel animate-rise flex items-center gap-4 px-4 py-3.5"
               >
                 <span
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-black/30 font-mono text-sm font-bold text-signal ring-1 ring-line-soft"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-black/30 font-mono text-sm font-bold text-accent ring-1 ring-line-soft"
                   title={meta.label}
                 >
                   {meta.tag}
@@ -352,7 +352,7 @@ function Input({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className={`w-full rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 ${
+      className={`w-full rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60 ${
         mono ? 'font-mono' : ''
       }`}
     />
