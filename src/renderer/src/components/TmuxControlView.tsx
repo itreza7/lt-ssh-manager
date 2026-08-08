@@ -10,12 +10,15 @@ import type {
 import type { TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
+import type { FindTarget } from '../lib/useTerminalFind'
+import { useTerminalFind } from '../lib/useTerminalFind'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { useDropUpload } from '../lib/useDropUpload'
 import { DropHint, DropStatusBar } from './DropUploadLayer'
 import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
+import { TerminalFindBar } from './TerminalFindBar'
 
 interface Props {
   sessionId: string
@@ -601,10 +604,21 @@ function TmuxPane({
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
+  // Find-in-pane. Per pane rather than per tab, unlike the composer above: a
+  // draft is a paragraph aimed at one pane you picked, but a search is tied to
+  // the buffer you are already reading, and a tab-level bar would have to keep
+  // asking which of four panes that is. No overscroll here — tmux owns the
+  // layout and each pane scrolls its own xterm viewport — so the addon's own
+  // scroll-to-match is the whole story.
+  const findRef = useRef<FindTarget | null>(null)
+  const find = useTerminalFind(useCallback(() => findRef.current, []))
+  const startFind = find.start
+
   // Create the xterm for this pane exactly once.
   useEffect(() => {
-    const { term } = createTerminal(settingsRef.current, containerRef.current!)
+    const { term, search } = createTerminal(settingsRef.current, containerRef.current!)
     termRef.current = term
+    findRef.current = { term, search }
     const send = (d: string): void => window.api.tmuxSendKeys(sessionId, paneId, d)
     term.onData(send)
     // No onTitle: a control-mode tab holds many panes, and tmux reports window
@@ -613,6 +627,7 @@ function TmuxPane({
       sendData: send,
       settings: () => settingsRef.current,
       onCompose: () => onCompose(paneId),
+      onFind: startFind,
       onDragFiles: (over) => onDragFiles(paneId, over),
       onDropFiles: (paths) => onDropFiles(paneId, paths),
       onPasteImage: () => onPasteImage(paneId)
@@ -625,6 +640,8 @@ function TmuxPane({
       unregister()
       detachTerminal()
       detachSignal()
+      search.dispose()
+      findRef.current = null
       term.dispose()
       termRef.current = null
     }
@@ -647,10 +664,35 @@ function TmuxPane({
     if (termRef.current) applyTerminalSettings(termRef.current, settings)
   }, [settings.fontFamily, settings.fontSize, settings.cursorStyle, settings.cursorBlink, settings.scrollback, settings])
 
-  // Focus this pane's terminal when it's the focused leaf's active pane.
+  // Focus this pane's terminal when it's the focused leaf's active pane —
+  // unless its find bar is up, which is where the keyboard already was. Behind
+  // a ref so opening the bar doesn't re-run this and fight itself for focus.
+  const findingRef = useRef(find.open)
+  findingRef.current = find.open
   useEffect(() => {
-    if (focused) termRef.current?.focus()
-  }, [focused])
+    if (!focused) return
+    if (findingRef.current) startFind()
+    else termRef.current?.focus()
+  }, [focused, startFind])
 
-  return <div ref={containerRef} className="h-full w-full" onMouseDown={onSelect} />
+  return (
+    <>
+      <div ref={containerRef} className="h-full w-full" onMouseDown={onSelect} />
+      {find.open && (
+        <TerminalFindBar
+          focusKey={find.focusKey}
+          query={find.query}
+          onQuery={find.setQuery}
+          flags={find.flags}
+          onFlags={find.setFlags}
+          results={find.results}
+          badPattern={find.badPattern}
+          altScreen={find.altScreen}
+          onFind={find.find}
+          onClose={find.close}
+          onBlur={find.blur}
+        />
+      )}
+    </>
+  )
 }

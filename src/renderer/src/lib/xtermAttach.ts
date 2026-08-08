@@ -9,6 +9,7 @@
 // once to reach every terminal in the app.
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { TerminalSettings } from './terminalSettings'
+import { searchOwnsFocus } from './xtermSearch'
 import { fmtAccel, isMac } from './platform'
 
 export interface TerminalAttachOptions {
@@ -31,6 +32,8 @@ export interface TerminalAttachOptions {
    * is owned here; the caller owns the drafting UI and what it sends.
    */
   onCompose?: () => void
+  /** The user asked to search this terminal (see FIND_ACCEL). As onCompose. */
+  onFind?: () => void
   /**
    * OS files are hovering over this terminal (`true`), or have left it / been
    * dropped (`false`). Only the hover state is reported — the caller draws
@@ -67,6 +70,17 @@ export const COMPOSE_ACCEL = isMac ? fmtAccel('Cmd+Enter') : 'Ctrl+Shift+Enter'
  * an image on the clipboard.
  */
 export const IMAGE_PASTE_ACCEL = isMac ? fmtAccel('Cmd+Shift+V') : 'Ctrl+Shift+U'
+
+/**
+ * The chord that opens the find bar.
+ *
+ * ⌘F on macOS — the universal one, and free here: the app's menu deliberately
+ * registers no Find item, because an accelerator on the menu is matched by
+ * AppKit before the key ever reaches the renderer, and the renderer is the only
+ * place that knows *which* terminal is focused. Elsewhere it's Ctrl+Shift+F,
+ * since bare Ctrl+F is readline's forward-char.
+ */
+export const FIND_ACCEL = isMac ? fmtAccel('Cmd+F') : 'Ctrl+Shift+F'
 
 const isComposeChord = (e: KeyboardEvent): boolean =>
   isMac
@@ -184,10 +198,15 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
 
   const copySelection = (): void => {
     const sel = term.getSelection()
-    if (sel) {
-      lastSelection = sel
-      window.api.clipboardWrite(sel)
-    }
+    if (!sel) return
+    lastSelection = sel
+    // A search match is a selection the app made, and xterm reports it through
+    // this same event. Copying it would mean every letter typed into the find
+    // box overwrites the clipboard — including whatever the user copied in order
+    // to paste into this terminal. The match still becomes lastSelection, so an
+    // explicit copy after a find copies the thing that was found.
+    if (searchOwnsFocus()) return
+    window.api.clipboardWrite(sel)
   }
   /**
    * What an explicit copy chord copies: what was selected, not what has since
@@ -244,6 +263,20 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
     if (k === 'enter' && opts.onCompose && isComposeChord(e)) {
       e.preventDefault()
       opts.onCompose()
+      return false
+    }
+    // The find bar — see FIND_ACCEL. preventDefault for the usual reason (the
+    // keypress would otherwise still reach the remote), and because Chromium
+    // would run its own find-in-page against the app's chrome.
+    if (
+      k === 'f' &&
+      opts.onFind &&
+      (isMac
+        ? e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey
+        : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey)
+    ) {
+      e.preventDefault()
+      opts.onFind()
       return false
     }
     // Shift+Enter. xterm gives it the same CR as Enter, so a terminal agent that

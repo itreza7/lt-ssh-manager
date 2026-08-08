@@ -34,10 +34,22 @@ in the main process.
   paste; and dropping a file (or pasting an image with ⌘⇧V / Ctrl+Shift+U) on a terminal
   uploads it to a private folder on the host and types the remote path at your cursor —
   the path is typed, never run.
+- **Find in terminal** — ⌘F (Ctrl+Shift+F elsewhere) searches the scrollback of the pane
+  you are reading, with case, whole-word and regex toggles and a live match count. Under
+  tmux, each pane keeps its own search. Searching never touches your clipboard, so the
+  thing you copied to paste into that terminal is still there when you find where it goes.
 - **Agent attention** — when a program in a tab you aren't watching asks for you, its tab
   gets an amber dot; optionally a system notification (clicking it focuses that exact tab)
   and a dock badge. The dashboard installs the matching Notification hook into a host's
   `~/.claude/settings.json` for you, showing the before/after JSON before it writes.
+- **Agent Inbox** — one list of every agent you have running, across every connection:
+  which host, which directory, how long it's been idle, and whether it's asking for you,
+  with one-click attach. Underneath it, the sessions you *aren't* running — read from the
+  host's own Claude transcripts, newest first — resume in a tab with one click.
+- **Worktrees** — list and create git worktrees on a host and start an agent in one, so
+  two agents on the same repository stop editing the same files. Removal runs a read-only
+  `git status --ignored` first and shows you what would be deleted: `git worktree remove`
+  takes ignored files (`.env`, `node_modules`) with it and still exits 0.
 - **Connection manager** — add/edit/delete connections; key, password, or agent auth.
 - **Server dashboard** — at-a-glance host vitals (OS, kernel, uptime, CPU/memory/disk
   meters, load) from a one-shot probe, a tmux session list with one-click attach, and the
@@ -83,6 +95,8 @@ npm run dev        # launch with hot reload
 npm run typecheck  # type-check main + renderer
 npm run build      # production build into out/
 npm run dist       # build the Windows NSIS installer (release/)
+npm run dist:mac   # build the macOS DMGs — arm64 + x64 (release/)
+npm run dist:linux # build the Linux packages (release/)
 ```
 
 > **Note:** on Windows, `electron-builder` may need symlink privileges (it extracts
