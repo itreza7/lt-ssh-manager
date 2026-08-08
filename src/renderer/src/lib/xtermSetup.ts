@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { resolveFontStack, type TerminalSettings } from './terminalSettings'
+import { createSearch, type TerminalSearch } from './xtermSearch'
 import { isMac } from './platform'
 
 /** xterm cell line-height multiple; mirrored by the cell-metrics measurement. */
@@ -25,12 +26,16 @@ const THEME = {
  * Create + open a terminal in `container` with the app's options/theme. WebGL is
  * attempted after open (falls back to canvas/DOM if unavailable). Pass
  * `{ fit: true }` to also attach a FitAddon (returned for the caller to drive).
+ *
+ * Search is loaded for every terminal rather than on demand: the addon indexes
+ * nothing until asked, and a find bar that has to construct one first would miss
+ * the buffer state at the moment the chord was pressed.
  */
 export function createTerminal(
   settings: TerminalSettings,
   container: HTMLElement,
   opts?: { fit?: boolean }
-): { term: XTerm; fit?: FitAddon } {
+): { term: XTerm; fit?: FitAddon; search: TerminalSearch } {
   const term = new XTerm({
     fontFamily: resolveFontStack(settings.fontFamily),
     fontSize: settings.fontSize,
@@ -61,13 +66,14 @@ export function createTerminal(
       if (modifier && event.button === 0) window.api.openExternal(uri)
     })
   )
+  const search = createSearch(term)
   term.open(container)
   try {
     term.loadAddon(new WebglAddon())
   } catch {
     /* WebGL unavailable — falls back to canvas/DOM renderer */
   }
-  return { term, fit }
+  return { term, fit, search }
 }
 
 /** Apply live setting changes (font, cursor, scrollback) to an existing terminal. */

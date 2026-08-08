@@ -5,12 +5,15 @@ import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/typ
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
 import { attachTerminal, sendComposed } from '../lib/xtermAttach'
+import type { TerminalSearch } from '../lib/xtermSearch'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
+import { useTerminalFind } from '../lib/useTerminalFind'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { useDropUpload } from '../lib/useDropUpload'
 import { DropUploadLayer } from './DropUploadLayer'
 import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
+import { TerminalFindBar } from './TerminalFindBar'
 
 interface Props {
   sessionId: string
@@ -52,6 +55,7 @@ export function TerminalView({
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const searchRef = useRef<TerminalSearch | null>(null)
   // latest settings for the once-mounted creation effect to read
   const settingsRef = useRef(settings)
   settingsRef.current = settings
@@ -137,6 +141,51 @@ export function TerminalView({
       programmaticScrollRef.current = false
     })
   }, [])
+
+  // Bring a search match into view.
+  //
+  // Only overscroll needs this. The search addon scrolls xterm's *viewport* to
+  // the match, which is the whole story at overscroll 1 — but in overscroll mode
+  // the viewport is the tall inner host and the outer host is what scrolls, so
+  // xterm can put the match on row 300 of a grid whose visible window is rows
+  // 40-70 and consider the job done. Translate the match's row into the outer
+  // host's scroll, and only when it is actually off screen, so stepping through
+  // matches on one page doesn't drag the view around.
+  const revealMatch = useCallback(() => {
+    const term = termRef.current
+    const scroll = scrollRef.current
+    if (!term || !scroll) return
+    if (clampOverscroll(settingsRef.current.overscroll) <= 1) return
+    const pos = term.getSelectionPosition()
+    if (!pos) return
+    const h = cellHeight()
+    const top = (pos.start.y - term.buffer.active.viewportY) * h
+    if (top >= scroll.scrollTop && top + h <= scroll.scrollTop + scroll.clientHeight) return
+    const max = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+    programmaticScrollRef.current = true
+    scroll.scrollTop = Math.max(0, Math.min(top - (scroll.clientHeight - h) / 2, max))
+    // Reading a match is not watching the tail: unpin, or the next frame of
+    // output would yank the view back to the bottom mid-read. Scrolling back
+    // down re-pins through the scroll listener, exactly as a manual scroll does.
+    stuckRef.current = false
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false
+    })
+  }, [cellHeight])
+
+  // Find-in-terminal. One terminal per view, so the target never moves.
+  const find = useTerminalFind(
+    useCallback(() => {
+      const term = termRef.current
+      const search = searchRef.current
+      return term && search ? { term, search } : null
+    }, []),
+    revealMatch
+  )
+  const startFind = find.start
+  // Read by the focus effect, which must not re-run when the bar opens.
+  const findingRef = useRef(find.open)
+  findingRef.current = find.open
 
   // Size the inner grid to overscroll× the visible height, then refit xterm so
   // the right (tall) row count is computed. Callers push that to the PTY.
@@ -244,11 +293,12 @@ export function TerminalView({
     // the first fit reports the right row count to connect().
     host.style.height = `${Math.max(1, scroll.clientHeight) * clampOverscroll(settingsRef.current.overscroll)}px`
 
-    const { term, fit: fitAddon } = createTerminal(settingsRef.current, host, { fit: true })
+    const { term, fit: fitAddon, search } = createTerminal(settingsRef.current, host, { fit: true })
     const fit = fitAddon!
     fit.fit()
     termRef.current = term
     fitRef.current = fit
+    searchRef.current = search
     screenElRef.current = host.querySelector('.xterm-screen')
 
     // Keystrokes typed while a reattach is in flight are dropped by the main
@@ -266,6 +316,7 @@ export function TerminalView({
       settings: () => settingsRef.current,
       onTitle: (t) => onTitle?.(sessionId, t),
       onCompose: openComposer,
+      onFind: startFind,
       onDragFiles: (o) => uploadRef.current.setOver(o),
       onDropFiles: (paths) => uploadRef.current.drop(paths, termRef.current),
       onPasteImage: () => uploadRef.current.pasteImage(termRef.current)
@@ -375,6 +426,8 @@ export function TerminalView({
       scroll.removeEventListener('scroll', onScroll)
       detachTerminal()
       detachSignal()
+      search.dispose()
+      searchRef.current = null
       window.api.closeSession(sessionId)
       term.dispose()
     }
@@ -402,16 +455,17 @@ export function TerminalView({
   // through App's focusPane, so this also fires on a click *inside* the open
   // composer — hence the branch, or the terminal would steal focus mid-sentence.
   // A parked tab is `display: none`, which drops focus entirely, so coming back
-  // has to restore it to *something*: the composer if one is open, else the
-  // terminal as before.
+  // has to restore it to *something*: the composer if one is open, else the find
+  // bar if that is, else the terminal as before.
   useEffect(() => {
     if (!active) return
     requestAnimationFrame(() => {
       layout()
       if (composingRef.current) bumpFocus()
+      else if (findingRef.current) startFind()
       else termRef.current?.focus()
     })
-  }, [active, sessionId, layout])
+  }, [active, sessionId, layout, startFind])
 
   const isTmux = !!tmux
   const tall = clampOverscroll(settings.overscroll) > 1
@@ -485,6 +539,21 @@ export function TerminalView({
       )}
       {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
       <DropUploadLayer over={upload.over} status={upload.status} onDismiss={upload.dismiss} />
+      {find.open && (
+        <TerminalFindBar
+          focusKey={find.focusKey}
+          query={find.query}
+          onQuery={find.setQuery}
+          flags={find.flags}
+          onFlags={find.setFlags}
+          results={find.results}
+          badPattern={find.badPattern}
+          altScreen={find.altScreen}
+          onFind={find.find}
+          onClose={find.close}
+          onBlur={find.blur}
+        />
+      )}
       {/* Overlaid on the terminal, never docked beside it: a sibling would change
           the scroll host's box, and the ResizeObserver above turns that into a PTY
           resize — under tmux, a reflow for every attached client. */}
