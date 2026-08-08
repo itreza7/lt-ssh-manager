@@ -108,6 +108,11 @@ const api = {
   resumeScan: (args?: { retryFailed?: boolean; offset?: number }): Promise<ResumeHostScan[]> =>
     ipcRenderer.invoke('resume:scan', args ?? {}),
 
+  // Read one saved transcript's raw content, for the rendered-transcript tab.
+  // Not part of the sweep above: a single file read, asked for on demand.
+  resumeRead: (args: { connectionId: string; password?: string; id: string }): Promise<{ path: string; content: string }> =>
+    ipcRenderer.invoke('resume:read', args),
+
   // host vitals probe
   probeServer: (args: { connectionId: string; password?: string }): Promise<ServerStats> =>
     ipcRenderer.invoke('ssh:probe', args),

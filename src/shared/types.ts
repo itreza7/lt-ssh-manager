@@ -659,6 +659,7 @@ export interface PersistedTab {
     | 'tmux'
     | 'worktrees'
     | 'inbox'
+    | 'transcript'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -670,6 +671,7 @@ export interface PersistedTab {
   initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo
   path?: string // editor: remote file path
   name?: string // editor: file name
+  sessionId?: string // transcript: the resumable session id
 }
 
 /** Which way a split screen is divided. */

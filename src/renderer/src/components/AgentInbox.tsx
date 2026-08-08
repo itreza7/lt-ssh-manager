@@ -28,6 +28,8 @@ interface Props {
   onAttach: (connectionId: string, session: string) => void
   /** Open a new agent tab resuming this saved transcript. `label` titles the tab. */
   onResume: (connectionId: string, session: ResumeSession, label: string) => void
+  /** Open this saved transcript read-only, rendered as a conversation. */
+  onOpenTranscript: (connectionId: string, session: ResumeSession, label: string) => void
   /** Launch a brand-new agent on this host, in this directory. Returns false
    *  (without side effects other than the failed attempt) if the host is gone
    *  or the directory isn't absolute, so the form can tell the user instead
@@ -144,6 +146,7 @@ export function AgentInbox({
   loadMoreSaved,
   onAttach,
   onResume,
+  onOpenTranscript,
   onNewAgent
 }: Props) {
   // Every tmux session on every host, agent-looking or not. There is no filter:
@@ -563,6 +566,13 @@ export function AgentInbox({
                       </span>
                     )}
                     <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <button
+                        onClick={() => onOpenTranscript(r.connectionId, r.s, r.label ?? 'claude')}
+                        title="View this transcript as a readable conversation"
+                        className="rounded-md border border-line px-2 py-0.5 text-[11px] text-faint transition-colors hover:border-accent/40 hover:text-accent"
+                      >
+                        Transcript
+                      </button>
                       {r.running !== null ? (
                         <button
                           onClick={() => onAttach(r.connectionId, r.running as string)}
