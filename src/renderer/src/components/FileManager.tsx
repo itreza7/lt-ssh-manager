@@ -13,8 +13,6 @@ interface Props {
   onCwdChange: (path: string) => void
   /** Start Claude Code in a directory, in its own tab. */
   onOpenClaude?: (dir: string) => void
-  /** Review the git working tree containing a directory, in its own tab. */
-  onOpenReview?: (dir: string) => void
   /** List the git worktrees of the repo containing a directory, in its own tab. */
   onOpenWorktrees?: (dir: string) => void
 }
@@ -199,7 +197,6 @@ export function FileManager({
   onOpenFile,
   onCwdChange,
   onOpenClaude,
-  onOpenReview,
   onOpenWorktrees
 }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
@@ -539,13 +536,6 @@ export function FileManager({
             directory is inside a repo is exactly what the pane answers, so a
             button that only appeared once we knew would have to ask on every
             listing. "Not a git repository" is a sentence, not a dead control. */}
-        {onOpenReview && (
-          <ToolBtn label="Review changes" disabled={!cwd} onClick={() => onOpenReview(cwd)}>
-            ±
-          </ToolBtn>
-        )}
-        {/* Ungated for the same reason as Review changes above: "not a git
-            repository" is the pane's answer, not a reason to hide the way to ask. */}
         {onOpenWorktrees && (
           <ToolBtn label="Worktrees" disabled={!cwd} onClick={() => onOpenWorktrees(cwd)}>
             ⑂
@@ -733,9 +723,6 @@ export function FileManager({
           <MenuItem onClick={() => setPrompt({ kind: 'mkdir' })}>New folder</MenuItem>
           <MenuItem onClick={() => void doUploadPick()}>Upload here</MenuItem>
           {onOpenClaude && cwd && <MenuItem onClick={() => onOpenClaude(cwd)}>Claude here</MenuItem>}
-          {onOpenReview && cwd && (
-            <MenuItem onClick={() => onOpenReview(cwd)}>Review changes</MenuItem>
-          )}
           {onOpenWorktrees && cwd && (
             <MenuItem onClick={() => onOpenWorktrees(cwd)}>Worktrees</MenuItem>
           )}

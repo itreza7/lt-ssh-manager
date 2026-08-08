@@ -7,8 +7,6 @@ interface Props {
   active: boolean
   /** Attach a terminal tab to this tmux session on this host. */
   onAttach: (connectionId: string, session: string) => void
-  /** Open Review Changes for the agent's working directory. */
-  onReview: (connectionId: string, dir: string) => void
 }
 
 /** How often a visible inbox re-scans. */
@@ -66,11 +64,10 @@ function shortPath(p: string): string {
   return parts.length <= 2 ? p : `…/${parts.slice(-2).join('/')}`
 }
 
-export function AgentInbox({ active, onAttach, onReview }: Props) {
+export function AgentInbox({ active, onAttach }: Props) {
   const [hosts, setHosts] = useState<AgentHostScan[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
-  const [agentsOnly, setAgentsOnly] = useState(true)
 
   // One scan in flight at a time. The poll interval is shorter than a sweep
   // across a slow host takes, so without this a stalled host would pile up
@@ -105,11 +102,14 @@ export function AgentInbox({ active, onAttach, onReview }: Props) {
     return () => clearInterval(t)
   }, [active, scan])
 
+  // Every tmux session on every host, agent-looking or not. There is no filter:
+  // whether a session "looks like an agent" is a guess from its name, and a guess
+  // has no business hiding a running process from the one view that lists them.
+  // The session name is on every row, so an agent still reads as one.
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = []
     for (const h of hosts ?? []) {
       for (const s of h.sessions) {
-        if (agentsOnly && !s.agent) continue
         out.push({ connectionId: h.connectionId, host: h.name, s, status: agentStatus(s) })
       }
     }
@@ -120,7 +120,7 @@ export function AgentInbox({ active, onAttach, onReview }: Props) {
       const bi = b.s.idleSeconds ?? Number.MAX_SAFE_INTEGER
       return ai - bi || a.host.localeCompare(b.host) || a.s.session.localeCompare(b.s.session)
     })
-  }, [hosts, agentsOnly])
+  }, [hosts])
 
   const counts = useMemo(() => {
     const c: Record<AgentStatus, number> = { waiting: 0, working: 0, idle: 0, unknown: 0 }
@@ -149,18 +149,6 @@ export function AgentInbox({ active, onAttach, onReview }: Props) {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          <label
-            className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted"
-            title="Show every tmux session, not just the ones that look like agents"
-          >
-            <input
-              type="checkbox"
-              checked={agentsOnly}
-              onChange={(e) => setAgentsOnly(e.target.checked)}
-              className="accent-signal"
-            />
-            Agents only
-          </label>
           <button
             // Explicitly asking is what clears the main process's memory of hosts
             // that refused us; the ten-second poll must not, or it would be
@@ -187,11 +175,9 @@ export function AgentInbox({ active, onAttach, onReview }: Props) {
 
         {hosts !== null && rows.length === 0 && (
           <p className="px-3 py-10 text-center text-xs leading-relaxed text-faint">
-            No {agentsOnly ? 'agents' : 'tmux sessions'} running.
+            Nothing is running under tmux on any host.
             <br />
-            {agentsOnly
-              ? 'Start one with “Open Claude here” from a host’s file manager.'
-              : 'Nothing is running under tmux on any host.'}
+            Start an agent with “Claude here” from a host’s file manager or worktree list.
           </p>
         )}
 
@@ -228,15 +214,6 @@ export function AgentInbox({ active, onAttach, onReview }: Props) {
                 </span>
               )}
               <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                {r.s.dir && (
-                  <button
-                    onClick={() => onReview(r.connectionId, r.s.dir)}
-                    className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal"
-                    title="Review the working tree this agent is changing"
-                  >
-                    Changes
-                  </button>
-                )}
                 <button
                   onClick={() => onAttach(r.connectionId, r.s.session)}
                   className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
