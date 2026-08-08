@@ -16,6 +16,7 @@ import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { Dashboard } from './components/Dashboard'
 import { SettingsPage } from './components/SettingsPage'
+import { AgentInbox } from './components/AgentInbox'
 import { ConnectionDialog } from './components/ConnectionDialog'
 import { HostKeyDialog } from './components/HostKeyDialog'
 import { PasswordPrompt } from './components/PasswordPrompt'
@@ -34,6 +35,7 @@ import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
 
 const SETTINGS_TAB_ID = 'settings'
+const INBOX_TAB_ID = 'inbox'
 
 interface DashboardTab {
   kind: 'dashboard'
@@ -75,6 +77,16 @@ interface ControlTab {
 interface SettingsTab {
   kind: 'settings'
   id: typeof SETTINGS_TAB_ID
+}
+
+/**
+ * Every agent on every host, in one list. Global rather than per-connection —
+ * the whole point is the hosts you *don't* have open — so like settings there is
+ * exactly one of it, with a fixed id.
+ */
+interface InboxTab {
+  kind: 'inbox'
+  id: typeof INBOX_TAB_ID
 }
 
 interface SftpTab {
@@ -121,6 +133,7 @@ type Tab =
   | SessionTab
   | ControlTab
   | SettingsTab
+  | InboxTab
   | SftpTab
   | EditorTab
   | TunnelTab
@@ -201,6 +214,8 @@ function serializeTab(t: Tab): PersistedTab {
       }
     case 'settings':
       return { kind: 'settings' }
+    case 'inbox':
+      return { kind: 'inbox' }
     case 'sftp':
       return { kind: 'sftp', connectionId: t.connectionId, title: t.title, initialPath: t.initialPath }
     case 'editor':
@@ -300,14 +315,17 @@ export default function App() {
       ? nameOf(t.connectionId)
       : t.kind === 'settings'
         ? 'Settings'
-        : t.kind === 'session' && appSettings.terminal.liveTitles && t.liveTitle
-          ? t.liveTitle
-          : t.title
+        : t.kind === 'inbox'
+          ? 'Agents'
+          : t.kind === 'session' && appSettings.terminal.liveTitles && t.liveTitle
+            ? t.liveTitle
+            : t.title
 
   const leafIcon = (t: Tab, lit: boolean): ReactNode => {
     const c = lit ? 'text-signal' : 'text-faint'
     if (t.kind === 'dashboard') return <span className={c}>▦</span>
     if (t.kind === 'settings') return <span className={c}>⚙</span>
+    if (t.kind === 'inbox') return <span className={c}>◎</span>
     if (t.kind === 'sftp') return <span className={lit ? 'text-amber' : 'text-faint'}>▸▸</span>
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
@@ -317,8 +335,17 @@ export default function App() {
 
   // Show a leaf: focus the view that already holds it, else open it as a new
   // single-pane view (a normal tab).
+  //
+  // Reads views through the ref rather than the render closure. The singleton
+  // openers — openSettings, openInbox — are useCallback([]), because the menu
+  // bridge registers them once and needs a stable identity, so they capture the
+  // *first* render's showLeaf, whose `views` is still the initial empty array.
+  // Through that closure the lookup below never found the existing view and fell
+  // through to appending a new one, so a second click on Settings opened a second
+  // Settings tab, and a third opened a third. The ref is assigned during render,
+  // so every other caller sees exactly what it saw before.
   const showLeaf = (id: string): void => {
-    const v = views.find((x) => x.panes.includes(id))
+    const v = viewsRef.current.find((x) => x.panes.includes(id))
     if (v) {
       const pi = v.panes.indexOf(id)
       if (pi !== v.focused) setViews((vs) => vs.map((x) => (x.id === v.id ? { ...x, focused: pi } : x)))
@@ -564,6 +591,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const openInbox = useCallback((): void => {
+    setTabs((t) =>
+      t.some((x) => x.id === INBOX_TAB_ID) ? t : [...t, { kind: 'inbox', id: INBOX_TAB_ID }]
+    )
+    showLeaf(INBOX_TAB_ID)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     void (async () => {
       const conns = await window.api.listConnections()
@@ -718,6 +753,12 @@ export default function App() {
       const pt = ws.tabs[i]
       const makeActive = i === ws.active
 
+      if (pt.kind === 'inbox') {
+        if (!has(INBOX_TAB_ID)) built.push({ kind: 'inbox', id: INBOX_TAB_ID })
+        if (makeActive) activeId = INBOX_TAB_ID
+        idForIndex.set(i, INBOX_TAB_ID)
+        continue
+      }
       if (pt.kind === 'settings') {
         if (!has(SETTINGS_TAB_ID)) built.push({ kind: 'settings', id: SETTINGS_TAB_ID })
         if (makeActive) activeId = SETTINGS_TAB_ID
@@ -1103,6 +1144,28 @@ export default function App() {
     void openSession(conn, { session: name, title: `${conn.name} · ${name}` })
   }
 
+  // --- Agent Inbox actions ---------------------------------------------------
+  // The inbox knows a connection only by id — it is a flat list across hosts, not
+  // a pane belonging to one — so both of these look the connection up first and
+  // then hand off to the same helpers the per-host panes use.
+
+  const attachFromInbox = (connectionId: string, session: string): void => {
+    const conn = connections.find((c) => c.id === connectionId)
+    if (conn) attachTmux(conn, session)
+  }
+
+  // Resolves the password itself rather than passing undefined: openReview's
+  // other caller has a file-manager tab's password to hand on, and this one has
+  // none, so without this a host with no saved secret would open a review pane
+  // that fails on auth instead of asking.
+  const reviewFromInbox = async (connectionId: string, dir: string): Promise<void> => {
+    const conn = connections.find((c) => c.id === connectionId)
+    if (!conn) return
+    const password = await resolvePassword(conn)
+    if (password === null) return // cancelled prompt
+    openReview(connectionId, password ?? undefined, dir)
+  }
+
   // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
   const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
     const password = await resolvePassword(conn)
@@ -1250,6 +1313,7 @@ export default function App() {
           onAdd={() => setDialogConn(null)}
           onEdit={(c) => setDialogConn(c)}
           onDelete={deleteConnection}
+          onOpenInbox={openInbox}
           collapsed={appSettings.sidebarCollapsed}
           onToggleCollapse={toggleSidebar}
         />
@@ -1412,6 +1476,19 @@ export default function App() {
               <div className={`overflow-hidden ${paneRing(SETTINGS_TAB_ID)}`} {...paneProps(SETTINGS_TAB_ID)}>
                 <SettingsPage settings={appSettings} onChange={updateSettings} onReset={resetSettings} />
                 {paneTools(SETTINGS_TAB_ID)}
+              </div>
+            )}
+
+            {/* the inbox stays mounted so its scan results survive a tab switch;
+                `active` is what gates the polling, not the mount */}
+            {tabs.some((t) => t.kind === 'inbox') && (
+              <div className={`overflow-hidden ${paneRing(INBOX_TAB_ID)}`} {...paneProps(INBOX_TAB_ID)}>
+                <AgentInbox
+                  active={shownLeaves.includes(INBOX_TAB_ID)}
+                  onAttach={attachFromInbox}
+                  onReview={(cid, dir) => void reviewFromInbox(cid, dir)}
+                />
+                {paneTools(INBOX_TAB_ID)}
               </div>
             )}
 

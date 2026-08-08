@@ -57,6 +57,53 @@ export interface TmuxSession {
 }
 
 /**
+ * One tmux session on one host, as the Agent Inbox understands it.
+ *
+ * Built by shared/agents.ts, which is also where the derivation of `agent` and
+ * of a session's working/waiting/idle status is explained.
+ */
+export interface AgentSession {
+  /** tmux session name, exactly as tmux spells it — this is what attach targets. */
+  session: string
+  /** Working directory of the active window's active pane; '' if tmux gave none. */
+  dir: string
+  /** `pane_current_command` of that pane — 'claude', 'bash', 'vim', … */
+  command: string
+  /** Someone (possibly this app) has a client attached. */
+  attached: boolean
+  /** Seconds since the session last produced output, on the SERVER's clock. */
+  idleSeconds: number | null
+  /**
+   * A window in this session rang the bell and no client has looked since. tmux
+   * clears the flag when a client views the window, so this means "unread"
+   * rather than "rang at some point".
+   */
+  wantsAttention: boolean
+  /** This session looks like a Claude Code agent. */
+  agent: boolean
+}
+
+/** What one host contributed to an agent scan. */
+export interface AgentHostScan {
+  connectionId: string
+  /** Connection name, so the renderer can label rows without a second lookup. */
+  name: string
+  sessions: AgentSession[]
+  /**
+   * Why this host contributed nothing. A host that is simply not running tmux is
+   * not an error — it reports no sessions and no error.
+   */
+  error?: string
+  /**
+   * True when the host was never contacted at all — no password stored, or a
+   * refusal the sweep has latched and won't repeat. The reason travels in
+   * `error`; this only distinguishes "we didn't try" from "we tried and it
+   * failed", which is why the panel counts the two separately.
+   */
+  skipped?: boolean
+}
+
+/**
  * What a tmux-backed tab is attached to, kept structured rather than inferred
  * from the command string. The main process needs it to build an *attach-only*
  * command when a dropped session is reattached automatically — see
@@ -486,7 +533,16 @@ export interface GitFileDiff {
 
 /** A tab serialized to disk. No passwords or live session ids are stored. */
 export interface PersistedTab {
-  kind: 'dashboard' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'review'
+  kind:
+    | 'dashboard'
+    | 'session'
+    | 'settings'
+    | 'sftp'
+    | 'editor'
+    | 'tunnels'
+    | 'tmux'
+    | 'review'
+    | 'inbox'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)

@@ -14,8 +14,10 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import type {
+  AgentHostScan,
   ClaudeHookStatus,
   ClaudeRuntime,
+  Connection,
   ConnectionDraft,
   GitBlob,
   GitFileDiff,
@@ -34,9 +36,10 @@ import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
 import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
-import { SshManager } from './ssh/manager'
+import { SshManager, isPermanentScanFailure } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
 import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
+import { agentScanScript, parseAgentScan } from '../shared/agents'
 import { SEP, shQuote, shWrap } from '../shared/shell'
 import {
   DATA_MARK,
@@ -307,6 +310,27 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return explicit ?? (connection.authMethod === 'password' ? secrets.get(connection.id) ?? undefined : undefined)
   }
 
+  /**
+   * Hosts whose last Agent Inbox scan failed in a way that repeating cannot fix —
+   * a rejected credential, a name that doesn't resolve, a refused host key.
+   *
+   * This exists because the inbox's sweep is the app's only *repeating* dialer.
+   * Everything else connects when the user asks; the inbox re-asks every ten
+   * seconds for as long as the panel is open, and with no memory of a refusal it
+   * would open a fresh TCP connection and fail authentication six times a minute,
+   * indefinitely, against a server that has already said no. That is precisely
+   * the traffic fail2ban exists to ban — and the ban would take the user's
+   * terminals, tunnels and file manager down with it, from a panel they left open
+   * in the background.
+   *
+   * Latched rather than backed off, because none of these heal on their own: they
+   * heal when the user changes something. So it clears on the events that mean
+   * they did — editing the connection or its password, removing it, or pressing
+   * Refresh, which is the user saying "try again" in as many words. A host in
+   * here still gets its row in the panel; it just doesn't get dialed.
+   */
+  const scanBlocked = new Map<string, string>()
+
   // ---- connections ----
   ipcMain.handle('conn:list', () => connectionStore.list())
   ipcMain.handle('conn:upsert', (_e, draft: ConnectionDraft) => {
@@ -314,6 +338,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (draft.authMethod === 'password' && draft.password) {
       secrets.set(conn.id, draft.password)
     }
+    // Whatever the inbox's sweep gave up on for this host, the user has just
+    // edited the thing it would have given up over.
+    scanBlocked.delete(conn.id)
     return conn
   })
   ipcMain.handle('conn:remove', (_e, id: string) => {
@@ -321,6 +348,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     tunnelsStore.remove(id)
     connectionStore.remove(id)
     secrets.clear(id)
+    scanBlocked.delete(id)
   })
   ipcMain.on('conn:set-last-sftp-path', (_e, id: string, path: string) =>
     connectionStore.setLastSftpPath(id, path)
@@ -445,6 +473,77 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to rename session')
     }
   )
+  /**
+   * Agent Inbox: ask every configured host what tmux sessions it is running.
+   *
+   * Fans out rather than iterating — the hosts are independent, and a serial
+   * sweep would make the panel's latency the *sum* of every host's, including
+   * hosts that are down. One host's failure is that host's row, never the
+   * scan's: this settles all of them and reports per host. The fan-out is capped
+   * because it is unbounded in the user's host count and the work is DNS: every
+   * dial goes to `getaddrinfo` on libuv's four-thread pool, so a handful of
+   * unresolvable VPN-only names would otherwise stall unrelated main-process work
+   * — including the `fs` writes that persist settings — on every single poll.
+   *
+   * Three deliberate refusals, all about not doing damage on the user's behalf:
+   *
+   * - A password connection with no stored secret is **skipped, not attempted**.
+   *   There is nothing to authenticate with, so the connect could only fail —
+   *   and a sweep that fires a doomed auth at every such host on every refresh is
+   *   how an app gets its user banned by fail2ban. Prompting instead is worse: it
+   *   would raise a password dialog for hosts the user never asked to open.
+   * - A host that has already refused us is not dialed again until the user
+   *   changes something (see `scanBlocked`).
+   * - `unattended` refuses an unknown host key rather than prompting, so one
+   *   refresh cannot raise a stack of verification dialogs.
+   */
+  const SCAN_FANOUT = 6
+
+  ipcMain.handle(
+    'agents:scan',
+    async (_e, args?: { retryFailed?: boolean }): Promise<AgentHostScan[]> => {
+      if (args?.retryFailed) scanBlocked.clear()
+      const command = shWrap(agentScanScript())
+      const connections = connectionStore.list()
+      const out: AgentHostScan[] = new Array(connections.length)
+      let next = 0
+
+      const scanOne = async (connection: Connection): Promise<AgentHostScan> => {
+        const base = { connectionId: connection.id, name: connection.name, sessions: [] }
+        const password = passwordFor(connection.id)
+        if (connection.authMethod === 'password' && !password) {
+          return { ...base, skipped: true, error: 'No saved password' }
+        }
+        const blocked = scanBlocked.get(connection.id)
+        if (blocked) return { ...base, skipped: true, error: blocked }
+        try {
+          const res = await ssh.exec(connection.id, connection, {
+            command,
+            password,
+            timeoutMs: 12000,
+            deadlineMs: 10000,
+            unattended: true
+          })
+          return { ...base, sessions: parseAgentScan(res.stdout).sessions }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)
+          return { ...base, error: message }
+        }
+      }
+
+      const worker = async (): Promise<void> => {
+        for (let i = next++; i < connections.length; i = next++) {
+          out[i] = await scanOne(connections[i])
+        }
+      }
+      await Promise.all(
+        Array.from({ length: Math.min(SCAN_FANOUT, connections.length) }, worker)
+      )
+      return out
+    }
+  )
+
   ipcMain.handle(
     'ssh:probe',
     async (_e, args: { connectionId: string; password?: string }): Promise<ServerStats> => {

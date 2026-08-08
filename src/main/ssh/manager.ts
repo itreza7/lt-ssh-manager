@@ -94,6 +94,17 @@ interface ExecOpts {
    * short `key=value` reply; a caller reading file content sets its own.
    */
   maxBytes?: number
+  /**
+   * Nobody is at the keyboard for this call: refuse an unknown or changed host
+   * key rather than raising the verification dialog.
+   *
+   * For sweeps that touch hosts the user did not individually ask for. The agent
+   * scan hits *every* configured connection on one click, so without this a
+   * single refresh could raise a stack of host-key dialogs — one per unverified
+   * host, all at once, for hosts the user may never have opened. Same reasoning
+   * as the reattach ladder, which set the precedent.
+   */
+  unattended?: boolean
 }
 
 interface Session {
@@ -192,6 +203,16 @@ interface RunningTunnel {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * Errors that will never succeed on retry.
+ *
+ * Exported for the Agent Inbox's sweep, which is the one dialer in the app that
+ * repeats on a timer and so is the one that must not keep asking after a no.
+ */
+export function isPermanentScanFailure(err: unknown): boolean {
+  return isPermanent(err)
+}
+
 /** Errors that will never succeed on retry. */
 function isPermanent(err: any): boolean {
   if (err?.level === 'client-authentication') return true
@@ -222,7 +243,9 @@ export class SshManager extends EventEmitter {
     string,
     { client: Client; sftp?: SFTPWrapper; refs: number; closeTimer?: ReturnType<typeof setTimeout> }
   >()
-  private sftpConnecting = new Map<string, Promise<void>>()
+  // The dial in flight for a key, plus whether it was opened with nobody at the
+  // keyboard — an attended caller must not join one of those (see `acquire`).
+  private sftpConnecting = new Map<string, { p: Promise<void>; unattended: boolean }>()
   private sftpAttaching = new Map<string, Promise<SFTPWrapper>>()
   private pendingHostKeys = new Map<string, PendingHostKey>()
   // Active tunnels, keyed by their definition id (a def runs at most once).
@@ -614,7 +637,7 @@ export class SshManager extends EventEmitter {
   ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
     // A plain ref, not openSftp: a command needs the connection, not the
     // subsystem, and a host with sftp disabled should still answer a probe.
-    await this.acquire(key, connection, opts.password, opts.passphrase, opts.timeoutMs)
+    await this.acquire(key, connection, opts.password, opts.passphrase, opts.timeoutMs, opts.unattended)
     try {
       return await this.execOnPooled(key, opts.command, {
         deadlineMs: opts.deadlineMs,
@@ -664,37 +687,61 @@ export class SshManager extends EventEmitter {
     connection: Connection,
     password: string | undefined,
     passphrase: string | undefined,
-    timeoutMs?: number
+    timeoutMs?: number,
+    // Only consulted when this call is the one that dials, with one exception
+    // below. An unattended sweep joining the user's own attended connect is fine
+    // — it should not refuse a key the user is being asked about. The reverse is
+    // not: see the in-flight branch.
+    unattended?: boolean
   ): Promise<void> {
-    const existing = this.sftpPool.get(key)
-    if (existing) {
-      existing.refs++
-      if (existing.closeTimer) {
-        clearTimeout(existing.closeTimer)
-        existing.closeTimer = undefined
+    // Two passes at most. The second exists only for the case where this call
+    // declined to join an unattended dial and had to wait it out first.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const existing = this.sftpPool.get(key)
+      if (existing) {
+        existing.refs++
+        if (existing.closeTimer) {
+          clearTimeout(existing.closeTimer)
+          existing.closeTimer = undefined
+        }
+        return
       }
-      return
-    }
-    // Coalesce concurrent opens (e.g. file manager + an editor tab at once, or a
-    // server card whose probe and tmux list fire together on a cold connection).
-    const inflight = this.sftpConnecting.get(key)
-    if (inflight) {
-      await inflight
+      // Coalesce concurrent opens (e.g. file manager + an editor tab at once, or
+      // a server card whose probe and tmux list fire together on a cold
+      // connection).
+      const inflight = this.sftpConnecting.get(key)
+      if (inflight) {
+        // ...but never inherit an unattended dial when someone *is* at the
+        // keyboard. That dial refuses an unknown or changed host key outright, so
+        // joining it would turn a fingerprint prompt into an opaque "Host denied
+        // (verification failed)" — and only for whoever happened to click during
+        // the sweep's dial window, which reads as a flaky server rather than as
+        // policy. Wait for it instead: if it succeeded the key was already known
+        // and there was nothing to prompt about, so the next pass just takes the
+        // pooled connection.
+        if (inflight.unattended && !unattended) {
+          await inflight.p.catch(() => undefined)
+          continue
+        }
+        await inflight.p
+        const s = this.sftpPool.get(key)
+        if (!s) throw new Error('Connection failed to open')
+        s.refs++
+        return
+      }
+      const p = this.connectPooled(key, connection, password, passphrase, timeoutMs, unattended)
+      this.sftpConnecting.set(key, { p, unattended: !!unattended })
+      try {
+        await p
+      } finally {
+        this.sftpConnecting.delete(key)
+      }
       const s = this.sftpPool.get(key)
       if (!s) throw new Error('Connection failed to open')
       s.refs++
       return
     }
-    const p = this.connectPooled(key, connection, password, passphrase, timeoutMs)
-    this.sftpConnecting.set(key, p)
-    try {
-      await p
-    } finally {
-      this.sftpConnecting.delete(key)
-    }
-    const s = this.sftpPool.get(key)
-    if (!s) throw new Error('Connection failed to open')
-    s.refs++
+    throw new Error('Connection failed to open')
   }
 
   private connectPooled(
@@ -702,7 +749,8 @@ export class SshManager extends EventEmitter {
     connection: Connection,
     password: string | undefined,
     passphrase: string | undefined,
-    timeoutMs?: number
+    timeoutMs?: number,
+    unattended?: boolean
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const client = new Client()
@@ -728,7 +776,7 @@ export class SshManager extends EventEmitter {
         if (!settled) fail(new Error('Connection closed'))
       })
       try {
-        client.connect(this.baseConfig(connection, password, passphrase, timeoutMs))
+        client.connect(this.baseConfig(connection, password, passphrase, timeoutMs, { unattended }))
       } catch (e) {
         fail(e)
       }
