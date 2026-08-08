@@ -1,8 +1,9 @@
-# LT SSH Manager
+# Claude SSH Manager
 
-A cross-platform desktop SSH manager with embedded, full-color terminals.
-Built with Electron + React + xterm.js, with all SSH/secret handling isolated
-in the main process.
+A cross-platform desktop SSH manager built around running and resuming
+Claude Code sessions, with embedded, full-color terminals. Built with
+Electron + React + xterm.js, with all SSH/secret handling isolated in the
+main process.
 
 ## Screenshots
 
