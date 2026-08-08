@@ -3,18 +3,23 @@ import type { AgentHostScan, AgentSession, ResumeHostScan, ResumeSession } from 
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import { claudeResumeSessionName } from '../lib/claude'
-import { RESUME_LIMIT, resumeTitle } from '../lib/resume'
+import { RESUME_LIMIT, resumeTitle, savedSessionStatus } from '../lib/resume'
+import type { SavedSessionStatus } from '../lib/resume'
 
 interface Props {
   active: boolean
+  /** The live-agent sweep, owned by useAgentSessions and lifted to App.tsx so it
+   *  can keep polling in the background regardless of which tab is visible. */
+  hosts: AgentHostScan[] | null
+  error: string | null
+  scanning: boolean
+  /** Re-scan now, clearing any hosts latched as refused — the Refresh button. */
+  rescan: () => void
   /** Attach a terminal tab to this tmux session on this host. */
   onAttach: (connectionId: string, session: string) => void
   /** Open a new agent tab resuming this saved transcript. `label` titles the tab. */
   onResume: (connectionId: string, session: ResumeSession, label: string) => void
 }
-
-/** How often a visible inbox re-scans. */
-const POLL_MS = 10000
 
 /** One session, flattened with the host it was found on, ready to render. */
 interface Row {
@@ -104,6 +109,13 @@ interface SavedRow {
    * already resumed starts a second `claude --resume` appending to the same file.
    */
   running: string | null
+  /**
+   * The one authoritative answer driving the row's badge and button — see
+   * savedSessionStatus() in shared/resume.ts. `dirLossy`/`dirExists` on `s` are
+   * still read directly where the row needs to pick between GONE and
+   * UNREADABLE, both of which collapse into `unavailable` here.
+   */
+  status: SavedSessionStatus
 }
 
 /**
@@ -127,10 +139,7 @@ function mergeSaved(prev: ResumeHostScan[], next: ResumeHostScan[]): ResumeHostS
   })
 }
 
-export function AgentInbox({ active, onAttach, onResume }: Props) {
-  const [hosts, setHosts] = useState<AgentHostScan[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [scanning, setScanning] = useState(false)
+export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, onResume }: Props) {
   const [saved, setSaved] = useState<ResumeHostScan[] | null>(null)
   const [savedOpen, setSavedOpen] = useState(false)
   const [savedError, setSavedError] = useState<string | null>(null)
@@ -138,39 +147,6 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
   const [savedOffset, setSavedOffset] = useState(0)
   const savedBusy = useRef(false)
   const savedOnce = useRef(false)
-
-  // One scan in flight at a time. The poll interval is shorter than a sweep
-  // across a slow host takes, so without this a stalled host would pile up
-  // overlapping scans — each holding a pooled connection open — until it healed.
-  const busy = useRef(false)
-
-  const scan = useCallback(async (retryFailed = false): Promise<void> => {
-    if (busy.current) return
-    busy.current = true
-    setScanning(true)
-    try {
-      setHosts(await window.api.agentsScan(retryFailed))
-      setError(null)
-    } catch (e) {
-      // Only the sweep itself failing lands here; a single unreachable host is
-      // reported inside the result and never throws.
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      busy.current = false
-      setScanning(false)
-    }
-  }, [])
-
-  // Polls only while the pane is on screen. A background poll would be the thing
-  // that lets an unopened host notify you — worth having, and deliberately not in
-  // this first version: it needs a story for how often, and for hosts that are
-  // down, that a visible panel does not.
-  useEffect(() => {
-    if (!active) return
-    void scan()
-    const t = setInterval(() => void scan(), POLL_MS)
-    return () => clearInterval(t)
-  }, [active, scan])
 
   const scanSaved = useCallback(
     async (opts?: { retryFailed?: boolean; more?: boolean }): Promise<void> => {
@@ -293,18 +269,20 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
       for (const s of h.sessions) {
         const name = claudeResumeSessionName(s.id, s.dir)
         const running = liveNames.has(`${h.connectionId} ${name}`) ? name : null
+        // The session resuming this very transcript is in the same directory by
+        // definition, so naming it here as a neighbour would be a warning about
+        // itself.
+        const live = ((s.dir ? liveDirs.get(`${h.connectionId} ${s.dir}`) : undefined) ?? []).filter(
+          (n) => n !== running
+        )
         out.push({
           connectionId: h.connectionId,
           host: h.name,
           s,
           label: resumeTitle(s),
-          // The session resuming this very transcript is in the same directory by
-          // definition, so naming it here as a neighbour would be a warning about
-          // itself.
-          live: ((s.dir ? liveDirs.get(`${h.connectionId} ${s.dir}`) : undefined) ?? []).filter(
-            (n) => n !== running
-          ),
-          running
+          live,
+          running,
+          status: savedSessionStatus(s, running !== null, live.length > 0)
         })
       }
     }
@@ -350,7 +328,7 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
             // Explicitly asking is what clears the main process's memory of hosts
             // that refused us; the ten-second poll must not, or it would be
             // hammering them again by another name.
-            onClick={() => void scan(true)}
+            onClick={() => rescan()}
             disabled={scanning}
             className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
           >
@@ -505,7 +483,7 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
                       <span className="shrink-0 font-mono text-[10px] text-faint">
                         {size(r.s.sizeBytes)}
                       </span>
-                      {r.running !== null && (
+                      {r.status === 'running' && (
                         <span
                           className="shrink-0 rounded border border-signal/40 px-1 py-px font-mono text-[9px] tracking-wider text-signal"
                           title={`This transcript is open right now in ${r.running}. Attach goes to that pane; resuming it again would start a second agent appending to the same file.`}
@@ -513,7 +491,10 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
                           RUNNING
                         </span>
                       )}
-                      {r.s.dirExists === false && (
+                      {/* `unavailable` collapses GONE and UNREADABLE into one status
+                          value; dirLossy/dirExists still pick the exact badge text,
+                          since the reader needs to know which one it is. */}
+                      {r.status === 'unavailable' && r.s.dirExists === false && (
                         <span
                           className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
                           title={`${r.s.dir} is no longer a directory on this host, and --resume can only find a session from the directory it ran in.`}
@@ -521,7 +502,7 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
                           GONE
                         </span>
                       )}
-                      {r.s.dirLossy && (
+                      {r.status === 'unavailable' && r.s.dirLossy && (
                         <span
                           className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
                           title="This path holds bytes that are not valid text, so what is shown is not the path on disk. Resuming would open a tab only to fail in it."
@@ -529,7 +510,7 @@ export function AgentInbox({ active, onAttach, onResume }: Props) {
                           UNREADABLE
                         </span>
                       )}
-                      {r.live.length > 0 && (
+                      {r.status === 'in-use' && (
                         <span
                           className="shrink-0 rounded border border-amber/40 px-1 py-px font-mono text-[9px] tracking-wider text-amber"
                           title={`${r.live.join(', ')} ${r.live.length === 1 ? 'is' : 'are'} live in this same directory. Resuming starts a separate agent here — check they will not be editing the same files.`}

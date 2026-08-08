@@ -134,10 +134,18 @@ function isAgent(session: string, command: string): boolean {
  * an error. A field this parser cannot read shows up in the UI as "unknown",
  * which is the honest answer.
  */
-export function parseAgentScan(text: string): { now: number | null; sessions: AgentSession[] } {
+export function parseAgentScan(
+  text: string
+): { now: number | null; sessions: Omit<AgentSession, 'connectionId'>[] } {
   let now: number | null = null
-  /** Keyed by session name — one entry per session, folded over its windows. */
-  const byName = new Map<string, AgentSession>()
+  /**
+   * Keyed by session name — one entry per session, folded over its windows.
+   *
+   * `connectionId` is deliberately absent here: this parser is host-agnostic
+   * and has no idea which connection produced `text`. The IPC handler that
+   * calls it stamps that field on afterward — see types.ts on AgentSession.
+   */
+  const byName = new Map<string, Omit<AgentSession, 'connectionId'>>()
   /** Sessions whose genuinely active window has already been read (see below). */
   const latched = new Set<string>()
 
@@ -164,13 +172,14 @@ export function parseAgentScan(text: string): { now: number | null; sessions: Ag
     const at = parseInt(activity, 10)
     const existing = byName.get(session)
     const isActiveWindow = active === '1'
-    const entry: AgentSession = existing ?? {
+    const entry: Omit<AgentSession, 'connectionId'> = existing ?? {
       session,
       dir: '',
       command: '',
       // A client COUNT, not a flag — two attached clients report '2'.
       attached: (parseInt(attached, 10) || 0) > 0,
       idleSeconds: null,
+      lastActiveAt: null,
       wantsAttention: false,
       agent: false
     }
@@ -200,11 +209,14 @@ export function parseAgentScan(text: string): { now: number | null; sessions: Ag
   }
 
   // idleSeconds currently holds the raw activity timestamp; turn it into an age
-  // only once, and only if the host told us its clock.
+  // only once, and only if the host told us its clock. lastActiveAt keeps that
+  // same raw timestamp as an absolute point in time — no second remote call,
+  // just the one CLOCK value read above given to both fields.
   const sessions = [...byName.values()].map((s) => ({
     ...s,
     idleSeconds:
-      s.idleSeconds !== null && now !== null ? Math.max(0, now - s.idleSeconds) : null
+      s.idleSeconds !== null && now !== null ? Math.max(0, now - s.idleSeconds) : null,
+    lastActiveAt: s.idleSeconds !== null && now !== null ? s.idleSeconds : null
   }))
   return { now, sessions }
 }

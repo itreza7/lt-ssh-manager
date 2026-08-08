@@ -67,7 +67,13 @@ export const RESUME_LIMIT = 60
 
 /** What one host's scan output parsed into, before it is labelled with the host. */
 export interface ResumeScan {
-  sessions: ResumeSession[]
+  /**
+   * `connectionId` is deliberately absent from each session here: this parser
+   * is host-agnostic and has no idea which connection produced the scan text.
+   * The IPC handler that calls it stamps that field on afterward — see
+   * types.ts on ResumeSession.
+   */
+  sessions: Omit<ResumeSession, 'connectionId'>[]
   /** Transcripts found, which may exceed `sessions.length` — see RESUME_LIMIT. */
   total: number
   /** The script's end marker arrived. See ResumeHostScan.complete. */
@@ -286,7 +292,7 @@ export function parseResumeScan(text: string): ResumeScan {
   let empty = false
   let complete = false
   let listFailed = false
-  const rows: { s: ResumeSession; mtime: number | null }[] = []
+  const rows: { s: Omit<ResumeSession, 'connectionId'>; mtime: number | null }[] = []
 
   for (const line of text.split('\n')) {
     const parts = line.trim().split(FIELD_SEP)
@@ -348,14 +354,19 @@ export function parseResumeScan(text: string): ResumeScan {
         aiTitle: decode(parts[7]),
         lastPrompt: decode(parts[8]),
         dir,
-        ageSeconds: null
+        ageSeconds: null,
+        lastWrittenAt: null
       }
     })
   }
 
   const sessions = rows.map(({ s, mtime }) => ({
     ...s,
-    ageSeconds: mtime !== null && now !== null ? Math.max(0, now - mtime) : null
+    ageSeconds: mtime !== null && now !== null ? Math.max(0, now - mtime) : null,
+    // The raw mtime already read above, given a clearer absolute-timestamp
+    // name: the same fact ageSeconds measures, as a point in time rather than
+    // a duration.
+    lastWrittenAt: mtime !== null && now !== null ? mtime : null
   }))
   // `ls -t` already ordered these; the count can only be short if the listing was
   // truncated, never long, so trust whichever is larger. With paging `sessions` is
@@ -369,6 +380,35 @@ export function parseResumeScan(text: string): ResumeScan {
     ...(empty ? { empty } : {}),
     ...(listFailed ? { listFailed } : {})
   }
+}
+
+/**
+ * What a saved-session row is, for the panel to pick one badge and one button
+ * from — the resume equivalent of agentStatus() in shared/agents.ts.
+ */
+export type SavedSessionStatus = 'running' | 'unavailable' | 'in-use' | 'available'
+
+/**
+ * `running` outranks everything: a transcript already open elsewhere means the
+ * row attaches rather than resumes, whatever else is true about it. Next is
+ * `unavailable` — a directory that is confirmed gone or came back unreadable
+ * cannot be resumed into no matter what else is sharing it. `in-use` is the
+ * weakest of the three: purely informational, on a directory that is otherwise
+ * fine to resume into. Everything else is `available`.
+ *
+ * `running` and `inUse` are the two facts AgentInbox already has to compute by
+ * comparing this session against the live tmux list — see liveNames/liveDirs
+ * there — so they arrive here as booleans rather than being recomputed.
+ */
+export function savedSessionStatus(
+  s: ResumeSession,
+  running: boolean,
+  inUse: boolean
+): SavedSessionStatus {
+  if (running) return 'running'
+  if (s.dirExists === false || s.dirLossy) return 'unavailable'
+  if (inUse) return 'in-use'
+  return 'available'
 }
 
 /**
