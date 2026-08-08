@@ -30,6 +30,13 @@
   color-scheme: dark;
 }
 
+/* A native Mac app reads in San Francisco, not a downloaded webfont — override
+   the theme token rather than branch every call site, since font-sans already
+   resolves through this one CSS variable everywhere it's used. */
+html.mac {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+}
+
 /* Every interactive element gets a pointer on hover. */
 button:not(:disabled),
 a,
@@ -79,6 +86,19 @@ body::before {
   background: radial-gradient(1100px 460px at 50% -12%, rgba(70, 217, 138, 0.045), transparent 62%);
 }
 
+/* On macOS the window carries a native vibrancy (blur-behind) layer — see
+   vibrancy:'sidebar' in main/index.ts — so body has to go fully transparent for
+   it to show through the sidebar's and title bar's translucent bg-surface/80.
+   `.app-canvas` (below) repaints the same ink/dot-grid backdrop on the main
+   content column, so terminals, the editor and the empty state stay exactly as
+   opaque as they are today; only the chrome around them picks up the blur. */
+html.mac body {
+  background: none;
+}
+html.mac body::before {
+  content: none;
+}
+
 #root {
   position: relative;
   z-index: 1;
@@ -101,6 +121,16 @@ body::before {
       linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 40%),
       var(--color-panel);
     border-radius: 0.85rem;
+  }
+
+  /* Same ink/dot-grid as body — kept in sync deliberately, not derived, since
+     the two only diverge on macOS (see the html.mac body rule above). Applied
+     to the main content column so it stays opaque even when body goes
+     transparent for sidebar vibrancy. */
+  .app-canvas {
+    background-color: var(--color-ink);
+    background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.018) 1px, transparent 0);
+    background-size: 24px 24px;
   }
 
   /* a soft phosphor halo for "alive" indicators */

@@ -80,7 +80,9 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
         </div>
       )}
 
-      {/* menus */}
+      {/* menus — macOS gets a real menu bar (menu.ts) instead; rendering both
+          would give every command two homes and no reason to prefer either */}
+      {!isMac && (
       <div className="no-drag flex items-center">
         {Object.keys(menus).map((name) => (
           <div key={name} className="relative">
@@ -114,6 +116,7 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
           </div>
         ))}
       </div>
+      )}
 
       {/* draggable title */}
       <div className="drag flex flex-1 items-center justify-center">

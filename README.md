@@ -69,6 +69,11 @@ in the main process.
   loud warning if a known host's key changes (MITM protection).
 - **Resilient connect** — retries transient failures with jittered backoff, but
   fails fast on permanent errors (bad auth, missing key, rejected host key).
+- **Native macOS chrome** — hidden title bar with real traffic lights, a proper
+  application menu (⌘N new connection, ⌘W closes a tab, ⇧⌘W the window, ⇧⌘[ / ⇧⌘]
+  switch tabs), a frosted sidebar and title bar (native vibrancy), the system font,
+  and the window reopens at whatever size and position you last left it instead of
+  always maximizing.
 
 ## Architecture
 
