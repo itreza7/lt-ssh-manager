@@ -8,8 +8,10 @@ import { resolveFontStack, type TerminalSettings } from './terminalSettings'
 import { createSearch, type TerminalSearch } from './xtermSearch'
 import { isMac } from './platform'
 
-/** xterm cell line-height multiple; mirrored by the cell-metrics measurement. */
-export const LINE_HEIGHT = 1.2
+/** xterm cell line-height multiple; mirrored by the cell-metrics measurement.
+ * 1.1 rather than 1.2 — closer to how a real terminal emulator (iTerm2, Terminal.app)
+ * renders text, instead of the airier spacing a UI font expects. */
+export const LINE_HEIGHT = 1.1
 
 /** The terminal's own background — also used by the pane wrapper's padding so
  * the frame around xterm reads as one continuous surface, not a seam. */
@@ -17,7 +19,7 @@ export const TERMINAL_BG = '#0c0b0a'
 
 const THEME = {
   background: TERMINAL_BG,
-  foreground: '#f2f0e8',
+  foreground: '#cccac4',
   cursor: '#46d98a',
   cursorAccent: TERMINAL_BG,
   selectionBackground: 'rgba(154, 145, 125, 0.35)',

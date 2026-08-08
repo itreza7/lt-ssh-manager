@@ -13,8 +13,11 @@
   --color-line: #171715;
   --color-line-soft: #12110e;
 
-  /* body text sits ~13:1 on ink; muted/faint lifted for readable secondary text */
-  --color-fg: #f2f0e8;
+  /* dimmed off pure-white on purpose: full-bright text on a near-black bg is a
+     glare/halation trigger (was ~17:1 contrast at full brightness; this sits at
+     ~12:1, in line with VS Code dark+'s ~11:1). muted/faint lifted for readable
+     secondary text */
+  --color-fg: #cccac4;
   --color-muted: #b8b4a8;
   --color-faint: #8a8578;
 
@@ -22,7 +25,7 @@
   --color-signal-soft: #21392c;
   --color-amber: #f3b75a;
   --color-danger: #ff7b7b;
-  --color-accent: #cc785c;
+  --color-accent: #d97757;
   --color-accent-soft: color-mix(in srgb, var(--color-accent) 22%, var(--color-ink));
 
   --font-sans: 'Hanken Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
