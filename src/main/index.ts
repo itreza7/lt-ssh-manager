@@ -1,6 +1,7 @@
-import { app, BrowserWindow, shell, nativeTheme, Menu } from 'electron'
+import { app, BrowserWindow, shell, nativeTheme } from 'electron'
 import { join } from 'node:path'
 import { registerIpc, toggleFullScreen } from './ipc'
+import { installAppMenu } from './menu'
 import appIcon from '../../resources/icon.png?asset'
 
 let mainWindow: BrowserWindow | null = null
@@ -100,8 +101,10 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark'
-  Menu.setApplicationMenu(null) // we render our own themed menu in the title bar
   registerIpc(() => mainWindow)
+  // macOS gets a real application menu (the standard commands have nothing else
+  // driving them there); every other platform keeps none. See menu.ts.
+  installAppMenu(() => mainWindow)
   createWindow()
 
   app.on('activate', () => {
