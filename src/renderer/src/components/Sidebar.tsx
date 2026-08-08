@@ -7,6 +7,8 @@ interface Props {
   onAdd: () => void
   onEdit: (conn: Connection) => void
   onDelete: (conn: Connection) => void
+  /** Open the cross-host Agent Inbox. */
+  onOpenInbox: () => void
   collapsed: boolean
   onToggleCollapse: () => void
 }
@@ -33,6 +35,7 @@ export function Sidebar({
   onAdd,
   onEdit,
   onDelete,
+  onOpenInbox,
   collapsed,
   onToggleCollapse
 }: Props) {
@@ -45,6 +48,14 @@ export function Sidebar({
           className="grid h-8 w-8 place-items-center rounded-md bg-signal/15 ring-1 ring-signal/30 transition-colors hover:bg-signal/25"
         >
           <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
+        </button>
+
+        <button
+          onClick={onOpenInbox}
+          title="Agent Inbox — every agent on every host"
+          className="grid h-8 w-8 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+        >
+          ◎
         </button>
 
         <button
@@ -96,6 +107,19 @@ export function Sidebar({
           </div>
           <div className="eyebrow !text-[9px]">control deck</div>
         </div>
+      </div>
+
+      {/* Above the connections list, not inside it: the inbox spans every host,
+          so it does not belong to any one of them. */}
+      <div className="shrink-0 px-2 pb-1">
+        <button
+          onClick={onOpenInbox}
+          className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-elevated/50"
+        >
+          <span className="text-faint transition-colors group-hover:text-signal">◎</span>
+          <span className="text-sm font-medium text-fg/90">Agent Inbox</span>
+          <span className="ml-auto text-[10px] text-faint">all hosts</span>
+        </button>
       </div>
 
       {/* section header */}

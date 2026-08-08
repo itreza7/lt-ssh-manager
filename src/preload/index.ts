@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type {
+  AgentHostScan,
   AppSettings,
   ClaudeHookStatus,
   ClaudeRuntime,
@@ -90,6 +91,14 @@ const api = {
     from: string
     to: string
   }): Promise<void> => ipcRenderer.invoke('ssh:tmux-rename', args),
+
+  // Agent Inbox — every configured host in one sweep. Takes no password: hosts
+  // it cannot reach without prompting are reported as skipped, never prompted
+  // for. See the 'agents:scan' handler.
+  // `retryFailed` is the Refresh button: it clears the sweep's memory of hosts
+  // that refused it, which a timed poll deliberately does not.
+  agentsScan: (retryFailed?: boolean): Promise<AgentHostScan[]> =>
+    ipcRenderer.invoke('agents:scan', { retryFailed }),
 
   // host vitals probe
   probeServer: (args: { connectionId: string; password?: string }): Promise<ServerStats> =>
