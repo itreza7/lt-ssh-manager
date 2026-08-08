@@ -36,6 +36,7 @@ import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeResumeSessionName, claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
+import { TERMINAL_BG } from './lib/xtermSetup'
 import { useAgentSessions } from './hooks/useAgentSessions'
 import { useSavedSessions } from './hooks/useSavedSessions'
 
@@ -1672,29 +1673,36 @@ export default function App() {
               </div>
             )}
 
-            {/* terminals stay mounted so sessions persist; only shown ones are visible */}
-            {sessionTabs.map((tab) => (
-              <div
-                key={tab.id}
-                className={`overflow-hidden border-t border-line bg-ink p-3 ${paneRing(tab.id)}`}
-                {...paneProps(tab.id)}
-              >
-                <TerminalView
-                  sessionId={tab.id}
-                  connectionId={tab.connectionId}
-                  active={activeTabId === tab.id}
-                  password={tab.password}
-                  command={tab.command}
-                  tmux={tab.tmux}
-                  retries={appSettings.connectRetries}
-                  settings={appSettings.terminal}
-                  onStatus={onStatus}
-                  onTitle={onTitle}
-                  onAgentSignal={onAgentSignal}
-                />
-                {paneTools(tab.id)}
-              </div>
-            ))}
+            {/* terminals stay mounted so sessions persist; only shown ones are visible.
+                Padding is colored to match xterm's own background (not the app's
+                `bg-ink`), so the frame around the terminal reads as one continuous
+                surface instead of a mismatched border. */}
+            {sessionTabs.map((tab) => {
+              const pp = paneProps(tab.id)
+              return (
+                <div
+                  key={tab.id}
+                  className={`overflow-hidden border-t border-line p-3 ${paneRing(tab.id)}`}
+                  {...pp}
+                  style={{ ...pp.style, backgroundColor: TERMINAL_BG }}
+                >
+                  <TerminalView
+                    sessionId={tab.id}
+                    connectionId={tab.connectionId}
+                    active={activeTabId === tab.id}
+                    password={tab.password}
+                    command={tab.command}
+                    tmux={tab.tmux}
+                    retries={appSettings.connectRetries}
+                    settings={appSettings.terminal}
+                    onStatus={onStatus}
+                    onTitle={onTitle}
+                    onAgentSignal={onAgentSignal}
+                  />
+                  {paneTools(tab.id)}
+                </div>
+              )
+            })}
 
             {/* tmux control-mode sessions stay mounted so pane content persists */}
             {controlTabs.map((tab) => (

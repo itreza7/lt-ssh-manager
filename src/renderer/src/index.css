@@ -6,12 +6,12 @@
    danger stay reserved for agent working/waiting status, not brand color. */
 @theme {
   /* slightly lifted off pure-black to avoid halation with light text */
-  --color-ink: #262624;
-  --color-surface: #2d2c29;
-  --color-panel: #33322e;
-  --color-elevated: #3d3b36;
-  --color-line: #4a4842;
-  --color-line-soft: #38362f;
+  --color-ink: #0c0c0b;
+  --color-surface: #0e0e0c;
+  --color-panel: #10100e;
+  --color-elevated: #141211;
+  --color-line: #171715;
+  --color-line-soft: #12110e;
 
   /* body text sits ~13:1 on ink; muted/faint lifted for readable secondary text */
   --color-fg: #f2f0e8;
@@ -22,7 +22,7 @@
   --color-signal-soft: #21392c;
   --color-amber: #f3b75a;
   --color-danger: #ff7b7b;
-  --color-accent: #d97757;
+  --color-accent: #cc785c;
   --color-accent-soft: color-mix(in srgb, var(--color-accent) 22%, var(--color-ink));
 
   --font-sans: 'Hanken Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
