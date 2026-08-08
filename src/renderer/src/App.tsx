@@ -620,7 +620,12 @@ export default function App() {
       void window.api.secretsAvailable().then(setSecretsAvailable)
       try {
         const ws = await window.api.getWorkspace()
-        await restoreWorkspace(ws, conns)
+        const restored = await restoreWorkspace(ws, conns)
+        // Nothing came back — first launch, or last session ended with every tab
+        // closed. Land on Home instead of the empty placeholder. This only ever
+        // runs here, once at startup, so closing every tab later in the session
+        // is respected rather than fought.
+        if (!restored) openInbox()
       } finally {
         restoredRef.current = true // from here on, tab changes are persisted
       }
@@ -782,7 +787,9 @@ export default function App() {
   // sessions get fresh ids and reconnect (tmux re-attaches if still alive); a
   // missing file just surfaces the editor's own error state. Passwords are
   // resolved once per connection (no prompt for key auth or saved secrets).
-  const restoreWorkspace = async (ws: Workspace, conns: Connection[]): Promise<void> => {
+  // Returns whether it actually restored any tabs, so the caller knows when to
+  // fall back to Home instead.
+  const restoreWorkspace = async (ws: Workspace, conns: Connection[]): Promise<boolean> => {
     const byId = new Map(conns.map((c) => [c.id, c]))
     const pwCache = new Map<string, string | null | undefined>()
     const getPw = async (conn: Connection): Promise<string | null | undefined> => {
@@ -923,7 +930,7 @@ export default function App() {
       }
     }
 
-    if (!built.length) return
+    if (!built.length) return false
     setTabs(built)
 
     // Rebuild the saved tab-bar views, best-effort. Each pane index maps back to
@@ -980,6 +987,7 @@ export default function App() {
       activeRebuilt = rebuilt.find((v) => wantIds.some((id) => v.panes.includes(id)))
     }
     setActiveViewId((activeRebuilt ?? rebuilt[rebuilt.length - 1])?.id ?? null)
+    return true
   }
 
   // Open a console/tmux session as a NEW tab — the dashboard tab stays open.
@@ -1191,12 +1199,13 @@ export default function App() {
   // is the worktree pane's whole point. Without it openSession falls back to
   // `<host> · claude` for every one of them, and three agents in three worktrees
   // give three identically titled tabs with no way to tell which is which.
-  const openClaude = (conn: Connection, dir: string, label?: string): void => {
-    if (!dir.startsWith('/')) return
+  const openClaude = (conn: Connection, dir: string, label?: string): boolean => {
+    if (!dir.startsWith('/')) return false
     void openSession(conn, {
       agent: { dir },
       title: label ? `${conn.name} · ${label}` : undefined
     })
+    return true
   }
 
   // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
@@ -1216,6 +1225,15 @@ export default function App() {
   const attachFromInbox = (connectionId: string, session: string): void => {
     const conn = connections.find((c) => c.id === connectionId)
     if (conn) attachTmux(conn, session)
+  }
+
+  // Launch a brand-new agent from Home's inline form. The directory picker there
+  // only knows connection ids (built from the scan, not from `connections`), so
+  // this is the one place that turns an id back into the Connection openClaude
+  // needs.
+  const newAgentFromInbox = (connectionId: string, dir: string): boolean => {
+    const conn = connections.find((c) => c.id === connectionId)
+    return conn ? openClaude(conn, dir) : false
   }
 
   // Resume a saved transcript in a new agent tab. The directory is not optional and
@@ -1383,6 +1401,8 @@ export default function App() {
           onEdit={(c) => setDialogConn(c)}
           onDelete={deleteConnection}
           onOpenInbox={openInbox}
+          onOpenTunnels={openTunnels}
+          onOpenFiles={openSftp}
           collapsed={appSettings.sidebarCollapsed}
           onToggleCollapse={toggleSidebar}
         />
@@ -1501,7 +1521,7 @@ export default function App() {
                 <div className="grid h-12 w-12 place-items-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
                   <span className="h-2.5 w-2.5 rounded-full bg-signal dot-glow text-signal" />
                 </div>
-                <p className="text-sm text-muted">Select a connection to open its dashboard.</p>
+                <p className="text-sm text-muted">Open Home in the sidebar to see every agent, on every host.</p>
                 <p className="eyebrow">no active session</p>
               </div>
             )}
@@ -1560,6 +1580,7 @@ export default function App() {
                   rescan={rescanAgents}
                   onAttach={attachFromInbox}
                   onResume={resumeFromInbox}
+                  onNewAgent={newAgentFromInbox}
                 />
                 {paneTools(INBOX_TAB_ID)}
               </div>

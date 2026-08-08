@@ -7,8 +7,14 @@ interface Props {
   onAdd: () => void
   onEdit: (conn: Connection) => void
   onDelete: (conn: Connection) => void
-  /** Open the cross-host Agent Inbox. */
+  /** Open Home — the flat, cross-host landing view. Prop name (and the tab's
+   *  `kind: 'inbox'` / INBOX_TAB_ID it drives) predate the Home relabel and stay
+   *  as they are: renaming internals for a cosmetic change is how you silently
+   *  break persisted state. */
   onOpenInbox: () => void
+  /** Optional so a caller that hasn't wired tunnels/files can still mount this. */
+  onOpenTunnels?: (c: Connection) => void
+  onOpenFiles?: (c: Connection) => void
   collapsed: boolean
   onToggleCollapse: () => void
 }
@@ -36,6 +42,8 @@ export function Sidebar({
   onEdit,
   onDelete,
   onOpenInbox,
+  onOpenTunnels,
+  onOpenFiles,
   collapsed,
   onToggleCollapse
 }: Props) {
@@ -50,18 +58,22 @@ export function Sidebar({
           <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
         </button>
 
+        {/* Bigger and coloured, unlike the plain-bordered "+" below it — Home is
+            the landing view now, not a peer of "add a connection". */}
         <button
           onClick={onOpenInbox}
-          title="Agent Inbox — every agent on every host"
-          className="grid h-8 w-8 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+          title="Home — every agent on every host"
+          className="grid h-9 w-9 place-items-center rounded-md bg-signal-soft/40 text-signal ring-1 ring-signal/30 transition-colors hover:bg-signal-soft/60"
         >
           ◎
         </button>
 
+        <div className="my-0.5 h-px w-6 bg-line" />
+
         <button
           onClick={onAdd}
           title="New connection (Ctrl+N)"
-          className="grid h-8 w-8 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
+          className="grid h-7 w-7 place-items-center rounded-md border border-line text-faint transition-colors hover:border-signal/40 hover:text-signal"
         >
           +
         </button>
@@ -109,23 +121,31 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* Above the connections list, not inside it: the inbox spans every host,
-          so it does not belong to any one of them. */}
-      <div className="shrink-0 px-2 pb-1">
+      {/* Home — every agent on every host, so it gets the section treatment
+          Connections used to have alone, not a row folded inside it. */}
+      <div className="shrink-0 px-4 pb-1.5">
+        <span className="eyebrow">Home</span>
+      </div>
+      <div className="shrink-0 px-2 pb-3">
         <button
           onClick={onOpenInbox}
-          className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-elevated/50"
+          className="group flex w-full items-center gap-2.5 rounded-lg border border-signal/25 bg-signal-soft/25 px-3 py-2.5 text-left transition-colors hover:bg-signal-soft/40"
         >
-          <span className="text-faint transition-colors group-hover:text-signal">◎</span>
-          <span className="text-sm font-medium text-fg/90">Agent Inbox</span>
-          <span className="ml-auto text-[10px] text-faint">all hosts</span>
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-signal/15 text-signal ring-1 ring-signal/30">
+            ◎
+          </span>
+          <span className="text-sm font-medium text-fg">Home</span>
+          <span className="ml-auto shrink-0 text-[10px] text-faint">all hosts</span>
         </button>
       </div>
 
-      {/* section header */}
-      <div className="flex shrink-0 items-center justify-between px-4 py-2.5">
-        <span className="eyebrow">
-          Connections <span className="text-faint/60">· {connections.length}</span>
+      <div className="mx-4 h-px bg-line/60" />
+
+      {/* section header — deliberately smaller and more muted than Home's: this
+          is the secondary list now, scoped to one host at a time. */}
+      <div className="flex shrink-0 items-center justify-between px-4 pb-2 pt-2.5">
+        <span className="eyebrow !text-[9px] !text-faint/70">
+          Connections <span className="text-faint/50">· {connections.length}</span>
         </span>
         <div className="flex items-center gap-1">
           <button
@@ -173,6 +193,30 @@ export function Sidebar({
                   {c.name}
                 </span>
                 <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  {onOpenTunnels && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onOpenTunnels(c)
+                      }}
+                      className="rounded px-1.5 text-xs text-faint hover:text-fg"
+                      title="Tunnels"
+                    >
+                      ⇄
+                    </button>
+                  )}
+                  {onOpenFiles && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onOpenFiles(c)
+                      }}
+                      className="rounded px-1.5 text-xs text-faint hover:text-fg"
+                      title="Browse Files"
+                    >
+                      ▸▸
+                    </button>
+                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
