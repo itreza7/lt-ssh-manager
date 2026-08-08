@@ -19,8 +19,6 @@ interface Props {
   active: boolean
   /** Start Claude Code in a worktree, in its own tab. */
   onOpenClaude: (dir: string) => void
-  /** Open Review Changes for a worktree. */
-  onOpenReview: (dir: string) => void
 }
 
 type Status = 'loading' | 'ready' | 'error'
@@ -32,8 +30,7 @@ export function WorktreeView({
   password,
   dir,
   active,
-  onOpenClaude,
-  onOpenReview
+  onOpenClaude
 }: Props) {
   const [status, setStatus] = useState<Status>('loading')
   const [error, setError] = useState<string | null>(null)
@@ -413,13 +410,6 @@ export function WorktreeView({
                   {w.branch ?? (w.detached ? 'detached HEAD' : '—')}
                 </span>
                 <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-                  <button
-                    onClick={() => onOpenReview(w.path)}
-                    className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal"
-                    title="Review what has changed in this worktree"
-                  >
-                    Changes
-                  </button>
                   {!isMain && (
                     <button
                       onClick={() => void askRemove(w)}

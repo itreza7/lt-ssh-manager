@@ -24,7 +24,6 @@ import { TerminalView } from './components/TerminalView'
 import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
-import { ReviewView } from './components/ReviewView'
 import { WorktreeView } from './components/WorktreeView'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
@@ -117,17 +116,6 @@ interface TunnelTab {
   password?: string
 }
 
-/** A read-only diff of a remote working tree against a pinned commit. */
-interface ReviewTab {
-  kind: 'review'
-  id: string // `rev:${connectionId}:${dir}`
-  connectionId: string
-  /** Any directory inside the repo — the pane resolves the root from it. */
-  dir: string
-  title: string
-  password?: string
-}
-
 /** The git worktrees of one remote repository. */
 interface WorktreeTab {
   kind: 'worktrees'
@@ -149,7 +137,6 @@ type Tab =
   | SftpTab
   | EditorTab
   | TunnelTab
-  | ReviewTab
   | WorktreeTab
 
 /**
@@ -235,13 +222,6 @@ function serializeTab(t: Tab): PersistedTab {
       return { kind: 'editor', connectionId: t.connectionId, path: t.path, name: t.name }
     case 'tunnels':
       return { kind: 'tunnels', connectionId: t.connectionId, title: t.title }
-    case 'review':
-      return {
-        kind: 'review',
-        connectionId: t.connectionId,
-        title: t.title,
-        initialPath: t.dir
-      }
     case 'worktrees':
       return {
         kind: 'worktrees',
@@ -349,7 +329,6 @@ export default function App() {
     if (t.kind === 'sftp') return <span className={lit ? 'text-amber' : 'text-faint'}>▸▸</span>
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
-    if (t.kind === 'review') return <span className={c}>±</span>
     if (t.kind === 'worktrees') return <span className={c}>⑂</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
@@ -874,22 +853,6 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
-      } else if (pt.kind === 'review') {
-        if (!pt.initialPath) continue
-        const pw = await getPw(conn)
-        if (pw === null) continue
-        const id = `rev:${conn.id}:${pt.initialPath}`
-        if (!has(id))
-          built.push({
-            kind: 'review',
-            id,
-            connectionId: conn.id,
-            dir: pt.initialPath,
-            title: pt.title ?? `Changes · ${pt.initialPath.split('/').filter(Boolean).pop() ?? '/'}`,
-            password: pw ?? undefined
-          })
-        if (makeActive) activeId = id
-        idForIndex.set(i, id)
       } else if (pt.kind === 'worktrees') {
         if (!pt.initialPath) continue
         const pw = await getPw(conn)
@@ -1095,38 +1058,11 @@ export default function App() {
   }
 
   /**
-   * Open a read-only review of the working tree containing `dir`.
+   * Open the worktree list for the repository containing `dir`.
    *
    * Keyed by the directory the user clicked, not by the repo root, because the
    * root is only known after the server answers — and keying on it would mean two
    * clicks in two subdirectories of one repo open two tabs before either resolves.
-   */
-  const openReview = (connectionId: string, password: string | undefined, dir: string): void => {
-    if (!dir.startsWith('/')) return
-    const id = `rev:${connectionId}:${dir}`
-    setTabs((t) =>
-      t.some((x) => x.id === id)
-        ? t
-        : [
-            ...t,
-            {
-              kind: 'review',
-              id,
-              connectionId,
-              dir,
-              title: `Changes · ${dir.split('/').filter(Boolean).pop() ?? '/'}`,
-              password
-            }
-          ]
-    )
-    showLeaf(id)
-  }
-
-  /**
-   * Open the worktree list for the repository containing `dir`.
-   *
-   * Keyed by the clicked directory for the same reason openReview is: the repo
-   * root is only known once the server answers.
    */
   const openWorktrees = (connectionId: string, password: string | undefined, dir: string): void => {
     if (!dir.startsWith('/')) return
@@ -1224,18 +1160,6 @@ export default function App() {
   const attachFromInbox = (connectionId: string, session: string): void => {
     const conn = connections.find((c) => c.id === connectionId)
     if (conn) attachTmux(conn, session)
-  }
-
-  // Resolves the password itself rather than passing undefined: openReview's
-  // other caller has a file-manager tab's password to hand on, and this one has
-  // none, so without this a host with no saved secret would open a review pane
-  // that fails on auth instead of asking.
-  const reviewFromInbox = async (connectionId: string, dir: string): Promise<void> => {
-    const conn = connections.find((c) => c.id === connectionId)
-    if (!conn) return
-    const password = await resolvePassword(conn)
-    if (password === null) return // cancelled prompt
-    openReview(connectionId, password ?? undefined, dir)
   }
 
   // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
@@ -1558,7 +1482,6 @@ export default function App() {
                 <AgentInbox
                   active={shownLeaves.includes(INBOX_TAB_ID)}
                   onAttach={attachFromInbox}
-                  onReview={(cid, dir) => void reviewFromInbox(cid, dir)}
                 />
                 {paneTools(INBOX_TAB_ID)}
               </div>
@@ -1635,7 +1558,6 @@ export default function App() {
                       const conn = connections.find((c) => c.id === tab.connectionId)
                       if (conn) openClaude(conn, dir)
                     }}
-                    onOpenReview={(dir) => openReview(tab.connectionId, tab.password, dir)}
                     onOpenWorktrees={(dir) => openWorktrees(tab.connectionId, tab.password, dir)}
                   />
                   {paneTools(tab.id)}
@@ -1656,26 +1578,6 @@ export default function App() {
                     password={tab.password}
                     path={tab.path}
                     name={tab.name}
-                    active={activeTabId === tab.id}
-                    settings={appSettings.editor}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              ))}
-
-            {/* review panes stay mounted so the selected file and scroll position hold */}
-            {tabs
-              .filter((t): t is ReviewTab => t.kind === 'review')
-              .map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
-                >
-                  <ReviewView
-                    connectionId={tab.connectionId}
-                    password={tab.password}
-                    dir={tab.dir}
                     active={activeTabId === tab.id}
                     settings={appSettings.editor}
                   />
@@ -1704,7 +1606,6 @@ export default function App() {
                       // several of these at once is what this pane is for.
                       if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
                     }}
-                    onOpenReview={(wt) => openReview(tab.connectionId, tab.password, wt)}
                   />
                   {paneTools(tab.id)}
                 </div>
