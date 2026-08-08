@@ -103,6 +103,96 @@ export interface AgentHostScan {
   skipped?: boolean
 }
 
+/**
+ * One saved Claude Code transcript on one host — something that can be resumed.
+ *
+ * Built by shared/resume.ts, which is where the layout it is read out of, and the
+ * reason every field is nullable, are explained. The short version: half of these
+ * sessions have no title, and a field the far side could not establish is left null
+ * rather than filled in with a plausible-looking default.
+ */
+export interface ResumeSession {
+  /** The transcript's filename stem, which is the id `--resume` takes. */
+  id: string
+  /**
+   * Absolute working directory the session ran in, or null when the transcript
+   * records none. Not decorative: `--resume` only finds an id under the project
+   * directory belonging to the cwd it starts in, so a row without this cannot be
+   * resumed at all.
+   */
+  dir: string | null
+  /**
+   * Whether `dir` is still a directory on the host. Three states, and the third is
+   * the point: `null` means the scan did not check — no cwd was recorded, or the
+   * value still carries a JSON escape and testing the escaped text would report a
+   * directory that is really there as missing. "Could not check" must never render
+   * as "it is gone", so the panel disables the button on `false` alone.
+   */
+  dirExists: boolean | null
+  /**
+   * The path came back through a UTF-8 decode that replaced bytes it could not read,
+   * so the string here is not the path on disk. Resuming is refused rather than
+   * attempted: `cd` against a rewritten path can only fail, and it would fail inside
+   * a terminal tab that had already opened instead of on the row that knew.
+   */
+  dirLossy: boolean
+  /** Seconds since the transcript was last written, on the SERVER's clock. */
+  ageSeconds: number | null
+  /**
+   * Size of the transcript in bytes, or null where `stat` could not say.
+   *
+   * Here because a third of a real host's newest sixty had no label at all: pressing
+   * `/clear` starts a fresh transcript holding nothing but a caveat record and the
+   * command that produced it, so there is no title and no prompt to show. Those rows
+   * are still real and still resumable, so they are not filtered out — "small" is not
+   * the same fact as "empty", and guessing which is which would hide live work.
+   *
+   * What this measures, measured rather than assumed: a transcript's floor is 50-70 KB
+   * of hook and system boilerplate whatever it contains, so size tells a substantial
+   * conversation (megabytes) from a session that never went anywhere (tens of KB). It
+   * does NOT distinguish a `/clear` husk from a one-shot `claude -p` run — both sit in
+   * that same floor. That is the honest limit of it, and it is still the one number on
+   * the row that says whether resuming is worth the click.
+   */
+  sizeBytes: number | null
+  /** A name the user set with `/title` — the strongest label there is. */
+  customTitle: string | null
+  /** Claude's own summary. Present in roughly half of all sessions. */
+  aiTitle: string | null
+  /** The last thing the user typed. A weak label, but often the only one. */
+  lastPrompt: string | null
+}
+
+/** What one host contributed to a resume scan. Mirrors AgentHostScan. */
+export interface ResumeHostScan {
+  connectionId: string
+  name: string
+  sessions: ResumeSession[]
+  /**
+   * Transcripts found on the host, which may exceed `sessions.length`: only one
+   * page is described. The panel shows both numbers, because a list that stops
+   * at sixty without saying so reads as "that is all there is".
+   */
+  total: number
+  /**
+   * The script printed its end marker, so this list is the whole page it meant to
+   * send. False means the remote shell died mid-stream — the exec RESOLVES with
+   * whatever stdout had arrived when the channel closed, which is the one path
+   * where a truncated list would otherwise be presented as a complete short one.
+   */
+  complete: boolean
+  /** The host has no transcript directory — Claude Code has never run there. */
+  empty?: boolean
+  /**
+   * `projects/` exists and holds entries, but nothing under it could be listed —
+   * permissions, or a listing too large for the shell. Distinct from `empty` and
+   * from `total: 0`, both of which claim "there is nothing here".
+   */
+  listFailed?: boolean
+  error?: string
+  skipped?: boolean
+}
+
 /** One entry of `git worktree list --porcelain` on a remote host. */
 export interface RemoteWorktree {
   /** Absolute path on the host. */

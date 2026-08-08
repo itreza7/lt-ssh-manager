@@ -6,6 +6,7 @@ import type {
   ConnectionDraft,
   HostKeyPrompt,
   PersistedTab,
+  ResumeSession,
   SessionStatus,
   SplitDirection,
   TmuxIntent,
@@ -31,7 +32,7 @@ import { PaneDividers } from './components/PaneDividers'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
-import { claudeSessionName, claudeTabCommand } from './lib/claude'
+import { claudeResumeSessionName, claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
 
 const SETTINGS_TAB_ID = 'settings'
@@ -937,21 +938,27 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { session?: string; title?: string; agent?: { dir: string } }
+    opts?: { session?: string; title?: string; agent?: { dir: string; resume?: string } }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
     let { title } = opts ?? {}
     const control = !!(conn.tmux && conn.tmuxControl)
     const agentDir = opts?.agent?.dir
+    const agentResume = opts?.agent?.resume
     // The session name, if any: an explicit one (already exactly as tmux spells it)
     // wins over the connection's own. An agent's name comes from the directory it
     // runs in, so every entry point that opens on that directory lands on one
-    // session instead of forking a second agent into the same working tree.
+    // session instead of forking a second agent into the same working tree — except
+    // a resumed one, which is named after the transcript instead, so that clicking
+    // Resume cannot attach to a different agent that happens to share the directory.
+    // See claudeResumeSessionName.
     const session =
       opts?.session ??
       (agentDir
-        ? claudeSessionName(agentDir)
+        ? agentResume
+          ? claudeResumeSessionName(agentResume, agentDir)
+          : claudeSessionName(agentDir)
         : conn.tmux
           ? tmuxSessionName(conn.tmuxSession || conn.name)
           : undefined)
@@ -969,7 +976,7 @@ export default function App() {
       status: { kind: 'connecting' as const, attempt: 1, retries: appSettings.connectRetries },
       password: password ?? undefined,
       command: agentDir
-        ? claudeTabCommand(agentDir, conn.claudePath, conn.tmux ? tmux : undefined)
+        ? claudeTabCommand(agentDir, conn.claudePath, conn.tmux ? tmux : undefined, agentResume)
         : tmux
           ? tmuxCreateCommand(tmux)
           : undefined,
@@ -1160,6 +1167,23 @@ export default function App() {
   const attachFromInbox = (connectionId: string, session: string): void => {
     const conn = connections.find((c) => c.id === connectionId)
     if (conn) attachTmux(conn, session)
+  }
+
+  // Resume a saved transcript in a new agent tab. The directory is not optional and
+  // not a guess: `claude --resume` looks an id up under the project directory of the
+  // cwd it starts in, so a session whose transcript recorded no cwd cannot be
+  // resumed anywhere — the inbox disables the button rather than opening a tab that
+  // would only ever print "No conversation found".
+  const resumeFromInbox = (connectionId: string, s: ResumeSession, label: string): void => {
+    const conn = connections.find((c) => c.id === connectionId)
+    if (!conn || !s.dir) return
+    void openSession(conn, {
+      // The transcript's own label, not the session name: a tab strip full of
+      // `claude-dt2-1f3a9c04` identifies nothing, and this is the one string the
+      // user already recognises the work by.
+      title: `${conn.name} · ${label.slice(0, 40)}`,
+      agent: { dir: s.dir, resume: s.id }
+    })
   }
 
   // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
@@ -1482,6 +1506,7 @@ export default function App() {
                 <AgentInbox
                   active={shownLeaves.includes(INBOX_TAB_ID)}
                   onAttach={attachFromInbox}
+                  onResume={resumeFromInbox}
                 />
                 {paneTools(INBOX_TAB_ID)}
               </div>

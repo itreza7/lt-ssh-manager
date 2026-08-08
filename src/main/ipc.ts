@@ -19,6 +19,7 @@ import type {
   ClaudeRuntime,
   Connection,
   ConnectionDraft,
+  ResumeHostScan,
   ServerStats,
   SettingsPatch,
   SftpList,
@@ -38,6 +39,7 @@ import { SshManager, isPermanentScanFailure } from './ssh/manager'
 import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
 import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
 import { agentScanScript, parseAgentScan } from '../shared/agents'
+import { RESUME_LIMIT, parseResumeScan, resumeScanScript } from '../shared/resume'
 import { SEP, shQuote, shWrap } from '../shared/shell'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
@@ -512,6 +514,113 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             unattended: true
           })
           return { ...base, sessions: parseAgentScan(res.stdout).sessions }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)
+          return { ...base, error: message }
+        }
+      }
+
+      const worker = async (): Promise<void> => {
+        for (let i = next++; i < connections.length; i = next++) {
+          out[i] = await scanOne(connections[i])
+        }
+      }
+      await Promise.all(
+        Array.from({ length: Math.min(SCAN_FANOUT, connections.length) }, worker)
+      )
+      return out
+    }
+  )
+
+  /**
+   * The same sweep, asking a different question: what saved Claude Code sessions
+   * does each host have that could be resumed?
+   *
+   * Deliberately a second handler rather than more fields on `agents:scan`, because
+   * the two answers go stale at completely different rates. A running agent's status
+   * changes second to second, which is why the inbox re-asks every ten; a transcript
+   * on disk changes when someone works in it, and re-listing sixty of them across
+   * every host on that cadence would be a poll that costs real work and almost never
+   * reports anything new. This one runs when the panel opens and when the user asks.
+   *
+   * Every refusal in `agents:scan` applies here unchanged, and for the same reasons —
+   * no stored password means skipped rather than attempted, a host that has already
+   * refused stays latched in `scanBlocked` until the user does something about it,
+   * and `unattended` declines an unknown host key instead of raising a dialog per
+   * host. The two sweeps share that map on purpose: a host that refused the inbox is
+   * not a host worth dialing again for this.
+   *
+   * The budget is bigger, though: sixty bounded reads is more work than one tmux
+   * listing, and the ceiling is set from what a row can actually weigh now that
+   * labels are truncated on the far side — about 450 bytes each — rather than from
+   * a hope about how long a prompt might be. It is set generously, because this is
+   * the one limit in the sweep that does not degrade: passing `maxBytes` *fails* the
+   * host outright, so a row weighing more than the estimate would not shorten the
+   * list, it would delete it. Three 200-byte labels plus a PATH_MAX path is the true
+   * worst case, and 8 KB a row leaves that room and stays well under EXEC_MAX_BYTES.
+   */
+  ipcMain.handle(
+    'resume:scan',
+    async (_e, args?: { retryFailed?: boolean; offset?: number }): Promise<ResumeHostScan[]> => {
+      if (args?.retryFailed) scanBlocked.clear()
+      // Clamped here rather than trusted: the renderer computes it from a count it
+      // got from this handler, and a negative or fractional offset would reach `head`
+      // and `tail` as a shell argument.
+      const offset = Math.max(0, Math.trunc(args?.offset ?? 0))
+      const command = shWrap(resumeScanScript(offset, RESUME_LIMIT))
+      const connections = connectionStore.list()
+      const out: ResumeHostScan[] = new Array(connections.length)
+      let next = 0
+
+      const scanOne = async (connection: Connection): Promise<ResumeHostScan> => {
+        const base = {
+          connectionId: connection.id,
+          name: connection.name,
+          sessions: [],
+          total: 0,
+          // A host we skipped or that refused us is not a *truncated* host, and
+          // rendering "list cut short" next to "no saved password" would be noise
+          // pointing at the wrong problem.
+          complete: true
+        }
+        const password = passwordFor(connection.id)
+        if (connection.authMethod === 'password' && !password) {
+          return { ...base, skipped: true, error: 'No saved password' }
+        }
+        const blocked = scanBlocked.get(connection.id)
+        if (blocked) return { ...base, skipped: true, error: blocked }
+        try {
+          const res = await ssh.exec(connection.id, connection, {
+            command,
+            password,
+            // Sized from measurement, not from taste. One page reads sixty files
+            // and spends about six processes on each, so the cost is ~360 remote
+            // processes however new the page is. On a host holding 959 transcripts
+            // that measured 2.2s warm and 15.7s under load — three quarters of a
+            // 20s budget, for a page whose rows are all fine. Timing out there
+            // would throw away a page the user asked for and waited on, so the
+            // deadline is set well clear of the observed spread; the in-flight
+            // guard and the button's own "Scanning…" state are what keep a slow
+            // host from piling up.
+            timeoutMs: 30000,
+            deadlineMs: 45000,
+            maxBytes: RESUME_LIMIT * 8192 + 65536,
+            unattended: true
+          })
+          const scan = parseResumeScan(res.stdout)
+          // The end marker is missing. Rows still render — an incomplete page's rows
+          // are each individually valid, and dropping sixty good ones to report one
+          // bad ending would be the worse trade — but the completeness claim is void,
+          // and the exit status is the only thing that can say why.
+          if (!scan.complete && res.code !== 0) {
+            return {
+              ...base,
+              ...scan,
+              error: `The saved-session list came back incomplete (exit ${res.code ?? 'signal'})`
+            }
+          }
+          return { ...base, ...scan }
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e)
           if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)

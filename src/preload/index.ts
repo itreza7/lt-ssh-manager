@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type {
   AgentHostScan,
+  ResumeHostScan,
   AppSettings,
   ClaudeHookStatus,
   ClaudeRuntime,
@@ -99,6 +100,13 @@ const api = {
   // that refused it, which a timed poll deliberately does not.
   agentsScan: (retryFailed?: boolean): Promise<AgentHostScan[]> =>
     ipcRenderer.invoke('agents:scan', { retryFailed }),
+
+  // The same sweep for sessions that are saved rather than running. Not folded into
+  // agentsScan because it is not polled: a transcript on disk does not change
+  // second to second, and sixty bounded reads per host on a ten-second timer would
+  // be steady work for an answer that almost never differs. See 'resume:scan'.
+  resumeScan: (args?: { retryFailed?: boolean; offset?: number }): Promise<ResumeHostScan[]> =>
+    ipcRenderer.invoke('resume:scan', args ?? {}),
 
   // host vitals probe
   probeServer: (args: { connectionId: string; password?: string }): Promise<ServerStats> =>

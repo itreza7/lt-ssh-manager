@@ -56,6 +56,14 @@ export const CLAUDE_RESOLVE = [
 /**
  * The script an agent tab runs: resolve the binary, `cd`, hand the pane to Claude.
  *
+ * `resume` adds `--resume <id>`, and the `cd` above it stops being a convenience
+ * and becomes the thing that makes it work: Claude Code looks a session id up under
+ * the project directory for the cwd it starts in, so the same id from the wrong
+ * directory is reported as "No conversation found" and nothing is resumed. It exits
+ * 1 when it says that, which lands on `die` below and holds Claude's own sentence on
+ * screen underneath ours — so the pane explains itself without this script having to
+ * parse the failure. Both behaviours verified against 2.1.220.
+ *
  * Every ending — clean, failed, or never-started — exits the pane. `die` holds
  * the message on screen first, because tmux restores the alternate screen the
  * instant a pane dies and an unread error is no error at all.
@@ -69,7 +77,7 @@ export const CLAUDE_RESOLVE = [
  * Exiting frees the name, so the next click is a real launch. A shell on that
  * host is one click away on the dashboard regardless.
  */
-export function claudeScript(dir: string, pin?: string): string {
+export function claudeScript(dir: string, pin?: string, resume?: string): string {
   return [
     // `%b` so callers can put a line break in a message without putting one in
     // the script; `read` falls back to a sleep where stdin is not a terminal.
@@ -79,15 +87,20 @@ export function claudeScript(dir: string, pin?: string): string {
     `CLI=${pin ? shQuote(pin) : ''}`,
     CLAUDE_RESOLVE,
     `[ -n "$CLI" ] || die 'Claude Code was not found on this host.\\nInstall it with:  curl -fsSL https://claude.ai/install.sh | bash\\nOr, if it lives behind a version manager, set its full path in Edit > Claude Code binary.'`,
-    '"$CLI"; rc=$?',
+    `"$CLI"${resume ? ` --resume ${shQuote(resume)}` : ''}; rc=$?`,
     '[ "$rc" = 0 ] && exit 0',
     'die "claude exited with status $rc"'
   ].join(SEP)
 }
 
 /** What an agent tab's `command` is set to, tmux or not. */
-export function claudeTabCommand(dir: string, pin?: string, tmux?: TmuxIntent): string {
-  const inner = shWrap(claudeScript(dir, pin))
+export function claudeTabCommand(
+  dir: string,
+  pin?: string,
+  tmux?: TmuxIntent,
+  resume?: string
+): string {
+  const inner = shWrap(claudeScript(dir, pin, resume))
   // `exec` on the non-tmux path so the wrapper shell does not linger as a third
   // process between sshd and the agent, swallowing a signal on disconnect.
   return tmux ? tmuxCreateCommand(tmux, inner) : `exec ${inner}`
@@ -122,6 +135,33 @@ export function claudeSessionName(dir: string): string {
   const base = dir.replace(/\/+$/, '').split('/').pop() ?? ''
   const slug = base.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 16)
   return slug ? `claude-${slug}-${fnv1a32(dir)}` : 'claude-home'
+}
+
+/**
+ * Name a RESUMED session after the transcript, never after its directory.
+ *
+ * claudeSessionName() keys on the directory precisely so that one working tree
+ * holds one agent, and resume cannot borrow that. `tmux new -A` on the directory's
+ * name would attach to whatever agent is already running there instead of resuming
+ * the transcript the user picked — the click would quietly do a different thing,
+ * which is the one outcome worth engineering against.
+ *
+ * Keying on the transcript id keeps the same one-identity-one-session property that
+ * name was built for, pointed at a different identity: clicking Resume twice on one
+ * session attaches to the pane that is already resuming it rather than starting a
+ * second `claude --resume` appending to the same transcript. What it gives up is the
+ * directory guarantee — a resumed agent can share a working tree with one launched
+ * from the file manager. That is a real thing to know and a bad thing to guess at
+ * from a name, so the pane says so on the row instead. See AgentInbox.
+ *
+ * The shape still satisfies isClaudeSession(), so a resumed agent reads as an agent
+ * on the dashboard: the slug is the directory's, for eyes, and the hash is the
+ * transcript's, for identity.
+ */
+export function claudeResumeSessionName(sessionId: string, dir?: string | null): string {
+  const base = (dir ?? '').replace(/\/+$/, '').split('/').pop() ?? ''
+  const slug = base.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 16)
+  return `claude-${slug || 'resume'}-${fnv1a32(sessionId)}`
 }
 
 /** Display only — drives the dashboard's `agent` chip. Never gates an action. */
