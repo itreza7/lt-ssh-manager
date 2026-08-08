@@ -11,15 +11,19 @@ import { isMac } from './platform'
 /** xterm cell line-height multiple; mirrored by the cell-metrics measurement. */
 export const LINE_HEIGHT = 1.2
 
+/** The terminal's own background — also used by the pane wrapper's padding so
+ * the frame around xterm reads as one continuous surface, not a seam. */
+export const TERMINAL_BG = '#0c0b0a'
+
 const THEME = {
-  background: '#0c0f15',
-  foreground: '#e8edf3',
+  background: TERMINAL_BG,
+  foreground: '#f2f0e8',
   cursor: '#46d98a',
-  cursorAccent: '#0c0f15',
-  selectionBackground: 'rgba(124, 160, 214, 0.40)',
-  selectionInactiveBackground: 'rgba(124, 160, 214, 0.22)',
-  black: '#0b0e14',
-  brightBlack: '#5a6473'
+  cursorAccent: TERMINAL_BG,
+  selectionBackground: 'rgba(154, 145, 125, 0.35)',
+  selectionInactiveBackground: 'rgba(154, 145, 125, 0.18)',
+  black: '#090908',
+  brightBlack: '#6f6a5c'
 } as const
 
 /**
