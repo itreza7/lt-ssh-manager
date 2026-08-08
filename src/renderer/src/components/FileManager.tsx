@@ -15,6 +15,8 @@ interface Props {
   onOpenClaude?: (dir: string) => void
   /** Review the git working tree containing a directory, in its own tab. */
   onOpenReview?: (dir: string) => void
+  /** List the git worktrees of the repo containing a directory, in its own tab. */
+  onOpenWorktrees?: (dir: string) => void
 }
 
 // SFTP realpath resolves relative paths against the login dir, so a leading
@@ -197,7 +199,8 @@ export function FileManager({
   onOpenFile,
   onCwdChange,
   onOpenClaude,
-  onOpenReview
+  onOpenReview,
+  onOpenWorktrees
 }: Props) {
   const [status, setStatus] = useState<Status>('connecting')
   const [openError, setOpenError] = useState<string | null>(null)
@@ -541,6 +544,13 @@ export function FileManager({
             ±
           </ToolBtn>
         )}
+        {/* Ungated for the same reason as Review changes above: "not a git
+            repository" is the pane's answer, not a reason to hide the way to ask. */}
+        {onOpenWorktrees && (
+          <ToolBtn label="Worktrees" disabled={!cwd} onClick={() => onOpenWorktrees(cwd)}>
+            ⑂
+          </ToolBtn>
+        )}
         <button
           onClick={() => setShowHidden((v) => !v)}
           title="Toggle hidden files"
@@ -725,6 +735,9 @@ export function FileManager({
           {onOpenClaude && cwd && <MenuItem onClick={() => onOpenClaude(cwd)}>Claude here</MenuItem>}
           {onOpenReview && cwd && (
             <MenuItem onClick={() => onOpenReview(cwd)}>Review changes</MenuItem>
+          )}
+          {onOpenWorktrees && cwd && (
+            <MenuItem onClick={() => onOpenWorktrees(cwd)}>Worktrees</MenuItem>
           )}
           <MenuItem onClick={() => void list(cwd)}>Refresh</MenuItem>
         </div>

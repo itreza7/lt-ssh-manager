@@ -25,6 +25,7 @@ import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { ReviewView } from './components/ReviewView'
+import { WorktreeView } from './components/WorktreeView'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
@@ -127,6 +128,17 @@ interface ReviewTab {
   password?: string
 }
 
+/** The git worktrees of one remote repository. */
+interface WorktreeTab {
+  kind: 'worktrees'
+  id: string // `wt:${connectionId}:${dir}`
+  connectionId: string
+  /** Any directory inside the repo — the pane resolves the root from it. */
+  dir: string
+  title: string
+  password?: string
+}
+
 // A "leaf" — one unit of content. Leaves live inside views (see below).
 type Tab =
   | DashboardTab
@@ -138,6 +150,7 @@ type Tab =
   | EditorTab
   | TunnelTab
   | ReviewTab
+  | WorktreeTab
 
 /**
  * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
@@ -225,6 +238,13 @@ function serializeTab(t: Tab): PersistedTab {
     case 'review':
       return {
         kind: 'review',
+        connectionId: t.connectionId,
+        title: t.title,
+        initialPath: t.dir
+      }
+    case 'worktrees':
+      return {
+        kind: 'worktrees',
         connectionId: t.connectionId,
         title: t.title,
         initialPath: t.dir
@@ -330,6 +350,7 @@ export default function App() {
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
     if (t.kind === 'review') return <span className={c}>±</span>
+    if (t.kind === 'worktrees') return <span className={c}>⑂</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
 
@@ -869,6 +890,23 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
+      } else if (pt.kind === 'worktrees') {
+        if (!pt.initialPath) continue
+        const pw = await getPw(conn)
+        if (pw === null) continue
+        const id = `wt:${conn.id}:${pt.initialPath}`
+        if (!has(id))
+          built.push({
+            kind: 'worktrees',
+            id,
+            connectionId: conn.id,
+            dir: pt.initialPath,
+            title:
+              pt.title ?? `Worktrees · ${pt.initialPath.split('/').filter(Boolean).pop() ?? '/'}`,
+            password: pw ?? undefined
+          })
+        if (makeActive) activeId = id
+        idForIndex.set(i, id)
       }
     }
 
@@ -1084,6 +1122,33 @@ export default function App() {
     showLeaf(id)
   }
 
+  /**
+   * Open the worktree list for the repository containing `dir`.
+   *
+   * Keyed by the clicked directory for the same reason openReview is: the repo
+   * root is only known once the server answers.
+   */
+  const openWorktrees = (connectionId: string, password: string | undefined, dir: string): void => {
+    if (!dir.startsWith('/')) return
+    const id = `wt:${connectionId}:${dir}`
+    setTabs((t) =>
+      t.some((x) => x.id === id)
+        ? t
+        : [
+            ...t,
+            {
+              kind: 'worktrees',
+              id,
+              connectionId,
+              dir,
+              title: `Worktrees · ${dir.split('/').filter(Boolean).pop() ?? '/'}`,
+              password
+            }
+          ]
+    )
+    showLeaf(id)
+  }
+
   const fetchTmuxFor = (conn: Connection) => async () => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required to list sessions.')
@@ -1130,9 +1195,16 @@ export default function App() {
   // only `listError` while status is already 'ready' — so without this guard a
   // click there would silently start an agent in $HOME under a session name
   // hashed from '', which no later launch on any real directory would ever match.
-  const openClaude = (conn: Connection, dir: string): void => {
+  // `label` names the tab when several agents are open on one host at once, which
+  // is the worktree pane's whole point. Without it openSession falls back to
+  // `<host> · claude` for every one of them, and three agents in three worktrees
+  // give three identically titled tabs with no way to tell which is which.
+  const openClaude = (conn: Connection, dir: string, label?: string): void => {
     if (!dir.startsWith('/')) return
-    void openSession(conn, { agent: { dir } })
+    void openSession(conn, {
+      agent: { dir },
+      title: label ? `${conn.name} · ${label}` : undefined
+    })
   }
 
   // Attach (or create) a tmux session in a new terminal tab. `new -A` means a
@@ -1564,6 +1636,7 @@ export default function App() {
                       if (conn) openClaude(conn, dir)
                     }}
                     onOpenReview={(dir) => openReview(tab.connectionId, tab.password, dir)}
+                    onOpenWorktrees={(dir) => openWorktrees(tab.connectionId, tab.password, dir)}
                   />
                   {paneTools(tab.id)}
                 </div>
@@ -1605,6 +1678,33 @@ export default function App() {
                     dir={tab.dir}
                     active={activeTabId === tab.id}
                     settings={appSettings.editor}
+                  />
+                  {paneTools(tab.id)}
+                </div>
+              ))}
+
+            {/* worktree panes stay mounted so a half-filled create form survives a
+                tab switch — and so the list doesn't re-read on every glance */}
+            {tabs
+              .filter((t): t is WorktreeTab => t.kind === 'worktrees')
+              .map((tab) => (
+                <div
+                  key={tab.id}
+                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                  {...paneProps(tab.id)}
+                >
+                  <WorktreeView
+                    connectionId={tab.connectionId}
+                    password={tab.password}
+                    dir={tab.dir}
+                    active={onScreen(tab.id)}
+                    onOpenClaude={(wt) => {
+                      const conn = connections.find((c) => c.id === tab.connectionId)
+                      // Labelled with the worktree's own folder, since opening
+                      // several of these at once is what this pane is for.
+                      if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
+                    }}
+                    onOpenReview={(wt) => openReview(tab.connectionId, tab.password, wt)}
                   />
                   {paneTools(tab.id)}
                 </div>

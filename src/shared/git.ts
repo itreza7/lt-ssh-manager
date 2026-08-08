@@ -137,8 +137,14 @@ export function fileScript(root: string, baseSpec: string | null, path: string):
  * as a three-digit *octal* escape — `\303\251` for `é`. Those are bytes, not code
  * points, so they are collected and decoded as UTF-8 together; decoding each one
  * on its own would turn every non-ASCII path into mojibake.
+ *
+ * Applies to NEWLINE-framed porcelain only. git quotes when the record terminator
+ * is a newline and writes the value raw when it is NUL, so running this over `-z`
+ * output would corrupt any value that legitimately contains a backslash. Verified
+ * both ways: newline framing prints `locked "a\"b\\c\ttab"`, `-z` prints the same
+ * reason unescaped. shared/worktrees.ts gates on that.
  */
-function unquote(token: string): string {
+export function unquote(token: string): string {
   if (!token.startsWith('"')) return token
   const body = token.slice(1, -1)
   const out: number[] = []

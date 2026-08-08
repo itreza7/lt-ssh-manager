@@ -21,8 +21,10 @@ import type {
   TransferProgress,
   TunnelDef,
   TunnelStatus,
-  Workspace
+  Workspace,
+  WorktreeScan
 } from '../shared/types'
+import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 
 export interface ConnectArgs {
   sessionId: string
@@ -307,7 +309,39 @@ const api = {
     path: string
     basePath?: string
     password?: string
-  }): Promise<GitFileDiff> => ipcRenderer.invoke('git:file', args)
+  }): Promise<GitFileDiff> => ipcRenderer.invoke('git:file', args),
+
+  /** The git worktrees of the repo containing `dir`, plus its branches. */
+  gitWorktrees: (args: {
+    connectionId: string
+    dir: string
+    password?: string
+  }): Promise<WorktreeScan> => ipcRenderer.invoke('git:worktrees', args),
+
+  /** Create a worktree under the repo's `.claude/worktrees`. Resolves to its path. */
+  gitWorktreeAdd: (args: {
+    connectionId: string
+    repoRoot: string
+    name: string
+    start: WorktreeStart
+    password?: string
+  }): Promise<{ path: string }> => ipcRenderer.invoke('git:worktreeAdd', args),
+
+  /**
+   * Remove a worktree. Never forced — git refuses a locked or dirty one, and the
+   * main process never builds the flag that would override that.
+   */
+  gitWorktreeRemove: (args: {
+    connectionId: string
+    repoRoot: string
+    path: string
+    password?: string
+  }): Promise<void> => ipcRenderer.invoke('git:worktreeRemove', args),
+  gitWorktreeInspect: (args: {
+    connectionId: string
+    path: string
+    password?: string
+  }): Promise<WorktreeInspect> => ipcRenderer.invoke('git:worktreeInspect', args)
 }
 
 export type Api = typeof api
