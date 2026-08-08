@@ -29,7 +29,8 @@ import type {
   TmuxIntent,
   TmuxSession,
   TunnelDef,
-  Workspace
+  Workspace,
+  WorktreeScan
 } from '../shared/types'
 import { connectionStore } from './store/connections'
 import { secrets } from './store/secrets'
@@ -50,6 +51,22 @@ import {
   parsePorcelain,
   reviewScript
 } from '../shared/git'
+import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
+import {
+  MAX_BRANCHES,
+  MAX_INSPECT,
+  MAX_WORKTREES,
+  WORKTREE_DIR,
+  parseWorktreeInspect,
+  parseWorktreeScan,
+  parseWorktreeWrite,
+  refNameError,
+  worktreeInspectScript,
+  worktreeAddScript,
+  worktreeListScript,
+  worktreeNameError,
+  worktreeRemoveScript
+} from '../shared/worktrees'
 
 // Native macOS fullscreen leaves a black bar above a frameless window and pushes
 // it into a separate Space; simple fullscreen covers the whole screen in place.
@@ -960,15 +977,21 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     connectionId: string,
     password: string | undefined,
     script: string,
-    maxBytes: number
+    maxBytes: number,
+    // 30s suits a read: every other caller here asks git a question and gets an
+    // answer back off the disk it already has. `worktree add` is the exception —
+    // it writes a full checkout of the tree, and on a large repo that is minutes,
+    // not seconds. Timing it out at 30s would not stop the checkout, only orphan
+    // it: the app would report failure over a worktree that then finishes.
+    deadlineMs = 30000
   ): Promise<Buffer> => {
     const connection = connectionStore.get(connectionId)
     if (!connection) throw new Error('Connection not found')
     const res = await ssh.execBytes(connectionId, connection, {
       command: shWrap(script),
       password: passwordFor(connectionId, password),
-      timeoutMs: 30000,
-      deadlineMs: 30000,
+      timeoutMs: deadlineMs,
+      deadlineMs,
       maxBytes
     })
     return res.stdout
@@ -1074,6 +1097,122 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         base: sideOf(payload.subarray(0, baseLen), baseBytes),
         work: sideOf(payload.subarray(baseLen), workBytes)
       }
+    }
+  )
+
+  /**
+   * Worktree launcher: the git worktrees of the repo containing `dir`.
+   *
+   * Read-only, and attended — unlike the Agent Inbox sweep this runs because the
+   * user opened one host's panel, so a key-verification prompt here is expected
+   * rather than a surprise, and there is no repeating dialler to rate-limit.
+   */
+  ipcMain.handle(
+    'git:worktrees',
+    async (_e, args: { connectionId: string; dir: string; password?: string }): Promise<WorktreeScan> => {
+      if (!args.dir.startsWith('/')) throw new Error('Directory must be an absolute path')
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        worktreeListScript(args.dir),
+        // A worktree record is a path plus a few short attributes; 4 KB each is
+        // generous, and the branch header is capped separately by MAX_BRANCHES.
+        MAX_WORKTREES * 4096 + MAX_BRANCHES * 256 + 65536
+      )
+      const scan = parseWorktreeScan(out.toString('utf-8'))
+      return { ...scan, worktrees: scan.worktrees.slice(0, MAX_WORKTREES) }
+    }
+  )
+
+  /**
+   * Create a worktree under the repo's `.claude/worktrees`.
+   *
+   * Every argument is re-validated here even though the renderer validated them
+   * too. The renderer is not what holds the SSH connection, and a name reaching
+   * git as an option is not a rendering bug.
+   */
+  ipcMain.handle(
+    'git:worktreeAdd',
+    async (
+      _e,
+      args: {
+        connectionId: string
+        repoRoot: string
+        name: string
+        start: WorktreeStart
+        password?: string
+      }
+    ): Promise<{ path: string }> => {
+      if (!args.repoRoot.startsWith('/')) throw new Error('Repository root must be an absolute path')
+      const nameErr = worktreeNameError(args.name)
+      if (nameErr) throw new Error(nameErr)
+      const start = args.start
+      if (start?.kind !== 'new' && start?.kind !== 'existing') throw new Error('Invalid start point')
+      const branchErr = refNameError(start.branch)
+      if (branchErr) throw new Error(branchErr)
+      if (start.kind === 'new') {
+        const fromErr = refNameError(start.from, 'start point')
+        if (fromErr) throw new Error(fromErr)
+      }
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        worktreeAddScript(args.repoRoot, args.name, start),
+        65536,
+        // Checking out a large tree is minutes of real work, not a query.
+        10 * 60 * 1000
+      )
+      const res = parseWorktreeWrite(out.toString('utf-8'))
+      if (!res.ok) throw new Error(res.error ?? 'Could not create the worktree.')
+      return { path: res.path ?? `${args.repoRoot}/${WORKTREE_DIR}/${args.name}` }
+    }
+  )
+
+  /**
+   * Remove a worktree — and only ever the unforced `git worktree remove`.
+   *
+   * The renderer refuses to offer this for a locked worktree, but that is the
+   * courtesy, not the guarantee. The guarantee is that no `--force` is ever
+   * built, so git itself is the thing standing between a click and an agent's
+   * uncommitted work. See shared/worktrees.ts.
+   */
+  ipcMain.handle(
+    'git:worktreeRemove',
+    async (
+      _e,
+      args: { connectionId: string; repoRoot: string; path: string; password?: string }
+    ): Promise<void> => {
+      if (!args.repoRoot.startsWith('/')) throw new Error('Repository root must be an absolute path')
+      if (!args.path.startsWith('/')) throw new Error('Worktree path must be an absolute path')
+      if (args.path === args.repoRoot) throw new Error('That is the repository itself, not a worktree')
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        worktreeRemoveScript(args.repoRoot, args.path),
+        65536
+      )
+      const res = parseWorktreeWrite(out.toString('utf-8'))
+      if (!res.ok) throw new Error(res.error ?? 'Could not remove the worktree.')
+    }
+  )
+
+  // Read-only, and the removal confirm will not open without it: git deletes a
+  // worktree's ignored files without ever refusing, so this is the only thing
+  // that can tell the user their `.env` is included in that button.
+  ipcMain.handle(
+    'git:worktreeInspect',
+    async (
+      _e,
+      args: { connectionId: string; path: string; password?: string }
+    ): Promise<WorktreeInspect> => {
+      if (!args.path.startsWith('/')) throw new Error('Worktree path must be an absolute path')
+      const out = await gitExec(
+        args.connectionId,
+        args.password,
+        worktreeInspectScript(args.path),
+        MAX_INSPECT * 4096 + 65536
+      )
+      return parseWorktreeInspect(out.toString('utf-8'))
     }
   )
 

@@ -103,6 +103,44 @@ export interface AgentHostScan {
   skipped?: boolean
 }
 
+/** One entry of `git worktree list --porcelain` on a remote host. */
+export interface RemoteWorktree {
+  /** Absolute path on the host. */
+  path: string
+  /** Commit it is on. Empty only when git declined to say. */
+  head: string
+  /** Short branch name, or null when detached (or when git said neither). */
+  branch: string | null
+  bare: boolean
+  detached: boolean
+  /**
+   * Lock reason when locked, `''` when locked with no reason given, null when
+   * unlocked. Three states, not two: "locked, reason unknown" is not "unlocked".
+   */
+  locked: string | null
+  /** Prune reason when git considers the worktree prunable, else null. */
+  prunable: string | null
+}
+
+/** The worktrees of one repository, as one scan. */
+export interface WorktreeScan {
+  /** Repository root, or null when `dir` wasn't in a repository. */
+  root: string | null
+  /**
+   * Local branch names, most recently committed first, capped at MAX_BRANCHES.
+   *
+   * Carried by the same scan because the create form needs both halves at once —
+   * which branches exist, and which of them a worktree already holds — and a
+   * second round trip to learn the second half is a second dial.
+   */
+  branches: string[]
+  /** `git rev-parse --git-common-dir`, which identifies the shared repo. */
+  common: string | null
+  worktrees: RemoteWorktree[]
+  /** Why the scan produced nothing. Absent on success, including "none yet". */
+  error?: string
+}
+
 /**
  * What a tmux-backed tab is attached to, kept structured rather than inferred
  * from the command string. The main process needs it to build an *attach-only*
@@ -542,6 +580,7 @@ export interface PersistedTab {
     | 'tunnels'
     | 'tmux'
     | 'review'
+    | 'worktrees'
     | 'inbox'
   connectionId?: string
   title?: string
@@ -551,7 +590,7 @@ export interface PersistedTab {
    * before that carry only `command`, which parseTmuxIntent() recovers this from.
    */
   tmux?: TmuxIntent
-  initialPath?: string // sftp: directory to open; review: directory inside the repo
+  initialPath?: string // sftp: directory to open; review/worktrees: a directory inside the repo
   path?: string // editor: remote file path
   name?: string // editor: file name
 }
