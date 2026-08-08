@@ -133,6 +133,11 @@ function createWindow(): void {
     if (ctrl && key === 'n') {
       wc?.send('menu:new-connection')
       event.preventDefault()
+    } else if (input.meta && key === 'k') {
+      // Cmd-only (not Ctrl+K) — Ctrl+K is readline's kill-line, used constantly
+      // inside the remote shells this app exists to host.
+      wc?.send('menu:command-palette')
+      event.preventDefault()
     } else if (ctrl && key === ',') {
       wc?.send('menu:open-settings')
       event.preventDefault()

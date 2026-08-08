@@ -101,6 +101,12 @@ export function installAppMenu(getWindow: () => BrowserWindow | null): void {
     {
       label: 'View',
       submenu: [
+        display({
+          label: 'Command Palette…',
+          accelerator: 'Command+K',
+          click: send('menu:command-palette')
+        }),
+        { type: 'separator' },
         display({ label: 'Zoom In', accelerator: 'Command+Plus', click: zoom(0.5) }),
         display({ label: 'Zoom Out', accelerator: 'Command+-', click: zoom(-0.5) }),
         display({ label: 'Reset Zoom', accelerator: 'Command+0', click: zoom('reset') }),

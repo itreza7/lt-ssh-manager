@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { AgentHostScan, AgentSession, ResumeHostScan, ResumeSession } from '../../../shared/types'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
@@ -7,7 +7,6 @@ import { RESUME_LIMIT, resumeTitle, savedSessionStatus } from '../lib/resume'
 import type { SavedSessionStatus } from '../lib/resume'
 
 interface Props {
-  active: boolean
   /** The live-agent sweep, owned by useAgentSessions and lifted to App.tsx so it
    *  can keep polling in the background regardless of which tab is visible. */
   hosts: AgentHostScan[] | null
@@ -15,6 +14,16 @@ interface Props {
   scanning: boolean
   /** Re-scan now, clearing any hosts latched as refused — the Refresh button. */
   rescan: () => void
+  /** The saved-session sweep, owned by useSavedSessions and lifted to App.tsx for
+   *  the same reason — the command palette needs it even when Home has never
+   *  been opened. */
+  saved: ResumeHostScan[] | null
+  savedError: string | null
+  savedScanning: boolean
+  /** Re-scan from the first page, clearing any hosts latched as refused — the Rescan button. */
+  rescanSaved: () => void
+  /** Ask for the next page after what's already loaded — the "Load N more" button. */
+  loadMoreSaved: () => void
   /** Attach a terminal tab to this tmux session on this host. */
   onAttach: (connectionId: string, session: string) => void
   /** Open a new agent tab resuming this saved transcript. `label` titles the tab. */
@@ -123,83 +132,20 @@ interface SavedRow {
   status: SavedSessionStatus
 }
 
-/**
- * Fold a newly fetched page into the pages already on screen.
- *
- * Keyed by transcript id and first-wins, which is not defensive tidying: the host
- * orders by mtime, so a live agent writing to its transcript between two page
- * requests moves that row to the top and pushes the boundary down — page two then
- * repeats a row page one already showed. The reverse also happens and is accepted:
- * a row can be stepped over, and it is by definition an older one, which Rescan
- * recovers. Counts and errors come from the newer response, since they describe the
- * host as it is now; rows are kept because they were true when they were read.
- */
-function mergeSaved(prev: ResumeHostScan[], next: ResumeHostScan[]): ResumeHostScan[] {
-  const before = new Map(prev.map((h) => [h.connectionId, h]))
-  return next.map((h) => {
-    const had = before.get(h.connectionId)
-    if (!had) return h
-    const seen = new Set(had.sessions.map((s) => s.id))
-    return { ...h, sessions: [...had.sessions, ...h.sessions.filter((s) => !seen.has(s.id))] }
-  })
-}
-
 export function AgentInbox({
-  active,
   hosts,
   error,
   scanning,
   rescan,
+  saved,
+  savedError,
+  savedScanning,
+  rescanSaved,
+  loadMoreSaved,
   onAttach,
   onResume,
   onNewAgent
 }: Props) {
-  const [saved, setSaved] = useState<ResumeHostScan[] | null>(null)
-  const [savedError, setSavedError] = useState<string | null>(null)
-  const [savedScanning, setSavedScanning] = useState(false)
-  const [savedOffset, setSavedOffset] = useState(0)
-  const savedBusy = useRef(false)
-  const savedOnce = useRef(false)
-
-  const scanSaved = useCallback(
-    async (opts?: { retryFailed?: boolean; more?: boolean }): Promise<void> => {
-      if (savedBusy.current) return
-      savedBusy.current = true
-      setSavedScanning(true)
-      // Rescan starts over rather than reloading every page: the pages are a trail of
-      // where the list was, and a fresh look at a host is the thing the button offers.
-      const offset = opts?.more ? savedOffset + RESUME_LIMIT : 0
-      try {
-        const page = await window.api.resumeScan({ retryFailed: opts?.retryFailed, offset })
-        setSaved((prev) => (offset > 0 && prev ? mergeSaved(prev, page) : page))
-        setSavedOffset(offset)
-        setSavedError(null)
-      } catch (e) {
-        setSavedError(e instanceof Error ? e.message : String(e))
-      } finally {
-        savedBusy.current = false
-        setSavedScanning(false)
-      }
-    },
-    [savedOffset]
-  )
-
-  // Once when the pane first opens, and then only when asked — deliberately NOT on
-  // the ten-second poll the live list runs on. A running agent's status changes from
-  // second to second; a transcript on disk changes when somebody works in it. This
-  // sweep reads the newest sixty files on every host, so paying for it repeatedly
-  // would cost real time on a host with a thousand of them to tell the user nothing
-  // new.
-  //
-  // Latched on a ref, not on `saved === null`: the effect is what sets `saved`, so
-  // reading it here would re-run this on every response and stop only because the
-  // value had stopped being null — a latch made out of a coincidence.
-  useEffect(() => {
-    if (!active || savedOnce.current) return
-    savedOnce.current = true
-    void scanSaved()
-  }, [active, scanSaved])
-
   // Every tmux session on every host, agent-looking or not. There is no filter:
   // whether a session "looks like an agent" is a guess from its name, and a guess
   // has no business hiding a running process from the one view that lists them.
@@ -535,7 +481,7 @@ export function AgentInbox({
                 </span>
               )}
               <button
-                onClick={() => void scanSaved({ retryFailed: true })}
+                onClick={() => rescanSaved()}
                 disabled={savedScanning}
                 className="ml-auto rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
               >
@@ -654,7 +600,7 @@ export function AgentInbox({
               {savedRows.length < savedTotal && (
                 <div className="px-3 pt-1">
                   <button
-                    onClick={() => void scanSaved({ more: true })}
+                    onClick={() => loadMoreSaved()}
                     disabled={savedScanning}
                     className="rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
                   >
