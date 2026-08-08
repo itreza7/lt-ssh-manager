@@ -1,5 +1,5 @@
 appId: com.reza.sshmanager
-productName: SSH Manager
+productName: Claude SSH Manager
 directories:
   buildResources: build
   output: release

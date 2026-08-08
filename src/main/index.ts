@@ -46,7 +46,7 @@ function createWindow(): void {
     // Opaque everywhere but macOS, where an opaque native backing would paint
     // over the vibrancy layer before the (transparent) page ever loads.
     backgroundColor: isMac ? '#00000000' : '#0c0f15',
-    title: 'SSH Manager',
+    title: 'Claude SSH Manager',
     icon: appIcon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

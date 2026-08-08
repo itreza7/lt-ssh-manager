@@ -120,7 +120,7 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
 
       {/* draggable title */}
       <div className="drag flex flex-1 items-center justify-center">
-        <span className="select-none font-mono text-[11px] tracking-[0.16em] text-faint">SSH MANAGER</span>
+        <span className="select-none font-mono text-[11px] tracking-[0.16em] text-faint">CLAUDE SSH MANAGER</span>
       </div>
 
       {/* settings */}

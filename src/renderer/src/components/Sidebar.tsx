@@ -103,7 +103,7 @@ export function Sidebar({
         </div>
         <div className="leading-tight">
           <div className="font-mono text-[13px] font-semibold tracking-[0.14em] text-fg">
-            SSH<span className="text-signal">·</span>MANAGER
+            CLAUDE<span className="text-signal">·</span>SSH
           </div>
           <div className="eyebrow !text-[9px]">control deck</div>
         </div>
