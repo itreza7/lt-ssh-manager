@@ -112,6 +112,14 @@ export function worktreeListScript(dir: string): string {
 }
 
 /**
+ * One worktree as this parser produces it — `RemoteWorktree` minus
+ * `connectionId`, because this file is host-agnostic and has no idea which
+ * connection `text` came from. The IPC handler that calls parseWorktreeScan
+ * stamps that field on afterward — see types.ts on RemoteWorktree.
+ */
+type ScannedWorktree = Omit<RemoteWorktree, 'connectionId'>
+
+/**
  * Read the scan output into one entry per worktree.
  *
  * Written to degrade rather than to trust, like the agent scan: an attribute this
@@ -120,7 +128,9 @@ export function worktreeListScript(dir: string): string {
  * `branch`, `bare`, `detached`, `locked` and `prunable` may follow in any order,
  * the last two optionally carrying a free-text reason.
  */
-export function parseWorktreeScan(text: string): WorktreeScan {
+export function parseWorktreeScan(
+  text: string
+): Omit<WorktreeScan, 'worktrees'> & { worktrees: ScannedWorktree[] } {
   const cut = text.indexOf(WT_DATA_MARK)
   const header = cut === -1 ? text : text.slice(0, cut)
   const raw = cut === -1 ? '' : text.slice(cut + WT_DATA_MARK.length)
@@ -149,7 +159,7 @@ export function parseWorktreeScan(text: string): WorktreeScan {
   const recordSep = zeroed ? '\0\0' : '\n\n'
   const fieldSep = zeroed ? '\0' : '\n'
 
-  const worktrees: RemoteWorktree[] = []
+  const worktrees: ScannedWorktree[] = []
   for (const record of payload.split(recordSep)) {
     const fields = record.split(fieldSep).filter((f) => f.length > 0)
     if (fields.length === 0) continue

@@ -34,6 +34,7 @@ import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeResumeSessionName, claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
+import { useAgentSessions } from './hooks/useAgentSessions'
 
 const SETTINGS_TAB_ID = 'settings'
 const INBOX_TAB_ID = 'inbox'
@@ -599,6 +600,18 @@ export default function App() {
     showLeaf(INBOX_TAB_ID)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Lifted out of AgentInbox so the live-agent poll keeps running whichever tab
+  // is visible — hooks can't be called conditionally, so this runs on every
+  // render and gates itself internally on the same "has the inbox ever been
+  // opened this session" condition that decides whether AgentInbox is mounted
+  // at all (see the inbox mount below).
+  const {
+    hosts: agentHosts,
+    error: agentScanError,
+    scanning: agentScanning,
+    rescan: rescanAgents
+  } = useAgentSessions(tabs.some((t) => t.kind === 'inbox'))
 
   useEffect(() => {
     void (async () => {
@@ -1541,6 +1554,10 @@ export default function App() {
               <div className={`overflow-hidden ${paneRing(INBOX_TAB_ID)}`} {...paneProps(INBOX_TAB_ID)}>
                 <AgentInbox
                   active={shownLeaves.includes(INBOX_TAB_ID)}
+                  hosts={agentHosts}
+                  error={agentScanError}
+                  scanning={agentScanning}
+                  rescan={rescanAgents}
                   onAttach={attachFromInbox}
                   onResume={resumeFromInbox}
                 />

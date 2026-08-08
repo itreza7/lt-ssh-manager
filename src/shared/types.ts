@@ -63,6 +63,12 @@ export interface TmuxSession {
  * of a session's working/waiting/idle status is explained.
  */
 export interface AgentSession {
+  /**
+   * Which saved connection this session was found on. Stamped by the IPC
+   * handler right after a scan returns — parseAgentScan() itself is a
+   * host-agnostic pure function and never sees a connection id.
+   */
+  connectionId: string
   /** tmux session name, exactly as tmux spells it — this is what attach targets. */
   session: string
   /** Working directory of the active window's active pane; '' if tmux gave none. */
@@ -73,6 +79,13 @@ export interface AgentSession {
   attached: boolean
   /** Seconds since the session last produced output, on the SERVER's clock. */
   idleSeconds: number | null
+  /**
+   * The SERVER-clock instant (epoch seconds) the session last produced output —
+   * the same fact `idleSeconds` measures, as an absolute point in time rather
+   * than an age, so a row does not need to be re-diffed against a fresh clock
+   * to compare two sessions across polls. Null exactly when `idleSeconds` is.
+   */
+  lastActiveAt: number | null
   /**
    * A window in this session rang the bell and no client has looked since. tmux
    * clears the flag when a client views the window, so this means "unread"
@@ -112,6 +125,12 @@ export interface AgentHostScan {
  * rather than filled in with a plausible-looking default.
  */
 export interface ResumeSession {
+  /**
+   * Which saved connection this transcript lives on. Stamped by the IPC
+   * handler right after a scan returns — parseResumeScan() itself is a
+   * host-agnostic pure function and never sees a connection id.
+   */
+  connectionId: string
   /** The transcript's filename stem, which is the id `--resume` takes. */
   id: string
   /**
@@ -138,6 +157,12 @@ export interface ResumeSession {
   dirLossy: boolean
   /** Seconds since the transcript was last written, on the SERVER's clock. */
   ageSeconds: number | null
+  /**
+   * The SERVER-clock instant (epoch seconds) the transcript was last written —
+   * the same fact `ageSeconds` measures, as an absolute point in time rather
+   * than an age. Null exactly when `ageSeconds` is.
+   */
+  lastWrittenAt: number | null
   /**
    * Size of the transcript in bytes, or null where `stat` could not say.
    *
@@ -195,6 +220,12 @@ export interface ResumeHostScan {
 
 /** One entry of `git worktree list --porcelain` on a remote host. */
 export interface RemoteWorktree {
+  /**
+   * Which saved connection this worktree lives on. Stamped by the IPC handler
+   * right after a scan returns — parseWorktreeScan() itself is a host-agnostic
+   * pure function and never sees a connection id.
+   */
+  connectionId: string
   /** Absolute path on the host. */
   path: string
   /** Commit it is on. Empty only when git declined to say. */

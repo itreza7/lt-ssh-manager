@@ -513,7 +513,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             deadlineMs: 10000,
             unattended: true
           })
-          return { ...base, sessions: parseAgentScan(res.stdout).sessions }
+          // parseAgentScan is host-agnostic and never sees a connection id;
+          // stamped on here, once, right where the scan is attributed to a host.
+          const sessions = parseAgentScan(res.stdout).sessions.map((s) => ({
+            ...s,
+            connectionId: connection.id
+          }))
+          return { ...base, sessions }
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e)
           if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)
@@ -609,6 +615,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             unattended: true
           })
           const scan = parseResumeScan(res.stdout)
+          // parseResumeScan is host-agnostic and never sees a connection id;
+          // stamped on here, once, right where the scan is attributed to a host.
+          const sessions = scan.sessions.map((s) => ({ ...s, connectionId: connection.id }))
           // The end marker is missing. Rows still render — an incomplete page's rows
           // are each individually valid, and dropping sixty good ones to report one
           // bad ending would be the worse trade — but the completeness claim is void,
@@ -617,10 +626,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
             return {
               ...base,
               ...scan,
+              sessions,
               error: `The saved-session list came back incomplete (exit ${res.code ?? 'signal'})`
             }
           }
-          return { ...base, ...scan }
+          return { ...base, ...scan, sessions }
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e)
           if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)
@@ -1102,7 +1112,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         MAX_WORKTREES * 4096 + MAX_BRANCHES * 256 + 65536
       )
       const scan = parseWorktreeScan(out.toString('utf-8'))
-      return { ...scan, worktrees: scan.worktrees.slice(0, MAX_WORKTREES) }
+      // parseWorktreeScan is host-agnostic and never sees a connection id;
+      // stamped on here, once, right where the scan is attributed to a host.
+      return {
+        ...scan,
+        worktrees: scan.worktrees
+          .slice(0, MAX_WORKTREES)
+          .map((w) => ({ ...w, connectionId: args.connectionId }))
+      }
     }
   )
 
