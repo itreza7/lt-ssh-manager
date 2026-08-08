@@ -96,7 +96,7 @@ export function EditorView({ connectionId, password, path, name, active, setting
   if (status === 'loading') {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted">
-        <span className="animate-glow mr-2 text-signal">⟳</span> Opening {name}…
+        <span className="animate-glow mr-2 text-accent">⟳</span> Opening {name}…
       </div>
     )
   }
@@ -133,7 +133,7 @@ export function EditorView({ connectionId, password, path, name, active, setting
                   key={m}
                   onClick={() => setMode(m)}
                   className={`rounded-md px-2.5 py-1 capitalize transition-colors ${
-                    mode === m ? 'bg-signal/20 text-signal' : 'text-muted hover:text-fg'
+                    mode === m ? 'bg-accent/20 text-accent' : 'text-muted hover:text-fg'
                   }`}
                 >
                   {m}
@@ -153,7 +153,7 @@ export function EditorView({ connectionId, password, path, name, active, setting
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-sm text-muted">
-              <span className="animate-glow mr-2 text-signal">⟳</span> Loading{' '}
+              <span className="animate-glow mr-2 text-accent">⟳</span> Loading{' '}
               {mode === 'preview' ? 'preview' : 'editor'}…
             </div>
           }

@@ -108,7 +108,7 @@ function PromptDialog({
         onKeyDown={(e) => {
           if (e.key === 'Enter') submit()
         }}
-        className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-signal/60"
+        className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent/60"
       />
     </Modal>
   )
@@ -163,7 +163,7 @@ function ChmodDialog({
                     onClick={() => toggle(g.shift, f.bit)}
                     className={`grid h-9 w-9 place-items-center rounded-md border font-mono text-sm transition-colors ${
                       on
-                        ? 'border-signal/50 bg-signal/15 text-signal'
+                        ? 'border-accent/50 bg-accent/15 text-accent'
                         : 'border-line text-faint hover:border-faint'
                     }`}
                   >
@@ -433,7 +433,7 @@ export function FileManager({
   if (status === 'connecting') {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted">
-        <span className="animate-glow mr-2 text-signal">⟳</span> Opening SFTP channel…
+        <span className="animate-glow mr-2 text-accent">⟳</span> Opening SFTP channel…
       </div>
     )
   }
@@ -489,7 +489,7 @@ export function FileManager({
               }
             }}
             placeholder="/var/www  ·  ~/  ·  Enter to go"
-            className="mx-2 min-w-0 flex-1 rounded-lg border border-signal/60 bg-ink/60 px-2.5 py-1 font-mono text-[12px] text-fg outline-none placeholder:text-faint"
+            className="mx-2 min-w-0 flex-1 rounded-lg border border-accent/60 bg-ink/60 px-2.5 py-1 font-mono text-[12px] text-fg outline-none placeholder:text-faint"
           />
         ) : (
           <div
@@ -503,7 +503,7 @@ export function FileManager({
                 <button
                   onClick={() => navigate(c.path)}
                   className={`rounded px-1 py-0.5 transition-colors hover:bg-elevated hover:text-fg ${
-                    i === crumbs.length - 1 ? 'text-signal' : 'text-muted'
+                    i === crumbs.length - 1 ? 'text-accent' : 'text-muted'
                   }`}
                 >
                   {c.label}
@@ -545,7 +545,7 @@ export function FileManager({
           onClick={() => setShowHidden((v) => !v)}
           title="Toggle hidden files"
           className={`rounded-md border px-2 py-1 text-xs transition-colors ${
-            showHidden ? 'border-signal/50 bg-signal/15 text-signal' : 'border-line text-muted hover:border-faint'
+            showHidden ? 'border-accent/50 bg-accent/15 text-accent' : 'border-line text-muted hover:border-faint'
           }`}
         >
           .hidden
@@ -592,7 +592,7 @@ export function FileManager({
                     setMenu({ x: ev.clientX, y: ev.clientY, entry: e })
                   }}
                   className={`cursor-pointer border-b border-line-soft/60 transition-colors ${
-                    sel ? 'bg-signal/12' : 'hover:bg-elevated/40'
+                    sel ? 'bg-accent/12' : 'hover:bg-elevated/40'
                   }`}
                 >
                   <td className="flex items-center gap-2.5 py-2 pl-4 pr-3">
@@ -627,7 +627,7 @@ export function FileManager({
         {loading && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-ink/55 backdrop-blur-[1px]">
             <div className="flex items-center gap-2.5 rounded-lg border border-line bg-panel/90 px-4 py-2.5 text-sm text-muted shadow-lg">
-              <span className="animate-glow text-signal">⟳</span>
+              <span className="animate-glow text-accent">⟳</span>
               Loading…
             </div>
           </div>
@@ -677,7 +677,7 @@ export function FileManager({
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-black/40">
                   <div
-                    className="h-full rounded-full bg-signal transition-[width] duration-150"
+                    className="h-full rounded-full bg-accent transition-[width] duration-150"
                     style={{ width: `${pct}%` }}
                   />
                 </div>
@@ -689,10 +689,10 @@ export function FileManager({
 
       {/* drag overlay */}
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-30 m-2 flex items-center justify-center rounded-xl border-2 border-dashed border-signal/60 bg-signal/10 backdrop-blur-sm">
+        <div className="pointer-events-none absolute inset-0 z-30 m-2 flex items-center justify-center rounded-xl border-2 border-dashed border-accent/60 bg-accent/10 backdrop-blur-sm">
           <div className="text-center">
-            <div className="text-2xl text-signal">⤓</div>
-            <div className="mt-1 text-sm text-signal">Drop files to upload to {cwd}</div>
+            <div className="text-2xl text-accent">⤓</div>
+            <div className="mt-1 text-sm text-accent">Drop files to upload to {cwd}</div>
           </div>
         </div>
       )}
@@ -796,7 +796,7 @@ function ToolBtn({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="grid h-8 w-8 place-items-center rounded-md border border-line text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-30"
+      className="grid h-8 w-8 place-items-center rounded-md border border-line text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-30"
     >
       {children}
     </button>
@@ -822,7 +822,7 @@ function Th({
       className={`cursor-pointer px-3 py-2 font-mono text-[11px] font-normal uppercase tracking-wider text-faint transition-colors hover:text-muted ${className}`}
     >
       {children}
-      {sort.key === col && <span className="ml-1 text-signal">{sort.dir === 1 ? '▲' : '▼'}</span>}
+      {sort.key === col && <span className="ml-1 text-accent">{sort.dir === 1 ? '▲' : '▼'}</span>}
     </th>
   )
 }

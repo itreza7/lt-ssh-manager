@@ -104,7 +104,7 @@ export function CommandPalette({
       key: `host:${c.id}`,
       label: c.name,
       sub: `${c.username ? `${c.username}@` : ''}${c.host}:${c.port}`,
-      icon: <span className="text-signal">▦</span>,
+      icon: <span className="text-accent">▦</span>,
       run: () => selectConnection(c.id)
     }))
   }, [connections, q, selectConnection])
@@ -153,7 +153,7 @@ export function CommandPalette({
       key: `saved:${r.connectionId}:${r.s.id}`,
       label: r.label,
       sub: `${r.host} · ${shortPath(r.s.dir ?? '')}`,
-      icon: <span className="text-signal">↺</span>,
+      icon: <span className="text-accent">↺</span>,
       run: () => resumeFromInbox(r.connectionId, r.s, r.label)
     }))
   }, [saved, q, resumeFromInbox])
@@ -165,7 +165,7 @@ export function CommandPalette({
       key: 'action:home',
       label,
       sub: 'Every agent, every host',
-      icon: <span className="text-signal">◎</span>,
+      icon: <span className="text-accent">◎</span>,
       run: () => openInbox()
     }
   }, [q, openInbox])
@@ -223,7 +223,7 @@ export function CommandPalette({
         onMouseEnter={() => setCursor(i)}
         onClick={() => activate(i)}
         className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors ${
-          active ? 'bg-signal-soft/40' : 'hover:bg-elevated/50'
+          active ? 'bg-accent-soft/40' : 'hover:bg-elevated/50'
         }`}
       >
         <span className="grid w-4 shrink-0 place-items-center">{item.icon}</span>
@@ -252,7 +252,7 @@ export function CommandPalette({
           }}
           onKeyDown={onInputKeyDown}
           placeholder="Jump to a host, tab, agent, or session…"
-          className="w-full border-b border-line bg-transparent px-4 py-3.5 text-sm text-fg outline-none focus:border-signal/60 placeholder:text-faint"
+          className="w-full border-b border-line bg-transparent px-4 py-3.5 text-sm text-fg outline-none focus:border-accent/60 placeholder:text-faint"
         />
 
         <div className="max-h-[60vh] overflow-y-auto p-2">

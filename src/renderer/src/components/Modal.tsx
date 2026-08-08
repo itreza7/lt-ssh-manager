@@ -45,7 +45,7 @@ export function Button({
   const styles = {
     default: 'border border-line bg-elevated/60 text-fg/85 hover:border-faint hover:bg-elevated',
     primary:
-      'bg-signal text-ink font-semibold hover:shadow-[0_0_22px_-4px_var(--color-signal)] hover:brightness-110',
+      'bg-accent text-ink font-semibold hover:shadow-[0_0_22px_-4px_var(--color-accent)] hover:brightness-110',
     danger: 'border border-danger/40 bg-danger/15 text-danger hover:bg-danger/25'
   }[variant]
   return (

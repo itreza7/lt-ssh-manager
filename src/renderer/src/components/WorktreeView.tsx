@@ -212,14 +212,14 @@ export function WorktreeView({
           <button
             onClick={() => (creating ? setCreating(false) : openForm())}
             disabled={!main || status === 'loading'}
-            className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:opacity-40"
+            className="rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1 text-[11px] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
           >
             {creating ? 'Cancel' : 'New worktree'}
           </button>
           <button
             onClick={() => void load(true)}
             disabled={refreshing}
-            className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+            className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
           >
             {refreshing ? 'Reading…' : 'Refresh'}
           </button>
@@ -248,7 +248,7 @@ export function WorktreeView({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="dt4"
-                className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-signal/50"
+                className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent/50"
               />
               {/* Shown up front, because where a worktree lands is the one thing
                   this form decides that the user cannot undo by editing a field. */}
@@ -263,7 +263,7 @@ export function WorktreeView({
                   type="radio"
                   checked={mode === 'new'}
                   onChange={() => setMode('new')}
-                  className="accent-signal"
+                  className="accent-accent"
                 />
                 New branch
               </label>
@@ -280,7 +280,7 @@ export function WorktreeView({
                   checked={mode === 'existing'}
                   disabled={free.length === 0}
                   onChange={() => setMode('existing')}
-                  className="accent-signal"
+                  className="accent-accent"
                 />
                 Existing branch
               </label>
@@ -297,7 +297,7 @@ export function WorktreeView({
                       setBranch(e.target.value)
                     }}
                     placeholder="feature/thing"
-                    className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-signal/50"
+                    className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent/50"
                   />
                 </label>
                 <label className="block">
@@ -307,7 +307,7 @@ export function WorktreeView({
                     onChange={(e) => setFrom(e.target.value)}
                     placeholder="main"
                     list="lt-wt-branches"
-                    className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-signal/50"
+                    className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent/50"
                   />
                   <datalist id="lt-wt-branches">
                     {(scan?.branches ?? []).map((b) => (
@@ -324,7 +324,7 @@ export function WorktreeView({
                 <select
                   value={existing}
                   onChange={(e) => setExisting(e.target.value)}
-                  className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-signal/50"
+                  className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent/50"
                 >
                   {free.map((b) => (
                     <option key={b} value={b}>
@@ -352,7 +352,7 @@ export function WorktreeView({
             <button
               onClick={() => void submit()}
               disabled={working === 'create' || !name}
-              className="rounded-md border border-signal/40 bg-signal/10 px-3 py-1 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:opacity-40"
+              className="rounded-md border border-accent/40 bg-accent/10 px-3 py-1 text-[11px] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
             >
               {working === 'create' ? 'Creating…' : 'Create worktree'}
             </button>
@@ -426,7 +426,7 @@ export function WorktreeView({
                   )}
                   <button
                     onClick={() => onOpenClaude(w.path)}
-                    className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
+                    className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent/20"
                     title="Start Claude Code in this worktree"
                   >
                     Claude here

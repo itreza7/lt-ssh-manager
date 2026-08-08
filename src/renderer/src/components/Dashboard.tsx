@@ -101,7 +101,7 @@ function IconButton({
       onClick={onClick}
       disabled={disabled}
       className={`grid h-7 w-7 place-items-center rounded-md border border-line text-xs text-muted transition-colors disabled:opacity-40 ${
-        danger ? 'hover:border-danger/50 hover:text-danger' : 'hover:border-signal/40 hover:text-signal'
+        danger ? 'hover:border-danger/50 hover:text-danger' : 'hover:border-accent/40 hover:text-accent'
       }`}
     >
       {children}
@@ -121,8 +121,8 @@ const TMUX_PASSTHROUGH = 'set -g allow-passthrough all'
 const CLAUDE_INSTALL = 'curl -fsSL https://claude.ai/install.sh | bash'
 
 /** A remote file's contents, verbatim — what we read, or what we're about to write. */
-function JsonBlock({ label, body, tone }: { label: string; body: string; tone?: 'signal' | 'danger' }) {
-  const edge = tone === 'signal' ? 'border-signal/30' : tone === 'danger' ? 'border-danger/30' : 'border-line'
+function JsonBlock({ label, body, tone }: { label: string; body: string; tone?: 'accent' | 'danger' }) {
+  const edge = tone === 'accent' ? 'border-accent/30' : tone === 'danger' ? 'border-danger/30' : 'border-line'
   return (
     <div className="min-w-0">
       <div className="eyebrow mb-1.5">{label}</div>
@@ -140,7 +140,7 @@ function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => 
     <button
       onClick={onClick}
       disabled={loading}
-      className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-40"
+      className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-40"
     >
       <span className={loading ? 'animate-glow' : ''}>⟳</span>
       {loading ? 'syncing' : 'refresh'}
@@ -343,10 +343,10 @@ export function Dashboard({
             <div className="eyebrow mb-2 flex items-center gap-2.5">
               Connection
               {!statsError && stats && (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-signal/12 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-signal">
-                  <span className="h-1.5 w-1.5 rounded-full bg-signal dot-glow" />
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-accent/12 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-accent">
+                  <span className="h-1.5 w-1.5 rounded-full bg-accent dot-glow" />
                   online
-                  {stats.probeMs !== undefined && <span className="text-signal/60">· {stats.probeMs}ms</span>}
+                  {stats.probeMs !== undefined && <span className="text-accent/60">· {stats.probeMs}ms</span>}
                 </span>
               )}
               {statsError && (
@@ -360,7 +360,7 @@ export function Dashboard({
             <p className="mt-1.5 font-mono text-sm text-muted">
               {c.username ? `${c.username}@` : ''}
               {c.host}
-              <span className="text-signal">:{c.port}</span>
+              <span className="text-accent">:{c.port}</span>
               {stats?.hostname && stats.hostname !== c.host && (
                 <span className="text-faint"> · {stats.hostname}</span>
               )}
@@ -385,10 +385,10 @@ export function Dashboard({
 
         {openSessions > 0 && (
           <div
-            className="animate-rise mb-6 flex items-center gap-2.5 rounded-lg border border-signal/25 bg-signal-soft/30 px-4 py-2.5 text-sm text-signal"
+            className="animate-rise mb-6 flex items-center gap-2.5 rounded-lg border border-accent/25 bg-accent-soft/30 px-4 py-2.5 text-sm text-accent"
             style={{ animationDelay: '40ms' }}
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-signal dot-glow" />
+            <span className="h-1.5 w-1.5 rounded-full bg-accent dot-glow" />
             {openSessions} live terminal session{openSessions > 1 ? 's' : ''} on this host.
           </div>
         )}
@@ -489,7 +489,7 @@ export function Dashboard({
               onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && createSession()}
               placeholder="new session name  ·  blank = main"
-              className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+              className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
             />
             <Button variant="primary" onClick={createSession}>
               New ▸
@@ -529,7 +529,7 @@ export function Dashboard({
                           if (e.key === 'Escape') setEditing(null)
                         }}
                         onBlur={() => commitRename(s.name)}
-                        className="w-full rounded-md border border-signal/50 bg-ink/80 px-2 py-1 font-mono text-sm text-fg outline-none"
+                        className="w-full rounded-md border border-accent/50 bg-ink/80 px-2 py-1 font-mono text-sm text-fg outline-none"
                       />
                     ) : (
                       <>
@@ -544,8 +544,8 @@ export function Dashboard({
                             </span>
                           )}
                           {s.attached && (
-                            <span className="flex items-center gap-1 rounded-full bg-signal/15 px-2 py-0.5 text-[10px] font-medium text-signal">
-                              <span className="h-1 w-1 rounded-full bg-signal" />
+                            <span className="flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
+                              <span className="h-1 w-1 rounded-full bg-accent" />
                               attached
                             </span>
                           )}
@@ -634,7 +634,7 @@ export function Dashboard({
                     label="Sign-in"
                     value={
                       runtime.loggedIn === true ? (
-                        <span className="text-signal">
+                        <span className="text-accent">
                           signed in{runtime.authMethod ? ` · ${runtime.authMethod}` : ''}
                         </span>
                       ) : runtime.loggedIn === false ? (
@@ -713,7 +713,7 @@ export function Dashboard({
           <div className="mt-4 flex items-center justify-between gap-4">
             <div className="min-w-0 font-mono text-xs">
               {!hook && <span className="text-faint">not checked</span>}
-              {hook?.installed && <span className="text-signal">● hook installed</span>}
+              {hook?.installed && <span className="text-accent">● hook installed</span>}
               {hook && !hook.installed && hook.present && (
                 <span className="text-amber">● older hook installed — update it</span>
               )}
@@ -814,7 +814,7 @@ export function Dashboard({
             <JsonBlock label="Now" body={hook.before} />
             <JsonBlock
               label="After"
-              tone={hookAction === 'install' ? 'signal' : 'danger'}
+              tone={hookAction === 'install' ? 'accent' : 'danger'}
               body={hookAction === 'install' ? hook.install : hook.uninstall}
             />
           </div>

@@ -19,7 +19,7 @@ export function SplitControls({ count, direction, onSingle, onSplit }: Props) {
   const btn = (active: boolean): string =>
     `grid h-6 w-6 place-items-center rounded-md border transition-colors ${
       active
-        ? 'border-signal/50 bg-signal/15 text-signal'
+        ? 'border-accent/50 bg-accent/15 text-accent'
         : 'border-transparent text-faint hover:bg-elevated/60 hover:text-fg'
     }`
 

@@ -536,12 +536,19 @@ export interface EditorSettings {
   markdownPreview: boolean
 }
 
+/**
+ * Which theme the app renders in. These are exactly Electron's three
+ * `nativeTheme.themeSource` values — no mapping needed between the two.
+ */
+export type Theme = 'system' | 'light' | 'dark'
+
 export interface AppSettings {
   terminal: TerminalSettings
   editor: EditorSettings
   connectRetries: number
   /** Whether the connections sidebar is collapsed to its narrow rail. */
   sidebarCollapsed: boolean
+  theme: Theme
   /**
    * Schema version of the saved settings file. Not user-facing — it exists so a
    * changed default can be applied to an install that already has a file, and
@@ -556,6 +563,7 @@ export interface SettingsPatch {
   editor?: Partial<EditorSettings>
   connectRetries?: number
   sidebarCollapsed?: boolean
+  theme?: Theme
 }
 
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
@@ -596,6 +604,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   editor: DEFAULT_EDITOR_SETTINGS,
   connectRetries: 4,
   sidebarCollapsed: false,
+  theme: 'system',
   version: SETTINGS_VERSION
 }
 

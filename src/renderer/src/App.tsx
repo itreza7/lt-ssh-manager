@@ -333,7 +333,7 @@ export default function App() {
             : t.title
 
   const leafIcon = (t: Tab, lit: boolean): ReactNode => {
-    const c = lit ? 'text-signal' : 'text-faint'
+    const c = lit ? 'text-accent' : 'text-faint'
     if (t.kind === 'dashboard') return <span className={c}>▦</span>
     if (t.kind === 'settings') return <span className={c}>⚙</span>
     if (t.kind === 'inbox') return <span className={c}>◎</span>
@@ -534,7 +534,7 @@ export default function App() {
   // Pane outline (+ hover group for in-pane tools): brighter for the focused pane.
   const paneRing = (id: string): string => {
     if (!isSplit) return ''
-    const ring = id === activeTabId ? 'ring-2 ring-inset ring-signal/60' : 'ring-1 ring-inset ring-line/70'
+    const ring = id === activeTabId ? 'ring-2 ring-inset ring-accent/60' : 'ring-1 ring-inset ring-line/70'
     return `group/pane ${ring}`
   }
 
@@ -590,7 +590,8 @@ export default function App() {
       terminal: DEFAULTS.terminal,
       editor: DEFAULTS.editor,
       connectRetries: DEFAULTS.connectRetries,
-      sidebarCollapsed: DEFAULTS.sidebarCollapsed
+      sidebarCollapsed: DEFAULTS.sidebarCollapsed,
+      theme: DEFAULTS.theme
     })
   }, [])
 
@@ -1472,7 +1473,7 @@ export default function App() {
                         setDragOverId(null)
                       }}
                       className={`group flex shrink-0 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
-                        dragOverId === view.id ? 'ring-2 ring-inset ring-signal/70' : ''
+                        dragOverId === view.id ? 'ring-2 ring-inset ring-accent/70' : ''
                       } ${
                         active
                           ? 'border-line bg-ink text-fg'
@@ -1480,7 +1481,7 @@ export default function App() {
                       }`}
                     >
                       {split ? (
-                        <span className={active ? 'text-signal' : 'text-faint'} title="split tab">
+                        <span className={active ? 'text-accent' : 'text-faint'} title="split tab">
                           <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
                             <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
                             {view.direction === 'columns' ? (
@@ -1540,8 +1541,8 @@ export default function App() {
           <div ref={contentRef} className="relative min-h-0 flex-1">
             {views.length === 0 && (
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-                <div className="grid h-12 w-12 place-items-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
-                  <span className="h-2.5 w-2.5 rounded-full bg-signal dot-glow text-signal" />
+                <div className="grid h-12 w-12 place-items-center rounded-xl bg-accent/10 ring-1 ring-accent/25">
+                  <span className="h-2.5 w-2.5 rounded-full bg-accent dot-glow text-accent" />
                 </div>
                 <p className="text-sm text-muted">Open Home in the sidebar to see every agent, on every host.</p>
                 <p className="eyebrow">no active session</p>
@@ -1764,7 +1765,7 @@ export default function App() {
                     key={`empty-${activeView.id}-${i}`}
                     onMouseDown={() => focusPane(i)}
                     className={`absolute overflow-hidden ${
-                      i === activeView.focused ? 'ring-2 ring-inset ring-signal/60' : 'ring-1 ring-inset ring-line/70'
+                      i === activeView.focused ? 'ring-2 ring-inset ring-accent/60' : 'ring-1 ring-inset ring-line/70'
                     }`}
                     style={{ position: 'absolute', visibility: 'visible', ...paneRect(i) }}
                   >

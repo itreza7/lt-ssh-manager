@@ -5,6 +5,7 @@ import {
   ipcMain,
   clipboard,
   dialog,
+  nativeTheme,
   shell,
   BrowserWindow,
   Notification,
@@ -347,7 +348,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   // ---- settings (persisted to userData/settings.json) ----
   ipcMain.handle('settings:get', () => settingsStore.getAll())
-  ipcMain.handle('settings:update', (_e, patch: SettingsPatch) => settingsStore.update(patch))
+  ipcMain.handle('settings:update', (_e, patch: SettingsPatch) => {
+    const updated = settingsStore.update(patch)
+    if (patch.theme) nativeTheme.themeSource = patch.theme
+    return updated
+  })
 
   ipcMain.handle('workspace:get', () => workspaceStore.get())
   ipcMain.on('workspace:set', (_e, ws: Workspace) => workspaceStore.set(ws))

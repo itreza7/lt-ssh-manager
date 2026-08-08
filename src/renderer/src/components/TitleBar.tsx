@@ -76,7 +76,7 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
       {/* brand mark — the native traffic lights already sit at the far left on macOS */}
       {!isMac && (
         <div className="no-drag flex items-center gap-2 pr-1">
-          <span className="h-2 w-2 rounded-full bg-signal dot-glow text-signal" />
+          <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
         </div>
       )}
 
@@ -101,7 +101,7 @@ export function TitleBar({ onNewConnection, onOpenSettings }: Props) {
                   <div key={item.label}>
                     <button
                       onClick={item.run}
-                      className="flex w-full items-center justify-between gap-6 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg/85 transition-colors hover:bg-signal/15 hover:text-signal"
+                      className="flex w-full items-center justify-between gap-6 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg/85 transition-colors hover:bg-accent/15 hover:text-accent"
                     >
                       <span>{item.label}</span>
                       {item.accel && (

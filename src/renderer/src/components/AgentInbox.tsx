@@ -316,7 +316,7 @@ export function AgentInbox({
             // hammering them again by another name.
             onClick={() => rescan()}
             disabled={scanning}
-            className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+            className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
           >
             {scanning ? 'Scanning…' : 'Refresh'}
           </button>
@@ -342,7 +342,7 @@ export function AgentInbox({
                   setNewAgentHost(e.target.value)
                   setNewAgentError(null)
                 }}
-                className="rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-xs text-fg outline-none transition-colors focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+                className="rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
               >
                 <option value="">Host…</option>
                 {hostOptions.map((h) => (
@@ -359,12 +359,12 @@ export function AgentInbox({
                 }}
                 onKeyDown={(e) => e.key === 'Enter' && submitNewAgent()}
                 placeholder="/absolute/path"
-                className="min-w-0 flex-1 rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+                className="min-w-0 flex-1 rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
               />
               <button
                 onClick={submitNewAgent}
                 disabled={!newAgentHost || !newAgentDir.trim()}
-                className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1.5 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
+                className="rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[11px] text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
               >
                 Start ▸
               </button>
@@ -386,7 +386,7 @@ export function AgentInbox({
           ) : (
             <button
               onClick={() => setNewAgentOpen(true)}
-              className="flex w-full items-center gap-2 text-left text-sm text-muted transition-colors hover:text-signal"
+              className="flex w-full items-center gap-2 text-left text-sm text-muted transition-colors hover:text-accent"
             >
               <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md border border-line text-xs text-faint">
                 +
@@ -446,7 +446,7 @@ export function AgentInbox({
               <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   onClick={() => onAttach(r.connectionId, r.s.session)}
-                  className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
+                  className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent/20"
                 >
                   Attach
                 </button>
@@ -483,7 +483,7 @@ export function AgentInbox({
               <button
                 onClick={() => rescanSaved()}
                 disabled={savedScanning}
-                className="ml-auto rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+                className="ml-auto rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
               >
                 {savedScanning ? 'Scanning…' : 'Rescan'}
               </button>
@@ -529,7 +529,7 @@ export function AgentInbox({
                     </span>
                     {r.status === 'running' && (
                       <span
-                        className="shrink-0 rounded border border-signal/40 px-1 py-px font-mono text-[9px] tracking-wider text-signal"
+                        className="shrink-0 rounded border border-accent/40 px-1 py-px font-mono text-[9px] tracking-wider text-accent"
                         title={`This transcript is open right now in ${r.running}. Attach goes to that pane; resuming it again would start a second agent appending to the same file.`}
                       >
                         RUNNING
@@ -567,7 +567,7 @@ export function AgentInbox({
                         <button
                           onClick={() => onAttach(r.connectionId, r.running as string)}
                           title={`Attach to ${r.running}, which is already resuming this transcript`}
-                          className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
+                          className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent/20"
                         >
                           Attach
                         </button>
@@ -584,7 +584,7 @@ export function AgentInbox({
                                   ? 'Not resumable — its directory came back unreadable'
                                   : undefined
                           }
-                          className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
+                          className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
                         >
                           Resume
                         </button>
@@ -602,7 +602,7 @@ export function AgentInbox({
                   <button
                     onClick={() => loadMoreSaved()}
                     disabled={savedScanning}
-                    className="rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+                    className="rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
                   >
                     {savedScanning
                       ? 'Loading…'

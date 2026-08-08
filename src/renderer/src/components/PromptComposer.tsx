@@ -114,7 +114,7 @@ export function PromptComposer({
     return (
       <div className="absolute inset-x-0 bottom-0 z-20 flex h-7 items-center gap-2 border-t border-line bg-surface/95 px-3 backdrop-blur-sm">
         <button onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-          <span className="eyebrow shrink-0 text-signal">draft</span>
+          <span className="eyebrow shrink-0 text-accent">draft</span>
           <span className="truncate font-mono text-[11px] text-muted">
             {lines.find((l) => l.trim()) ?? ''}
           </span>
@@ -137,7 +137,7 @@ export function PromptComposer({
   return (
     <div className="absolute inset-x-0 bottom-0 z-20 flex max-h-[60%] flex-col border-t border-line bg-surface/95 shadow-lg shadow-ink/60 backdrop-blur-sm">
       <div className="flex shrink-0 items-center gap-2 px-3 pt-2">
-        <span className="eyebrow shrink-0 text-signal">prompt composer</span>
+        <span className="eyebrow shrink-0 text-accent">prompt composer</span>
         {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
         <div className="flex-1" />
         <button
@@ -156,7 +156,7 @@ export function PromptComposer({
         onKeyDown={onKeyDown}
         spellCheck={false}
         placeholder="Write as many lines as you like — nothing reaches the remote until you send."
-        className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-signal/60"
+        className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
       />
 
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
@@ -180,7 +180,7 @@ export function PromptComposer({
         <button
           disabled={!body}
           onClick={() => onSend(true)}
-          className="rounded-lg bg-signal px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           Send ▸
         </button>

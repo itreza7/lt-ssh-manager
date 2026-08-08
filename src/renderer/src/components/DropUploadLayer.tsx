@@ -23,8 +23,8 @@ import { IMAGE_PASTE_ACCEL } from '../lib/xtermAttach'
 export function DropHint() {
   return (
     <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-ink/70 p-4 backdrop-blur-[1px]">
-      <div className="animate-rise flex flex-col items-center gap-1.5 rounded-[0.85rem] border border-dashed border-signal/60 bg-panel/80 px-7 py-6 text-center">
-        <div className="eyebrow text-signal">drop to upload</div>
+      <div className="animate-rise flex flex-col items-center gap-1.5 rounded-[0.85rem] border border-dashed border-accent/60 bg-panel/80 px-7 py-6 text-center">
+        <div className="eyebrow text-accent">drop to upload</div>
         <p className="text-sm text-fg">Files go to a private folder on the host</p>
         <p className="text-[11px] text-faint">
           The path is typed at your cursor — nothing runs. Images: {IMAGE_PASTE_ACCEL}
@@ -50,9 +50,9 @@ export function DropStatusBar({
     <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center p-2">
       <div className="panel animate-rise flex max-w-[92%] items-center gap-2.5 px-3 py-1.5 shadow-lg shadow-ink/40">
         {status.kind === 'busy' ? (
-          <span className="animate-glow shrink-0 text-signal">⟳</span>
+          <span className="animate-glow shrink-0 text-accent">⟳</span>
         ) : status.kind === 'done' ? (
-          <span className="shrink-0 text-signal">✓</span>
+          <span className="shrink-0 text-accent">✓</span>
         ) : status.kind === 'error' ? (
           <span className="shrink-0 text-danger">!</span>
         ) : (
@@ -73,7 +73,7 @@ export function DropStatusBar({
         {status.kind === 'busy' && status.pct !== undefined && (
           <span className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-line">
             <span
-              className="block h-full bg-signal transition-[width] duration-150"
+              className="block h-full bg-accent transition-[width] duration-150"
               style={{ width: `${Math.round(status.pct * 100)}%` }}
             />
           </span>

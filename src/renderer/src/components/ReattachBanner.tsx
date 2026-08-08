@@ -37,7 +37,7 @@ export function ReattachBanner({ sessionId, attempt, delayMs, error }: Props) {
     // lands; the Stop button opts back in.
     <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center p-2">
       <div className="panel animate-rise flex items-center gap-3 px-3 py-1.5 shadow-lg shadow-ink/40">
-        <span className="animate-glow text-signal">⟳</span>
+        <span className="animate-glow text-accent">⟳</span>
         <span className="text-xs text-fg">
           Reconnecting{secs > 0 ? ` in ${secs}s` : '…'}
           <span className="text-faint"> · attempt {attempt}</span>

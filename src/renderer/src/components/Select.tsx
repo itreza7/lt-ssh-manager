@@ -42,7 +42,7 @@ export function Select({ value, options, onChange, width = 176 }: Props) {
       <button
         onClick={() => setOpen((o) => !o)}
         className={`flex w-full items-center justify-between gap-2 rounded-lg border bg-ink/60 px-2.5 py-1.5 text-left text-sm text-fg transition-colors ${
-          open ? 'border-signal/60' : 'border-line hover:border-faint'
+          open ? 'border-accent/60' : 'border-line hover:border-faint'
         }`}
       >
         <span className="truncate" style={current?.style}>
@@ -61,13 +61,13 @@ export function Select({ value, options, onChange, width = 176 }: Props) {
                 setOpen(false)
               }}
               className={`flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors ${
-                o.value === value ? 'bg-signal/15 text-signal' : 'text-fg/85 hover:bg-elevated'
+                o.value === value ? 'bg-accent/15 text-accent' : 'text-fg/85 hover:bg-elevated'
               }`}
             >
               <span className="truncate" style={o.style}>
                 {o.label}
               </span>
-              {o.value === value && <span className="shrink-0 text-signal">✓</span>}
+              {o.value === value && <span className="shrink-0 text-accent">✓</span>}
             </button>
           ))}
         </div>
