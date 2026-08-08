@@ -18,6 +18,7 @@ import { Sidebar } from './components/Sidebar'
 import { Dashboard } from './components/Dashboard'
 import { SettingsPage } from './components/SettingsPage'
 import { AgentInbox } from './components/AgentInbox'
+import { CommandPalette } from './components/CommandPalette'
 import { ConnectionDialog } from './components/ConnectionDialog'
 import { HostKeyDialog } from './components/HostKeyDialog'
 import { PasswordPrompt } from './components/PasswordPrompt'
@@ -35,6 +36,7 @@ import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeResumeSessionName, claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
 import { useAgentSessions } from './hooks/useAgentSessions'
+import { useSavedSessions } from './hooks/useSavedSessions'
 
 const SETTINGS_TAB_ID = 'settings'
 const INBOX_TAB_ID = 'inbox'
@@ -130,7 +132,7 @@ interface WorktreeTab {
 }
 
 // A "leaf" — one unit of content. Leaves live inside views (see below).
-type Tab =
+export type Tab =
   | DashboardTab
   | SessionTab
   | ControlTab
@@ -266,6 +268,13 @@ export default function App() {
   const [dialogConn, setDialogConn] = useState<Connection | null | undefined>(undefined) // undefined = closed
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
   const [pwRequest, setPwRequest] = useState<PwRequest | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  // Latches true the first time the palette opens, the same "has X ever been
+  // opened this session" gate useAgentSessions/useSavedSessions read to decide
+  // whether their data is worth having ready — the palette needs saved sessions
+  // even when Home itself has never been opened.
+  const paletteEverOpenedRef = useRef(false)
+  if (paletteOpen) paletteEverOpenedRef.current = true
 
   // Workspace persistence: don't save until the previous session is restored,
   // so the empty initial state never clobbers the saved tabs on disk.
@@ -611,7 +620,18 @@ export default function App() {
     error: agentScanError,
     scanning: agentScanning,
     rescan: rescanAgents
-  } = useAgentSessions(tabs.some((t) => t.kind === 'inbox'))
+  } = useAgentSessions(tabs.some((t) => t.kind === 'inbox') || paletteEverOpenedRef.current)
+
+  // Lifted out of AgentInbox the same way. `enabled` adds one more condition
+  // than the live sweep needs: the palette must be able to show saved sessions
+  // even before Home has ever been opened, so it also counts as having asked.
+  const {
+    saved: savedSessions,
+    error: savedSessionsError,
+    scanning: savedSessionsScanning,
+    rescan: rescanSaved,
+    loadMore: loadMoreSaved
+  } = useSavedSessions(tabs.some((t) => t.kind === 'inbox') || paletteEverOpenedRef.current)
 
   useEffect(() => {
     void (async () => {
@@ -633,10 +653,12 @@ export default function App() {
     const offHostKey = window.api.onHostKey((prompt) => setHostKey(prompt))
     const offNew = window.api.onNewConnection(() => setDialogConn(null))
     const offSettings = window.api.onOpenSettings(() => openSettings())
+    const offPalette = window.api.onCommandPalette(() => setPaletteOpen(true))
     return () => {
       offHostKey()
       offNew()
       offSettings()
+      offPalette()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openSettings])
@@ -1573,11 +1595,15 @@ export default function App() {
             {tabs.some((t) => t.kind === 'inbox') && (
               <div className={`overflow-hidden ${paneRing(INBOX_TAB_ID)}`} {...paneProps(INBOX_TAB_ID)}>
                 <AgentInbox
-                  active={shownLeaves.includes(INBOX_TAB_ID)}
                   hosts={agentHosts}
                   error={agentScanError}
                   scanning={agentScanning}
                   rescan={rescanAgents}
+                  saved={savedSessions}
+                  savedError={savedSessionsError}
+                  savedScanning={savedSessionsScanning}
+                  rescanSaved={rescanSaved}
+                  loadMoreSaved={loadMoreSaved}
                   onAttach={attachFromInbox}
                   onResume={resumeFromInbox}
                   onNewAgent={newAgentFromInbox}
@@ -1796,6 +1822,22 @@ export default function App() {
           }}
         />
       )}
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        connections={connections}
+        tabs={tabs}
+        leafLabel={leafLabel}
+        leafIcon={leafIcon}
+        agentHosts={agentHosts}
+        saved={savedSessions}
+        selectConnection={selectConnection}
+        showLeaf={showLeaf}
+        attachFromInbox={attachFromInbox}
+        resumeFromInbox={resumeFromInbox}
+        openInbox={openInbox}
+      />
     </div>
   )
 }

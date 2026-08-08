@@ -265,6 +265,11 @@ const api = {
     ipcRenderer.on('menu:open-settings', h)
     return () => ipcRenderer.removeListener('menu:open-settings', h)
   },
+  onCommandPalette: (cb: () => void): (() => void) => {
+    const h = (): void => cb()
+    ipcRenderer.on('menu:command-palette', h)
+    return () => ipcRenderer.removeListener('menu:command-palette', h)
+  },
   onCloseTab: (cb: () => void): (() => void) => {
     const h = (): void => cb()
     ipcRenderer.on('menu:close-tab', h)
