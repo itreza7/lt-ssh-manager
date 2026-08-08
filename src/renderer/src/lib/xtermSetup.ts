@@ -39,6 +39,12 @@ export function createTerminal(
     cursorStyle: settings.cursorStyle,
     scrollback: settings.scrollback,
     allowProposedApi: true,
+    // Let ⌥+drag force a local selection on macOS. Without this there is no way
+    // to select text inside a mouse-mode app (tmux, htop, a TUI agent): xterm's
+    // force-selection modifier is Shift everywhere *except* macOS, where it is
+    // Alt gated behind this flag — and it defaults off, so the drag goes to the
+    // remote app and no selection is ever made.
+    macOptionClickForcesSelection: true,
     theme: { ...THEME }
   })
   let fit: FitAddon | undefined

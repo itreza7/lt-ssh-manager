@@ -73,7 +73,7 @@ const KEYS: { keys: string; what: string }[] = isMac
       { keys: '⌘C', what: 'Copy selection' },
       { keys: 'Ctrl+C', what: 'Interrupt (SIGINT)' },
       { keys: '⌘V / Right-click', what: 'Paste' },
-      { keys: 'Shift+drag', what: 'Select inside htop/vim (mouse-mode apps)' },
+      { keys: '⌥+drag', what: 'Select inside tmux/htop/vim (mouse-mode apps)' },
       { keys: '⌘-click / Ctrl+click', what: 'Open a link' }
     ]
   : [
@@ -81,7 +81,7 @@ const KEYS: { keys: string; what: string }[] = isMac
       { keys: 'Ctrl+Shift+C', what: 'Copy selection' },
       { keys: 'Ctrl+C', what: 'Copy if text selected, else interrupt (SIGINT)' },
       { keys: 'Ctrl+Shift+V / Right-click', what: 'Paste' },
-      { keys: 'Shift+drag', what: 'Select inside htop/vim (mouse-mode apps)' },
+      { keys: 'Shift+drag', what: 'Select inside tmux/htop/vim (mouse-mode apps)' },
       { keys: 'Ctrl+click', what: 'Open a link' }
     ]
 

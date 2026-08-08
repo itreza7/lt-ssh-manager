@@ -141,8 +141,9 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
     if (text) term.paste(text) // bracketed-paste aware: multi-line stays inert
   }
 
-  // Copy-on-select — selecting text (drag, or Shift+drag inside mouse-mode apps
-  // like htop) copies it to the clipboard automatically.
+  // Copy-on-select — selecting text copies it to the clipboard automatically.
+  // Inside a mouse-mode app (tmux, htop) the drag belongs to the remote, so hold
+  // the force-selection modifier to keep it local: ⌥ on macOS, Shift elsewhere.
   const offSelection = term.onSelectionChange(copySelection)
 
   // Surface the remote's window title. Programs set it to the running command or
@@ -211,15 +212,26 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
       return false
     }
     // Explicit copy: ⌘C on macOS, Ctrl+Shift+C elsewhere (bare Ctrl+C is SIGINT).
+    // preventDefault for the same reason as paste below: the browser's own Copy
+    // would otherwise still run against xterm's helper textarea and overwrite the
+    // clipboard we just wrote with whatever (usually nothing) it holds.
     const copyChord = isMac ? e.metaKey && !e.shiftKey && k === 'c' : e.ctrlKey && e.shiftKey && k === 'c'
     if (copyChord) {
+      e.preventDefault()
       copySelection()
       return false
     }
-    // Paste. On macOS ⌘V is the OS paste shortcut and xterm already handles it
-    // natively — intercepting it here too would paste twice — so we only wire the
-    // Ctrl+Shift+V convenience chord on Windows/Linux, where nothing else pastes.
-    if (!isMac && e.ctrlKey && e.shiftKey && k === 'v') {
+    // Paste. 0.2.5 dropped the macOS ⌘V branch because it pasted twice, but the
+    // double came from calling paste() *without* preventDefault — the same trap
+    // the Shift+Enter comment above describes — and the app runs with no
+    // application menu (Menu.setApplicationMenu(null) in main), so nothing else
+    // reliably owns ⌘V. Claim it and cancel the native path: exactly one paste.
+    if (
+      isMac
+        ? e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && k === 'v'
+        : e.ctrlKey && e.shiftKey && k === 'v'
+    ) {
+      e.preventDefault()
       paste()
       return false
     }
