@@ -265,6 +265,26 @@ const api = {
     ipcRenderer.on('menu:open-settings', h)
     return () => ipcRenderer.removeListener('menu:open-settings', h)
   },
+  onCloseTab: (cb: () => void): (() => void) => {
+    const h = (): void => cb()
+    ipcRenderer.on('menu:close-tab', h)
+    return () => ipcRenderer.removeListener('menu:close-tab', h)
+  },
+  onPrevTab: (cb: () => void): (() => void) => {
+    const h = (): void => cb()
+    ipcRenderer.on('menu:prev-tab', h)
+    return () => ipcRenderer.removeListener('menu:prev-tab', h)
+  },
+  onNextTab: (cb: () => void): (() => void) => {
+    const h = (): void => cb()
+    ipcRenderer.on('menu:next-tab', h)
+    return () => ipcRenderer.removeListener('menu:next-tab', h)
+  },
+  onGotoTab: (cb: (index: number) => void): (() => void) => {
+    const h = (_e: unknown, index: number): void => cb(index)
+    ipcRenderer.on('menu:goto-tab', h)
+    return () => ipcRenderer.removeListener('menu:goto-tab', h)
+  },
 
   // agent attention
   agentNotify: (leafId: string, title: string, body: string): void =>

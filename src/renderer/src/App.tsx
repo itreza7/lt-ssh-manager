@@ -629,6 +629,42 @@ export default function App() {
     setActiveViewId(views.length ? views[views.length - 1].id : null)
   }, [views, activeViewId])
 
+  // macOS tab shortcuts (⌘W, ⇧⌘[, ⇧⌘], ⌘1-9 — see menu.ts). Re-subscribed
+  // whenever views/activeViewId change so each handler closes over the current
+  // tab list instead of the one from mount.
+  useEffect(() => {
+    const offClose = window.api.onCloseTab(() => {
+      const id = activeView?.id ?? activeViewId
+      // No tab left to close (or none ever opened) — fall back to the window
+      // itself, same as ⇧⌘W, rather than swallowing the chord.
+      if (id) closeView(id)
+      else void window.api.winClose()
+    })
+    const offPrev = window.api.onPrevTab(() => {
+      if (!views.length) return
+      const idx = views.findIndex((v) => v.id === activeViewId)
+      const next = views[(idx <= 0 ? views.length : idx) - 1] ?? views[views.length - 1]
+      setActiveViewId(next.id)
+    })
+    const offNextTab = window.api.onNextTab(() => {
+      if (!views.length) return
+      const idx = views.findIndex((v) => v.id === activeViewId)
+      const next = views[(idx + 1) % views.length] ?? views[0]
+      setActiveViewId(next.id)
+    })
+    const offGoto = window.api.onGotoTab((index) => {
+      const v = views[index]
+      if (v) setActiveViewId(v.id)
+    })
+    return () => {
+      offClose()
+      offPrev()
+      offNextTab()
+      offGoto()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [views, activeViewId])
+
   // --- agent attention effects ----------------------------------------------
   // Whether the window has focus decides both whether a signal is worth a
   // banner and whether looking at a tab counts as reading it. `document` is the
@@ -1338,7 +1374,7 @@ export default function App() {
           onToggleCollapse={toggleSidebar}
         />
 
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="app-canvas flex min-w-0 flex-1 flex-col">
           {/* tab bar */}
           {views.length > 0 && (
             <div className="flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 pt-1.5">

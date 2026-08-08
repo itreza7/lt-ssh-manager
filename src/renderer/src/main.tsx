@@ -3,7 +3,12 @@ import '@fontsource-variable/hanken-grotesk'
 import '@fontsource-variable/jetbrains-mono'
 import '@fontsource-variable/fira-code'
 import App from './App'
+import { isMac } from './lib/platform'
 import './index.css'
+
+// Flags macOS-only CSS (sidebar vibrancy in index.css) — set before first
+// paint so there's no flash of the wrong background.
+document.documentElement.classList.toggle('mac', isMac)
 
 // A file or link dropped anywhere without its own handler — the sidebar, the tab
 // strip, a settings page — is navigation as far as Chromium is concerned: it

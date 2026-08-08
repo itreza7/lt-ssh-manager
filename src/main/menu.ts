@@ -35,6 +35,10 @@ export function installAppMenu(getWindow: () => BrowserWindow | null): void {
     (channel: string) =>
     (): void =>
       getWindow()?.webContents.send(channel)
+  const sendIndex =
+    (channel: string, index: number) =>
+    (): void =>
+      getWindow()?.webContents.send(channel, index)
   const zoom =
     (delta: number | 'reset') =>
     (): void => {
@@ -69,10 +73,13 @@ export function installAppMenu(getWindow: () => BrowserWindow | null): void {
           click: send('menu:new-connection')
         }),
         { type: 'separator' },
-        // Closing the last window quits the app (see index.ts), so this ends every
-        // session — the same as the red traffic light, and the chord a Mac user
-        // expects. Nothing handled ⌘W before, so it is registered for real.
-        { role: 'close', label: 'Close Window' }
+        // ⌘W closes the active tab, matching every other tabbed Mac app; the
+        // renderer falls back to closing the window itself when there is no tab
+        // left to close (see the menu:close-tab handler in App.tsx). ⇧⌘W always
+        // closes the window outright — role:'close', which quits the app since
+        // this is a single-window app (see index.ts's window-all-closed handler).
+        { label: 'Close Tab', accelerator: 'Command+W', click: send('menu:close-tab') },
+        { role: 'close', label: 'Close Window', accelerator: 'Shift+Command+W' }
       ]
     },
     {
@@ -115,7 +122,26 @@ export function installAppMenu(getWindow: () => BrowserWindow | null): void {
     },
     {
       label: 'Window',
-      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { label: 'Previous Tab', accelerator: 'Shift+Command+[', click: send('menu:prev-tab') },
+        { label: 'Next Tab', accelerator: 'Shift+Command+]', click: send('menu:next-tab') },
+        { type: 'separator' },
+        { role: 'front' },
+        { type: 'separator' },
+        // Cmd+1..9 jump straight to a tab by position, the same convention every
+        // tabbed Mac browser uses. Nine real, registered accelerators with
+        // `visible: false` — the standard way to bind a global chord without
+        // cluttering the visible menu with nine near-identical rows.
+        ...Array.from({ length: 9 }, (_, i) => ({
+          label: `Tab ${i + 1}`,
+          accelerator: `Command+${i + 1}`,
+          visible: false,
+          click: sendIndex('menu:goto-tab', i)
+        }))
+      ]
     }
   ]
 

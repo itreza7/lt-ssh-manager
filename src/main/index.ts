@@ -1,25 +1,51 @@
-import { app, BrowserWindow, shell, nativeTheme } from 'electron'
+import { app, BrowserWindow, shell, nativeTheme, screen } from 'electron'
 import { join } from 'node:path'
 import { registerIpc, toggleFullScreen } from './ipc'
 import { installAppMenu } from './menu'
+import { windowBoundsStore, type WindowBounds } from './store/windowBounds'
 import appIcon from '../../resources/icon.png?asset'
 
 let mainWindow: BrowserWindow | null = null
 
+// A saved position can go stale — the external monitor it was on got
+// unplugged, the laptop's own resolution changed — so only trust it if it
+// still lands on some display; otherwise fall back to the centered default
+// rather than opening a window nobody can see or reach.
+function isOnScreen(b: { x: number; y: number; width: number; height: number }): boolean {
+  return screen.getAllDisplays().some((d) => {
+    const w = d.workArea
+    return b.x < w.x + w.width && b.x + b.width > w.x && b.y < w.y + w.height && b.y + b.height > w.y
+  })
+}
+
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
+  const saved = windowBoundsStore.get()
+  const restorable = saved && isOnScreen(saved) ? saved : null
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 720,
+    ...(restorable
+      ? { x: restorable.x, y: restorable.y, width: restorable.width, height: restorable.height }
+      : { width: 1100, height: 720 }),
     minWidth: 800,
     minHeight: 500,
     show: false,
     // Custom in-app title bar + menu. On macOS keep the native traffic lights
     // (hidden title bar) instead of a fully frameless window; elsewhere go frameless.
+    // Vibrancy is the native blur-behind-the-window material a sidebar sits on
+    // in a real Mac app; the renderer meets it halfway by making body
+    // transparent there and repainting an opaque backdrop for everything that
+    // isn't the sidebar (see html.mac in index.css).
     ...(isMac
-      ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 12 } }
+      ? {
+          titleBarStyle: 'hidden' as const,
+          trafficLightPosition: { x: 14, y: 12 },
+          vibrancy: 'sidebar' as const,
+          visualEffectState: 'active' as const
+        }
       : { frame: false }),
-    backgroundColor: '#0c0f15',
+    // Opaque everywhere but macOS, where an opaque native backing would paint
+    // over the vibrancy layer before the (transparent) page ever loads.
+    backgroundColor: isMac ? '#00000000' : '#0c0f15',
     title: 'SSH Manager',
     icon: appIcon,
     webPreferences: {
@@ -31,14 +57,50 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
-    mainWindow?.maximize()
+    // First launch (nothing restorable yet) still opens maximized — a sane
+    // full-size default. After that, whatever the user left it as, including
+    // maximized, which the constructor's width/height alone can't express.
+    if (!restorable || restorable.maximized) mainWindow?.maximize()
     mainWindow?.show()
   })
 
-  // keep the custom title bar's maximize/restore button in sync
+  // keep the custom title bar's maximize/restore button in sync, and persist
+  // the frame so the next launch can restore it. getBounds() while maximized
+  // reports the maximized rectangle, not the one to restore into, so a
+  // maximized save reuses whatever normal rect was last recorded.
   const sendMax = (v: boolean): void => mainWindow?.webContents.send('window:maximized', v)
-  mainWindow.on('maximize', () => sendMax(true))
-  mainWindow.on('unmaximize', () => sendMax(false))
+  const saveBounds = (maximized: boolean): void => {
+    if (!mainWindow || mainWindow.isFullScreen()) return
+    const rect = mainWindow.isMaximized() ? (windowBoundsStore.get() ?? mainWindow.getBounds()) : mainWindow.getBounds()
+    const bounds: WindowBounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height, maximized }
+    windowBoundsStore.set(bounds)
+  }
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleSaveBounds = (): void => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => saveBounds(false), 400)
+  }
+  mainWindow.on('maximize', () => {
+    sendMax(true)
+    saveBounds(true)
+  })
+  mainWindow.on('unmaximize', () => {
+    sendMax(false)
+    saveBounds(false)
+  })
+  // Only a genuinely windowed resize/move belongs here — the maximize/unmaximize
+  // handlers above already cover the maximized transition itself.
+  mainWindow.on('resize', () => {
+    if (!mainWindow?.isMaximized()) scheduleSaveBounds()
+  })
+  mainWindow.on('move', () => {
+    if (!mainWindow?.isMaximized()) scheduleSaveBounds()
+  })
+  mainWindow.on('close', () => {
+    if (!saveTimer) return
+    clearTimeout(saveTimer)
+    saveBounds(mainWindow?.isMaximized() ?? false)
+  })
 
   // notify the renderer of native fullscreen transitions (macOS uses simple
   // fullscreen, which doesn't emit these — the chrome stays put either way).
