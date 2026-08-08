@@ -115,6 +115,43 @@ export function injectPath(term: XTerm, path: string): void {
   if (clean) term.paste(`${clean} `)
 }
 
+/** The bits of xterm's private selection service this module has to reach. */
+interface SelectionServiceInternals {
+  _enabled: boolean
+  disable: () => void
+}
+
+/**
+ * Stop xterm from destroying the selection every time the remote asserts mouse
+ * tracking.
+ *
+ * xterm disables its selection service whenever the mouse protocol changes, and
+ * `disable()` clears the current selection on its way out. That is harmless for a
+ * one-off `tmux attach`, but a TUI agent re-emits its mouse-mode enable on
+ * essentially every repaint — so while Claude Code is working the highlight is
+ * wiped over and over, including mid-drag, where the clear also tears down the
+ * drag listeners. The selection can then never be completed and there is nothing
+ * left for copy-on-select or ⌘C to pick up.
+ *
+ * Measured against the pinned xterm 5.5: re-emitting an already-active
+ * `CSI ? 1000 h` clears the selection, and with the clear removed it survives
+ * both a re-emit and a protocol switch. `_enabled` still goes false, so xterm's
+ * own mouse handling is untouched — including the ⌥ force-selection path, which
+ * is explicitly written to run while the service is disabled.
+ *
+ * This reaches past the public API, so it is written to be inert if the internals
+ * ever move: no service of the expected shape, no patch, and the terminal behaves
+ * exactly as it does today.
+ */
+function keepSelectionAcrossMouseModes(term: XTerm): void {
+  const svc = (term as unknown as { _core?: { _selectionService?: SelectionServiceInternals } })._core
+    ?._selectionService
+  if (!svc || typeof svc.disable !== 'function' || typeof svc._enabled !== 'boolean') return
+  svc.disable = function (this: SelectionServiceInternals): void {
+    this._enabled = false
+  }
+}
+
 /**
  * A title is a remote-controlled string that lands in our chrome. React escapes
  * it, so this is about legibility rather than injection: drop control characters
@@ -132,9 +169,36 @@ function sanitizeTitle(raw: string): string {
  * terminal shouldn't have to know that).
  */
 export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttachOptions): () => void {
+  keepSelectionAcrossMouseModes(term)
+
+  /**
+   * The most recent non-empty selection, as it read at the moment it was made.
+   *
+   * `term.getSelection()` is not stable over time: it re-reads the buffer at the
+   * selection's coordinates, and in the alternate buffer — tmux, or any
+   * full-screen TUI — rows scroll *under* a selection that stays where it is. A
+   * second after highlighting a line, those same coordinates hold something else,
+   * so a later read returns text the user never selected.
+   */
+  let lastSelection = ''
+
   const copySelection = (): void => {
     const sel = term.getSelection()
-    if (sel) window.api.clipboardWrite(sel)
+    if (sel) {
+      lastSelection = sel
+      window.api.clipboardWrite(sel)
+    }
+  }
+  /**
+   * What an explicit copy chord copies: what was selected, not what has since
+   * scrolled into its place (see lastSelection). Copy-on-select has normally put
+   * the same text on the clipboard already, which is also why the fallback to a
+   * stale value is safe — pressing copy after a selection is gone re-writes the
+   * text that is on the clipboard anyway.
+   */
+  const copyExplicit = (): void => {
+    const text = lastSelection || term.getSelection()
+    if (text) window.api.clipboardWrite(text)
   }
   const paste = (): void => {
     const text = window.api.clipboardRead()
@@ -218,7 +282,7 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
     const copyChord = isMac ? e.metaKey && !e.shiftKey && k === 'c' : e.ctrlKey && e.shiftKey && k === 'c'
     if (copyChord) {
       e.preventDefault()
-      copySelection()
+      copyExplicit()
       return false
     }
     // Paste. 0.2.5 dropped the macOS ⌘V branch because it pasted twice, but the
@@ -238,7 +302,7 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
     // Windows/Linux: Ctrl+C copies if text is selected, otherwise falls through
     // as SIGINT. On macOS ⌘C owns copy, so Ctrl+C is always left as SIGINT.
     if (!isMac && e.ctrlKey && !e.shiftKey && !e.altKey && k === 'c' && term.hasSelection()) {
-      copySelection()
+      copyExplicit()
       term.clearSelection() // so the next Ctrl+C interrupts as usual
       return false
     }
