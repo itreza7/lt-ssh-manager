@@ -19,6 +19,11 @@ interface Props {
   onAttach: (connectionId: string, session: string) => void
   /** Open a new agent tab resuming this saved transcript. `label` titles the tab. */
   onResume: (connectionId: string, session: ResumeSession, label: string) => void
+  /** Launch a brand-new agent on this host, in this directory. Returns false
+   *  (without side effects other than the failed attempt) if the host is gone
+   *  or the directory isn't absolute, so the form can tell the user instead
+   *  of closing as though it worked. */
+  onNewAgent: (connectionId: string, dir: string) => boolean
 }
 
 /** One session, flattened with the host it was found on, ready to render. */
@@ -139,9 +144,17 @@ function mergeSaved(prev: ResumeHostScan[], next: ResumeHostScan[]): ResumeHostS
   })
 }
 
-export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, onResume }: Props) {
+export function AgentInbox({
+  active,
+  hosts,
+  error,
+  scanning,
+  rescan,
+  onAttach,
+  onResume,
+  onNewAgent
+}: Props) {
   const [saved, setSaved] = useState<ResumeHostScan[] | null>(null)
-  const [savedOpen, setSavedOpen] = useState(false)
   const [savedError, setSavedError] = useState<string | null>(null)
   const [savedScanning, setSavedScanning] = useState(false)
   const [savedOffset, setSavedOffset] = useState(0)
@@ -176,9 +189,7 @@ export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, o
   // second to second; a transcript on disk changes when somebody works in it. This
   // sweep reads the newest sixty files on every host, so paying for it repeatedly
   // would cost real time on a host with a thousand of them to tell the user nothing
-  // new. The count in the section header is what makes the one scan worth doing
-  // eagerly: a collapsed section that had never scanned could only say "Saved
-  // sessions", which gives no reason to open it.
+  // new.
   //
   // Latched on a ref, not on `saved === null`: the effect is what sets `saved`, so
   // reading it here would re-run this on every response and stop only because the
@@ -309,11 +320,40 @@ export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, o
   const problems = (hosts ?? []).filter((h) => h.error || h.skipped)
   const scanned = (hosts ?? []).length - problems.length
 
+  // Every saved connection shows up in the agent scan even with zero sessions
+  // (AgentHostScan carries connectionId + name for exactly this), so the picker
+  // needs no host list of its own.
+  const hostOptions = useMemo(
+    () => (hosts ?? []).map((h) => ({ id: h.connectionId, name: h.name })),
+    [hosts]
+  )
+
+  const [newAgentOpen, setNewAgentOpen] = useState(false)
+  const [newAgentHost, setNewAgentHost] = useState('')
+  const [newAgentDir, setNewAgentDir] = useState('')
+  const [newAgentError, setNewAgentError] = useState<string | null>(null)
+
+  const submitNewAgent = (): void => {
+    const dir = newAgentDir.trim()
+    if (!newAgentHost || !dir) return
+    if (!dir.startsWith('/')) {
+      setNewAgentError('Directory must be absolute — start it with /')
+      return
+    }
+    if (!onNewAgent(newAgentHost, dir)) {
+      setNewAgentError('That host is no longer available — pick another one')
+      return
+    }
+    setNewAgentError(null)
+    setNewAgentDir('')
+    setNewAgentOpen(false)
+  }
+
   return (
     <div className="flex h-full flex-col overflow-hidden border-t border-line bg-ink">
       <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
         <div className="leading-tight">
-          <div className="eyebrow">Agent Inbox</div>
+          <div className="eyebrow">Home</div>
           <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px]">
             {counts.waiting > 0 && <span className="text-amber">{counts.waiting} waiting</span>}
             {counts.working > 0 && <span className="text-signal">{counts.working} working</span>}
@@ -343,6 +383,72 @@ export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, o
             {error}
           </p>
         )}
+
+        {/* New agent — the one action this list didn't have before: everything
+            else here is attach-to-existing or resume-a-transcript. Collapsed by
+            default so it doesn't outweigh the rows it sits above. */}
+        <div className="mb-2 rounded-lg border border-line/70 bg-elevated/20 px-3 py-2">
+          {newAgentOpen ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={newAgentHost}
+                onChange={(e) => {
+                  setNewAgentHost(e.target.value)
+                  setNewAgentError(null)
+                }}
+                className="rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-xs text-fg outline-none transition-colors focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+              >
+                <option value="">Host…</option>
+                {hostOptions.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={newAgentDir}
+                onChange={(e) => {
+                  setNewAgentDir(e.target.value)
+                  setNewAgentError(null)
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && submitNewAgent()}
+                placeholder="/absolute/path"
+                className="min-w-0 flex-1 rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-signal/60 focus:ring-2 focus:ring-signal/15"
+              />
+              <button
+                onClick={submitNewAgent}
+                disabled={!newAgentHost || !newAgentDir.trim()}
+                className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1.5 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
+              >
+                Start ▸
+              </button>
+              <button
+                onClick={() => {
+                  setNewAgentOpen(false)
+                  setNewAgentError(null)
+                }}
+                className="rounded-md border border-line px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-danger/40 hover:text-danger"
+              >
+                Cancel
+              </button>
+              <p
+                className={`w-full font-mono text-[10px] ${newAgentError ? 'text-danger' : 'text-faint'}`}
+              >
+                {newAgentError ?? 'Directory must be absolute (starts with /) on the chosen host.'}
+              </p>
+            </div>
+          ) : (
+            <button
+              onClick={() => setNewAgentOpen(true)}
+              className="flex w-full items-center gap-2 text-left text-sm text-muted transition-colors hover:text-signal"
+            >
+              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md border border-line text-xs text-faint">
+                +
+              </span>
+              New agent
+            </button>
+          )}
+        </div>
 
         {hosts === null && !error && (
           <p className="px-3 py-10 text-center text-xs text-faint">Scanning your hosts…</p>
@@ -403,26 +509,21 @@ export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, o
           </div>
         ))}
 
-        {/* Saved sessions — transcripts on disk, not processes. Collapsed by default
-            because sixty of them would bury the handful of agents actually running,
-            which is what this pane is for. */}
+        {/* Saved sessions — transcripts on disk, not processes. Rendered right
+            beneath the live rows rather than behind a click: recency already
+            separates the two groups (live is definitionally more current than
+            any saved timestamp), so hiding this one behind a toggle would only
+            cost a click on the group that is, size for size, almost all of the
+            list. */}
         {(savedTotal > 0 || savedError || savedProblems.length > 0) && (
           <div className="mt-3 border-t border-line pt-2">
             <div className="flex items-center gap-2 px-3">
-              <button
-                onClick={() => setSavedOpen((v) => !v)}
-                className="flex items-center gap-1.5 text-left transition-colors hover:text-signal"
-              >
-                <span className={`font-mono text-[9px] text-faint ${savedOpen ? '' : '-rotate-90'}`}>
-                  ▾
-                </span>
-                <span className="eyebrow">Saved sessions</span>
-                <span className="font-mono text-[11px] text-faint">
-                  {savedRows.length === savedTotal
-                    ? savedTotal
-                    : `${savedRows.length} of ${savedTotal}`}
-                </span>
-              </button>
+              <span className="eyebrow">Saved sessions</span>
+              <span className="font-mono text-[11px] text-faint">
+                {savedRows.length === savedTotal
+                  ? savedTotal
+                  : `${savedRows.length} of ${savedTotal}`}
+              </span>
               {savedCut.length > 0 && (
                 <span
                   className="shrink-0 rounded border border-amber/40 px-1 py-px font-mono text-[9px] tracking-wider text-amber"
@@ -433,160 +534,156 @@ export function AgentInbox({ active, hosts, error, scanning, rescan, onAttach, o
                   CUT SHORT
                 </span>
               )}
-              {savedOpen && (
-                <button
-                  onClick={() => void scanSaved({ retryFailed: true })}
-                  disabled={savedScanning}
-                  className="ml-auto rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
-                >
-                  {savedScanning ? 'Scanning…' : 'Rescan'}
-                </button>
-              )}
+              <button
+                onClick={() => void scanSaved({ retryFailed: true })}
+                disabled={savedScanning}
+                className="ml-auto rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+              >
+                {savedScanning ? 'Scanning…' : 'Rescan'}
+              </button>
             </div>
 
-            {savedOpen && (
-              <div className="mt-1">
-                {savedError && (
-                  <p className="mx-2 mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-                    {savedError}
-                  </p>
-                )}
+            <div className="mt-1">
+              {savedError && (
+                <p className="mx-2 mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+                  {savedError}
+                </p>
+              )}
 
-                {savedRows.map((r) => (
-                  <div
-                    key={`${r.connectionId}:${r.s.id}`}
-                    className="group mb-1 rounded-lg px-3 py-2.5 transition-colors hover:bg-elevated/50"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`truncate text-[12px] ${r.label ? 'text-fg/90' : 'italic text-faint'}`}
-                        title={r.label ?? 'This transcript has no title and no prompt to show'}
-                      >
-                        {r.label ?? 'Untitled session'}
-                      </span>
-                      <span className="ml-auto shrink-0 font-mono text-[10px] text-faint">
-                        {age(r.s.ageSeconds)}
-                      </span>
-                    </div>
-
-                    <div className="mt-1 flex items-center gap-2">
-                      <span className="shrink-0 text-[11px] text-muted">{r.host}</span>
-                      <span
-                        className={`truncate font-mono text-[11px] ${r.s.dir ? 'text-faint' : 'text-amber/70'}`}
-                        title={
-                          r.s.dir ??
-                          'This transcript records no working directory, and --resume can only find a session from the directory it ran in.'
-                        }
-                      >
-                        {r.s.dir ? shortPath(r.s.dir) : 'no directory'}
-                      </span>
-                      <span className="shrink-0 font-mono text-[10px] text-faint">
-                        {size(r.s.sizeBytes)}
-                      </span>
-                      {r.status === 'running' && (
-                        <span
-                          className="shrink-0 rounded border border-signal/40 px-1 py-px font-mono text-[9px] tracking-wider text-signal"
-                          title={`This transcript is open right now in ${r.running}. Attach goes to that pane; resuming it again would start a second agent appending to the same file.`}
-                        >
-                          RUNNING
-                        </span>
-                      )}
-                      {/* `unavailable` collapses GONE and UNREADABLE into one status
-                          value; dirLossy/dirExists still pick the exact badge text,
-                          since the reader needs to know which one it is. */}
-                      {r.status === 'unavailable' && r.s.dirExists === false && (
-                        <span
-                          className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
-                          title={`${r.s.dir} is no longer a directory on this host, and --resume can only find a session from the directory it ran in.`}
-                        >
-                          GONE
-                        </span>
-                      )}
-                      {r.status === 'unavailable' && r.s.dirLossy && (
-                        <span
-                          className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
-                          title="This path holds bytes that are not valid text, so what is shown is not the path on disk. Resuming would open a tab only to fail in it."
-                        >
-                          UNREADABLE
-                        </span>
-                      )}
-                      {r.status === 'in-use' && (
-                        <span
-                          className="shrink-0 rounded border border-amber/40 px-1 py-px font-mono text-[9px] tracking-wider text-amber"
-                          title={`${r.live.join(', ')} ${r.live.length === 1 ? 'is' : 'are'} live in this same directory. Resuming starts a separate agent here — check they will not be editing the same files.`}
-                        >
-                          IN USE
-                        </span>
-                      )}
-                      <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                        {r.running !== null ? (
-                          <button
-                            onClick={() => onAttach(r.connectionId, r.running as string)}
-                            title={`Attach to ${r.running}, which is already resuming this transcript`}
-                            className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
-                          >
-                            Attach
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => onResume(r.connectionId, r.s, r.label ?? 'claude')}
-                            disabled={!r.s.dir || r.s.dirExists === false || r.s.dirLossy}
-                            title={
-                              !r.s.dir
-                                ? 'Not resumable — no working directory recorded'
-                                : r.s.dirExists === false
-                                  ? 'Not resumable — the directory it ran in is gone'
-                                  : r.s.dirLossy
-                                    ? 'Not resumable — its directory came back unreadable'
-                                    : undefined
-                            }
-                            className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
-                          >
-                            Resume
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-
-                {/* Only when there is a next page to ask for. The count is of the
-                    whole set, so this is also the honest statement of how much of it
-                    is not on screen. */}
-                {savedRows.length < savedTotal && (
-                  <div className="px-3 pt-1">
-                    <button
-                      onClick={() => void scanSaved({ more: true })}
-                      disabled={savedScanning}
-                      className="rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+              {savedRows.map((r) => (
+                <div
+                  key={`${r.connectionId}:${r.s.id}`}
+                  className="group mb-1 rounded-lg px-3 py-2.5 transition-colors hover:bg-elevated/50"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`truncate text-[12px] ${r.label ? 'text-fg/90' : 'italic text-faint'}`}
+                      title={r.label ?? 'This transcript has no title and no prompt to show'}
                     >
-                      {savedScanning
-                        ? 'Loading…'
-                        : `Load ${Math.min(RESUME_LIMIT, savedTotal - savedRows.length)} more`}
-                    </button>
+                      {r.label ?? 'Untitled session'}
+                    </span>
+                    <span className="ml-auto shrink-0 font-mono text-[10px] text-faint">
+                      {age(r.s.ageSeconds)}
+                    </span>
                   </div>
-                )}
 
-                {savedProblems.length > 0 && (
-                  <div className="px-3 pt-1">
-                    {savedProblems.map((h) => (
-                      <div
-                        key={h.connectionId}
-                        className="flex items-baseline gap-2 py-0.5 text-[11px]"
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="shrink-0 text-[11px] text-muted">{r.host}</span>
+                    <span
+                      className={`truncate font-mono text-[11px] ${r.s.dir ? 'text-faint' : 'text-amber/70'}`}
+                      title={
+                        r.s.dir ??
+                        'This transcript records no working directory, and --resume can only find a session from the directory it ran in.'
+                      }
+                    >
+                      {r.s.dir ? shortPath(r.s.dir) : 'no directory'}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-faint">
+                      {size(r.s.sizeBytes)}
+                    </span>
+                    {r.status === 'running' && (
+                      <span
+                        className="shrink-0 rounded border border-signal/40 px-1 py-px font-mono text-[9px] tracking-wider text-signal"
+                        title={`This transcript is open right now in ${r.running}. Attach goes to that pane; resuming it again would start a second agent appending to the same file.`}
                       >
-                        <span className="shrink-0 text-muted">{h.name}</span>
-                        <span className="truncate font-mono text-faint" title={h.error}>
-                          {h.skipped
-                            ? `skipped — ${h.error ?? 'not contacted'}`
-                            : (h.error ??
-                              'saved sessions could not be listed — this host may have them')}
-                        </span>
-                      </div>
-                    ))}
+                        RUNNING
+                      </span>
+                    )}
+                    {/* `unavailable` collapses GONE and UNREADABLE into one status
+                        value; dirLossy/dirExists still pick the exact badge text,
+                        since the reader needs to know which one it is. */}
+                    {r.status === 'unavailable' && r.s.dirExists === false && (
+                      <span
+                        className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
+                        title={`${r.s.dir} is no longer a directory on this host, and --resume can only find a session from the directory it ran in.`}
+                      >
+                        GONE
+                      </span>
+                    )}
+                    {r.status === 'unavailable' && r.s.dirLossy && (
+                      <span
+                        className="shrink-0 rounded border border-danger/40 px-1 py-px font-mono text-[9px] tracking-wider text-danger"
+                        title="This path holds bytes that are not valid text, so what is shown is not the path on disk. Resuming would open a tab only to fail in it."
+                      >
+                        UNREADABLE
+                      </span>
+                    )}
+                    {r.status === 'in-use' && (
+                      <span
+                        className="shrink-0 rounded border border-amber/40 px-1 py-px font-mono text-[9px] tracking-wider text-amber"
+                        title={`${r.live.join(', ')} ${r.live.length === 1 ? 'is' : 'are'} live in this same directory. Resuming starts a separate agent here — check they will not be editing the same files.`}
+                      >
+                        IN USE
+                      </span>
+                    )}
+                    <div className="ml-auto flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      {r.running !== null ? (
+                        <button
+                          onClick={() => onAttach(r.connectionId, r.running as string)}
+                          title={`Attach to ${r.running}, which is already resuming this transcript`}
+                          className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20"
+                        >
+                          Attach
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => onResume(r.connectionId, r.s, r.label ?? 'claude')}
+                          disabled={!r.s.dir || r.s.dirExists === false || r.s.dirLossy}
+                          title={
+                            !r.s.dir
+                              ? 'Not resumable — no working directory recorded'
+                              : r.s.dirExists === false
+                                ? 'Not resumable — the directory it ran in is gone'
+                                : r.s.dirLossy
+                                  ? 'Not resumable — its directory came back unreadable'
+                                  : undefined
+                          }
+                          className="rounded-md border border-signal/40 bg-signal/10 px-2 py-0.5 text-[11px] text-signal transition-colors hover:bg-signal/20 disabled:cursor-not-allowed disabled:border-line disabled:bg-transparent disabled:text-faint"
+                        >
+                          Resume
+                        </button>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              ))}
+
+              {/* Only when there is a next page to ask for. The count is of the
+                  whole set, so this is also the honest statement of how much of it
+                  is not on screen. */}
+              {savedRows.length < savedTotal && (
+                <div className="px-3 pt-1">
+                  <button
+                    onClick={() => void scanSaved({ more: true })}
+                    disabled={savedScanning}
+                    className="rounded-md border border-line px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-signal/40 hover:text-signal disabled:opacity-50"
+                  >
+                    {savedScanning
+                      ? 'Loading…'
+                      : `Load ${Math.min(RESUME_LIMIT, savedTotal - savedRows.length)} more`}
+                  </button>
+                </div>
+              )}
+
+              {savedProblems.length > 0 && (
+                <div className="px-3 pt-1">
+                  {savedProblems.map((h) => (
+                    <div
+                      key={h.connectionId}
+                      className="flex items-baseline gap-2 py-0.5 text-[11px]"
+                    >
+                      <span className="shrink-0 text-muted">{h.name}</span>
+                      <span className="truncate font-mono text-faint" title={h.error}>
+                        {h.skipped
+                          ? `skipped — ${h.error ?? 'not contacted'}`
+                          : (h.error ??
+                            'saved sessions could not be listed — this host may have them')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
