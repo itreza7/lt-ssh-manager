@@ -35,6 +35,7 @@ import type {
 } from '../shared/types'
 import { connectionStore } from './store/connections'
 import { draftStore } from './store/drafts'
+import { promptHistoryStore } from './store/promptHistory'
 import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
 import { tunnelsStore } from './store/tunnels'
@@ -308,6 +309,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // ---- prompt composer drafts (local autosave — survives disconnects, restarts, crashes) ----
   ipcMain.handle('drafts:all', () => draftStore.all())
   ipcMain.handle('drafts:set', (_e, key: string, value: string) => draftStore.set(key, value))
+
+  // ---- composer prompt history (persisted, never cleared, capped at 1000) ----
+  ipcMain.handle('promptHistory:all', () => promptHistoryStore.all())
+  ipcMain.handle('promptHistory:add', (_e, text: string) => promptHistoryStore.add(text))
 
   // ---- settings (persisted to userData/settings.json) ----
   ipcMain.handle('settings:get', () => settingsStore.getAll())
