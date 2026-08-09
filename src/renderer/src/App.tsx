@@ -309,18 +309,26 @@ export default function App() {
   // button's own color does need one. useImperativeHandle re-invokes this
   // callback with a fresh handle whenever a pane's composer opens or closes.
   const [composerOpen, setComposerOpen] = useState<Record<string, boolean>>({})
-  const setComposerRef = useCallback(
-    (id: string) =>
-      (h: ComposerHandle | null): void => {
+  // useImperativeHandle's effect keys off the `ref` prop's own identity as well
+  // as its deps, so a `ref={setComposerRef(id)}` that mints a new closure every
+  // render makes it re-fire on every render — which, now that it calls setState,
+  // becomes an infinite loop. Cache one stable callback per id instead.
+  const composerRefCallbacks = useRef(new Map<string, (h: ComposerHandle | null) => void>())
+  const setComposerRef = useCallback((id: string) => {
+    let cb = composerRefCallbacks.current.get(id)
+    if (!cb) {
+      cb = (h: ComposerHandle | null): void => {
         if (h) composerRefs.current.set(id, h)
         else composerRefs.current.delete(id)
         setComposerOpen((m) => {
           const next = h?.isOpen ?? false
           return m[id] === next ? m : { ...m, [id]: next }
         })
-      },
-    []
-  )
+      }
+      composerRefCallbacks.current.set(id, cb)
+    }
+    return cb
+  }, [])
 
   // Derived view state. The active view is the tab on screen; the focused pane's
   // leaf is the app's notion of the "active" tab (sidebar + keyboard follow it).
