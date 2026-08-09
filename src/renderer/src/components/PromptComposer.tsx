@@ -391,25 +391,16 @@ export function PromptComposer({
 
       {displayMode === 'open' && (
         <div className="flex flex-col">
-          <div className="flex shrink-0 items-center gap-2 px-3 pt-2">
+          <div className="flex shrink-0 items-center gap-2 px-3 pt-1.5">
             <span className="eyebrow shrink-0 text-accent">prompt composer</span>
             {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
             <div className="flex-1" />
-            {!historyOpen && (
-              <button
-                onClick={openHistoryBrowser}
-                title="Browse and search sent prompts"
-                className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-fg"
-              >
-                History
-              </button>
-            )}
             <button
-              onClick={historyOpen ? () => setHistoryOpen(false) : onClose}
-              title={historyOpen ? 'Back to composing' : 'Close (Esc)'}
-              className="px-1 text-faint transition-colors hover:text-fg"
+              onClick={() => setHistoryOpen((v) => !v)}
+              title="Browse and search sent prompts"
+              className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-fg"
             >
-              ×
+              {historyOpen ? 'Back' : 'History'}
             </button>
           </div>
 
@@ -464,8 +455,7 @@ export function PromptComposer({
                 className="mx-3 mt-1.5 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
               />
 
-              <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pt-1.5">
-                <span className="text-[11px] text-faint">quick:</span>
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 py-1.5">
                 {QUICK_COMMANDS.map((c) => (
                   <button
                     key={c.label}
@@ -486,22 +476,6 @@ export function PromptComposer({
                     {k.label}
                   </button>
                 ))}
-              </div>
-
-              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-                <span className="text-[11px] text-faint">
-                  {sendMode === 'enter' ? (
-                    <>
-                      <Key>Enter</Key> send · <Key>Shift+Enter</Key> newline ·{' '}
-                    </>
-                  ) : (
-                    <>
-                      <Key>{SEND_ACCEL}</Key> send · <Key>Enter</Key> newline ·{' '}
-                    </>
-                  )}
-                  <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close ·{' '}
-                  <Key>↑↓</Key> history
-                </span>
                 <div className="flex-1" />
                 <button
                   onClick={onPasteButton}
