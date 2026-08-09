@@ -1,4 +1,14 @@
-import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+  type ReactNode
+} from 'react'
+import type { SftpFindEntry, Snippet } from '../../../shared/types'
 import { fmtAccel, isMac } from '../lib/platform'
 import { COMPOSE_ACCEL } from '../lib/xtermAttach'
 
@@ -10,6 +20,9 @@ const TEXTAREA_MAX = 240
 /** Tailwind's preflight makes everything border-box, so the border has to be
  *  added back: scrollHeight is content + padding, `height` is that plus border. */
 const TEXTAREA_BORDER = 2
+
+/** How long to let typing settle before a search round-trips to the host. */
+const FIND_DEBOUNCE_MS = 150
 
 interface Props {
   /** The drafting panel is open. When closed, a draft still shows as a strip. */
@@ -35,6 +48,37 @@ interface Props {
   target?: string
   /** The remote has bracketed paste on, so newlines stay newlines. */
   bracketed: boolean
+  /** Which host the @-file picker searches. */
+  connectionId: string
+}
+
+type TriggerKind = 'file' | 'snippet'
+
+interface TriggerState {
+  kind: TriggerKind
+  /** Index in `draft` the eventual insertion replaces from. */
+  start: number
+  /** 1 when a typed `@`/`/` sits at `start` and is itself part of the replace
+   *  range; 0 for the footer button, which opens on a bare cursor position. */
+  markerLen: 0 | 1
+}
+
+interface DropdownItem {
+  key: string
+  label: string
+  sub?: string
+  icon: ReactNode
+  insertText: string
+}
+
+/** Typed-marker gate: only opens at the start of the draft or after whitespace,
+ *  so an email or a mid-path slash never mistakenly opens the dropdown. */
+function detectMarker(value: string, pos: number): TriggerState | null {
+  if (pos === 0) return null
+  const ch = value[pos - 1]
+  if (ch !== '@' && ch !== '/') return null
+  if (pos > 1 && !/\s/.test(value[pos - 2])) return null
+  return { kind: ch === '@' ? 'file' : 'snippet', start: pos - 1, markerLen: 1 }
 }
 
 /**
@@ -64,9 +108,21 @@ export function PromptComposer({
   onClose,
   onDiscard,
   target,
-  bracketed
+  bracketed,
+  connectionId
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
+  const pendingCaretRef = useRef<number | null>(null)
+  const findReqRef = useRef(0)
+
+  const [cursorPos, setCursorPos] = useState(0)
+  const [trigger, setTrigger] = useState<TriggerState | null>(null)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const [snippets, setSnippets] = useState<Snippet[]>([])
+  const [fileResults, setFileResults] = useState<SftpFindEntry[]>([])
+  const [fileLoading, setFileLoading] = useState(false)
+
+  const query = trigger ? draft.slice(trigger.start + trigger.markerLen, cursorPos) : ''
 
   // Grow with the content up to a ceiling, then scroll. An explicit height, not
   // flex-1: a flex-basis of 0 in an auto-height column collapses the box, and the
@@ -87,9 +143,139 @@ export function PromptComposer({
     if (open) ref.current?.focus()
   }, [open, focusKey])
 
+  // Restores the caret after an insertion swaps `draft` out from under the
+  // textarea — a controlled value change alone doesn't reliably preserve it.
+  useLayoutEffect(() => {
+    const pos = pendingCaretRef.current
+    if (pos === null) return
+    pendingCaretRef.current = null
+    const el = ref.current
+    if (el) el.setSelectionRange(pos, pos)
+    setCursorPos(pos)
+  }, [draft])
+
+  useEffect(() => {
+    setActiveIndex(0)
+  }, [trigger, query])
+
+  useEffect(() => {
+    if (!trigger) {
+      setFileResults([])
+      return
+    }
+    if (trigger.kind === 'snippet') {
+      void window.api.snippetsList().then(setSnippets)
+      return
+    }
+    const reqId = ++findReqRef.current
+    setFileLoading(true)
+    const t = setTimeout(() => {
+      window.api
+        .sftpFind({ connectionId, root: '', query })
+        .then((res) => {
+          if (findReqRef.current !== reqId) return
+          setFileResults(res.entries)
+          setFileLoading(false)
+        })
+        .catch(() => {
+          if (findReqRef.current !== reqId) return
+          setFileResults([])
+          setFileLoading(false)
+        })
+    }, FIND_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trigger?.kind, query, connectionId])
+
+  const results = useMemo<DropdownItem[]>(() => {
+    if (!trigger) return []
+    if (trigger.kind === 'snippet') {
+      const q = query.trim().toLowerCase()
+      return snippets
+        .filter((s) => !q || s.name.toLowerCase().includes(q))
+        .slice(0, 20)
+        .map((s) => ({
+          key: s.id,
+          label: s.name,
+          sub: s.body.split('\n')[0]?.slice(0, 60),
+          icon: <span className="text-accent">/</span>,
+          insertText: s.body
+        }))
+    }
+    return fileResults.map((e) => ({
+      key: e.path,
+      label: e.path.slice(e.path.lastIndexOf('/') + 1) || e.path,
+      sub: e.path,
+      icon:
+        e.type === 'directory' ? (
+          <span className="text-amber">▸▸</span>
+        ) : (
+          <span className="text-faint">▪</span>
+        ),
+      insertText: `${e.path} `
+    }))
+  }, [trigger, query, snippets, fileResults])
+
+  const commit = (item: DropdownItem): void => {
+    if (!trigger) return
+    const start = trigger.start
+    const next = draft.slice(0, start) + item.insertText + draft.slice(cursorPos)
+    pendingCaretRef.current = start + item.insertText.length
+    onDraft(next)
+    setTrigger(null)
+  }
+
+  const openSnippetPicker = (): void => {
+    const el = ref.current
+    const pos = el?.selectionStart ?? draft.length
+    setCursorPos(pos)
+    setTrigger({ kind: 'snippet', start: pos, markerLen: 0 })
+    el?.focus()
+  }
+
   const body = draft.replace(/\s+$/, '')
 
+  const onChange = (e: ChangeEvent<HTMLTextAreaElement>): void => {
+    const value = e.target.value
+    const pos = e.target.selectionStart ?? value.length
+    setCursorPos(pos)
+    setTrigger((prev) => {
+      if (prev) {
+        const minPos = prev.start + prev.markerLen
+        if (pos < minPos) return null
+        if (prev.markerLen === 1 && value[prev.start] !== (prev.kind === 'file' ? '@' : '/')) return null
+        if (value.slice(minPos, pos).includes('\n')) return null
+        return prev
+      }
+      return detectMarker(value, pos)
+    })
+    onDraft(value)
+  }
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (trigger) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setActiveIndex((i) => Math.min(i + 1, Math.max(0, results.length - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setActiveIndex((i) => Math.max(i - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey) || e.key === 'Tab') {
+        e.preventDefault()
+        const item = results[activeIndex]
+        if (item) commit(item)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setTrigger(null)
+        return
+      }
+    }
     // Enter is left alone on purpose: making a new line is what this is for.
     if (e.key === 'Enter' && (isMac ? e.metaKey : e.ctrlKey)) {
       e.preventDefault()
@@ -136,6 +322,36 @@ export function PromptComposer({
 
   return (
     <div className="absolute inset-x-0 bottom-0 z-20 flex max-h-[60%] flex-col border-t border-line bg-surface/95 shadow-lg shadow-ink/60 backdrop-blur-sm">
+      {trigger && (
+        <div className="absolute inset-x-3 bottom-full z-30 mb-1.5 max-h-60 overflow-y-auto rounded-lg border border-line bg-panel/95 p-1.5 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.7)] backdrop-blur-sm">
+          {results.length === 0 ? (
+            <p className="px-2.5 py-3 text-center text-xs text-faint">
+              {trigger.kind === 'file' && fileLoading ? 'Searching…' : 'No matches.'}
+            </p>
+          ) : (
+            results.map((item, i) => (
+              <button
+                key={item.key}
+                onMouseEnter={() => setActiveIndex(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  commit(item)
+                }}
+                className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors ${
+                  i === activeIndex ? 'bg-accent-soft/40' : 'hover:bg-elevated/50'
+                }`}
+              >
+                <span className="grid w-4 shrink-0 place-items-center text-xs">{item.icon}</span>
+                <span className="truncate text-sm text-fg/90">{item.label}</span>
+                {item.sub && (
+                  <span className="ml-auto truncate pl-2 font-mono text-[11px] text-faint">{item.sub}</span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+
       <div className="flex shrink-0 items-center gap-2 px-3 pt-2">
         <span className="eyebrow shrink-0 text-accent">prompt composer</span>
         {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
@@ -152,7 +368,7 @@ export function PromptComposer({
       <textarea
         ref={ref}
         value={draft}
-        onChange={(e) => onDraft(e.target.value)}
+        onChange={onChange}
         onKeyDown={onKeyDown}
         spellCheck={false}
         placeholder="Write as many lines as you like — nothing reaches the remote until you send."
@@ -162,7 +378,7 @@ export function PromptComposer({
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
         <span className="text-[11px] text-faint">
           <Key>{SEND_ACCEL}</Key> send · <Key>{INSERT_ACCEL}</Key> insert without sending ·{' '}
-          <Key>Esc</Key> close
+          <Key>Esc</Key> close · <Key>@</Key> find a file · <Key>/</Key> insert a snippet
         </span>
         {!bracketed && (
           <span className="text-[11px] text-amber">
@@ -170,6 +386,13 @@ export function PromptComposer({
           </span>
         )}
         <div className="flex-1" />
+        <button
+          onClick={openSnippetPicker}
+          title="Insert a saved snippet"
+          className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
+        >
+          / Snippets
+        </button>
         <button
           disabled={!body}
           onClick={() => onSend(false)}

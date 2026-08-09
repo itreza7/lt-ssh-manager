@@ -26,6 +26,7 @@ import {
 } from '../lib/terminalSettings'
 import { Button } from './Modal'
 import { Select } from './Select'
+import { SnippetsSection } from './SnippetsSection'
 import { isMac } from '../lib/platform'
 import { COMPOSE_ACCEL, IMAGE_PASTE_ACCEL } from '../lib/xtermAttach'
 
@@ -35,12 +36,13 @@ interface Props {
   onReset: () => void
 }
 
-type SectionId = 'appearance' | 'terminal' | 'editor' | 'connections' | 'shortcuts'
+type SectionId = 'appearance' | 'terminal' | 'editor' | 'connections' | 'snippets' | 'shortcuts'
 const SECTIONS: { id: SectionId; label: string; icon: string }[] = [
   { id: 'appearance', label: 'Appearance', icon: '◐' },
   { id: 'terminal', label: 'Terminal', icon: '▍' },
   { id: 'editor', label: 'Editor', icon: '✎' },
   { id: 'connections', label: 'Connections', icon: '⇄' },
+  { id: 'snippets', label: 'Snippets', icon: '/' },
   { id: 'shortcuts', label: 'Shortcuts', icon: '⌨' }
 ]
 
@@ -407,6 +409,8 @@ export function SettingsPage({ settings, onChange, onReset }: Props) {
                 </Row>
               </div>
             )}
+
+            {section === 'snippets' && <SnippetsSection />}
 
             {section === 'shortcuts' && (
               <div className="panel px-5 py-3">

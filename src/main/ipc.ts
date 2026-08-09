@@ -23,7 +23,9 @@ import type {
   ResumeHostScan,
   ServerStats,
   SettingsPatch,
+  SftpFindResult,
   SftpList,
+  SnippetDraft,
   StageResult,
   TmuxIntent,
   TmuxSession,
@@ -34,6 +36,7 @@ import type {
 import { connectionStore } from './store/connections'
 import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
+import { snippetStore } from './store/snippets'
 import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager, isPermanentScanFailure } from './ssh/manager'
@@ -345,6 +348,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
   ipcMain.handle('secrets:available', () => secrets.available())
   ipcMain.handle('secrets:has', (_e, id: string) => secrets.get(id) !== null)
+
+  // ---- prompt snippets (global, not per-connection) ----
+  ipcMain.handle('snippets:list', () => snippetStore.list())
+  ipcMain.handle('snippets:save', (_e, draft: SnippetDraft) => snippetStore.upsert(draft))
+  ipcMain.handle('snippets:delete', (_e, id: string) => snippetStore.remove(id))
 
   // ---- settings (persisted to userData/settings.json) ----
   ipcMain.handle('settings:get', () => settingsStore.getAll())
@@ -723,6 +731,34 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
   ipcMain.handle('sftp:realpath', (_e, args: { connectionId: string; path: string }) =>
     ssh.sftpRealpath(args.connectionId, args.path)
+  )
+  // Composer's @-file picker: a terminal tab has no open Files channel, so this
+  // brackets its own SFTP session the same way sftp:upload-to does — the
+  // `opened` flag guards against decrementing a ref this call never took.
+  ipcMain.handle(
+    'sftp:find',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; root: string; query: string }
+    ): Promise<SftpFindResult> => {
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      let opened = false
+      try {
+        await ssh.openSftp(
+          args.connectionId,
+          connection,
+          passwordFor(args.connectionId, args.password),
+          undefined,
+          30000
+        )
+        opened = true
+        const root = args.root || connection.sftpPath || '.'
+        return await ssh.sftpFind(args.connectionId, root, args.query)
+      } finally {
+        if (opened) ssh.closeSftp(args.connectionId)
+      }
+    }
   )
   ipcMain.handle('sftp:mkdir', (_e, args: { connectionId: string; path: string }) =>
     ssh.sftpMkdir(args.connectionId, args.path)

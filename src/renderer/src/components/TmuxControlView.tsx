@@ -507,6 +507,7 @@ export function TmuxControlView({
           onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
           target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
           bracketed={bracketed}
+          connectionId={connectionId}
         />
       </div>
 
