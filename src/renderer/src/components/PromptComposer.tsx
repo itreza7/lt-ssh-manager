@@ -1,10 +1,12 @@
 import {
   useLayoutEffect,
   useRef,
+  useState,
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
-  type ReactNode
+  type ReactNode,
+  type TransitionEvent
 } from 'react'
 import type { ComposerSendMode } from '../../../shared/types'
 import { fmtAccel, isMac } from '../lib/platform'
@@ -74,8 +76,12 @@ interface Props {
   bracketed: boolean
 }
 
+/** The three heights this panel occupies, ordered short to tall. */
+type Mode = 'empty' | 'strip' | 'open'
+const RANK: Record<Mode, number> = { empty: 0, strip: 1, open: 2 }
+
 /**
- * A drafting bar for multi-line input, overlaid on the bottom of a terminal.
+ * A drafting bar for multi-line input, docked below a terminal.
  *
  * The point is Shift+Enter's problem one size up: some things you want to say to
  * a terminal agent are paragraphs, and typing a paragraph *into* a live prompt
@@ -83,13 +89,17 @@ interface Props {
  * until you send it, and it arrives as a single bracketed paste — one unit, not
  * a stream of keys.
  *
- * It is deliberately an **overlay**, not a sibling in the pane's flex column: a
- * docked sibling changes the terminal host's box, which trips the ResizeObserver
- * and pushes a new PTY size. Under tmux that reflows the session for *every*
- * attached client, so opening a composer here would visibly reformat someone
- * else's window. The cost is that it covers the bottom rows while open, which is
- * why it stays as short as its content allows and disappears entirely when
- * there's nothing drafted.
+ * It is a real sibling in the pane's flex column, not an overlay — the caller is
+ * responsible for the trade-off that implies (shrinking the terminal's box while
+ * open, which under tmux reflows every attached client; see TerminalView's and
+ * TmuxControlView's own doc comments where this mounts). What this component
+ * owns is the animated collapse between three heights — nothing, the
+ * closed-with-a-draft strip, and the full panel — so opening slides the panel up
+ * into view and closing slides it back down instead of popping between sizes.
+ * The outer wrapper's `max-height` is what animates; on the way down the old,
+ * taller content stays mounted until the transition finishes so there's
+ * something to visibly slide away, then swaps to the smaller content once the
+ * box has actually reached its new size.
  */
 export function PromptComposer({
   open,
@@ -223,104 +233,130 @@ export function PromptComposer({
     }
   }
 
-  if (!open && !draft) return null
-
   // Closed with a draft: a 28px strip, so text you can't see is never text you
-  // forgot about. Closed with nothing drafted renders nothing at all — a
+  // forgot about. Closed with nothing drafted collapses to nothing — a
   // permanent strip would sit exactly where a full-height terminal puts its
   // prompt.
-  if (!open) {
-    const lines = draft.split('\n')
-    return (
-      <div className="absolute inset-x-0 bottom-0 z-20 flex h-7 items-center gap-2 border-t border-line bg-surface/95 px-3 backdrop-blur-sm">
-        <button onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-          <span className="eyebrow shrink-0 text-accent">draft</span>
-          <span className="truncate font-mono text-[11px] text-muted">
-            {lines.find((l) => l.trim()) ?? ''}
-          </span>
-          {lines.length > 1 && (
-            <span className="shrink-0 text-[11px] text-faint">+{lines.length - 1} more</span>
-          )}
-        </button>
-        <span className="shrink-0 font-mono text-[11px] text-faint">{COMPOSE_ACCEL}</span>
-        <button
-          onClick={onDiscard}
-          title="Discard draft"
-          className="shrink-0 px-1 text-faint transition-colors hover:text-danger"
-        >
-          ×
-        </button>
-      </div>
-    )
+  const mode: Mode = open ? 'open' : draft ? 'strip' : 'empty'
+  const [displayMode, setDisplayMode] = useState<Mode>(mode)
+  const prevModeRef = useRef(mode)
+
+  // Grow immediately (before paint) so the taller content is already in the DOM
+  // for the box to expand around. Shrinks wait for onTransitionEnd below, so the
+  // taller/older content stays visible — being clipped by overflow-hidden — for
+  // the full slide instead of popping away the instant the target height drops.
+  useLayoutEffect(() => {
+    if (RANK[mode] > RANK[prevModeRef.current]) setDisplayMode(mode)
+    prevModeRef.current = mode
+  }, [mode])
+
+  const onWrapTransitionEnd = (e: TransitionEvent<HTMLDivElement>): void => {
+    if (e.target !== e.currentTarget) return
+    setDisplayMode(mode)
   }
 
+  const lines = draft.split('\n')
+
   return (
-    <div className="absolute inset-x-0 bottom-0 z-20 flex max-h-[60%] flex-col border-t border-line bg-surface/95 shadow-lg shadow-ink/60 backdrop-blur-sm">
-      <div className="flex shrink-0 items-center gap-2 px-3 pt-2">
-        <span className="eyebrow shrink-0 text-accent">prompt composer</span>
-        {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
-        <div className="flex-1" />
-        <button
-          onClick={onClose}
-          title="Close (Esc)"
-          className="px-1 text-faint transition-colors hover:text-fg"
-        >
-          ×
-        </button>
-      </div>
+    <div
+      onTransitionEnd={onWrapTransitionEnd}
+      className={`w-full shrink-0 overflow-hidden bg-surface/95 backdrop-blur-sm transition-[max-height] duration-200 ease-out ${
+        mode === 'open' ? 'max-h-[420px]' : mode === 'strip' ? 'max-h-7' : 'max-h-0'
+      } ${displayMode === 'open' ? 'shadow-lg shadow-ink/60' : ''} ${
+        displayMode !== 'empty' ? 'border-t border-line' : ''
+      }`}
+    >
+      {displayMode === 'strip' && (
+        <div className="flex h-7 items-center gap-2 px-3">
+          <button onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+            <span className="eyebrow shrink-0 text-accent">draft</span>
+            <span className="truncate font-mono text-[11px] text-muted">
+              {lines.find((l) => l.trim()) ?? ''}
+            </span>
+            {lines.length > 1 && (
+              <span className="shrink-0 text-[11px] text-faint">+{lines.length - 1} more</span>
+            )}
+          </button>
+          <span className="shrink-0 font-mono text-[11px] text-faint">{COMPOSE_ACCEL}</span>
+          <button
+            onClick={onDiscard}
+            title="Discard draft"
+            className="shrink-0 px-1 text-faint transition-colors hover:text-danger"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
-      <textarea
-        ref={ref}
-        value={draft}
-        onChange={onChange}
-        onKeyDown={onKeyDown}
-        onPaste={onPaste}
-        spellCheck={false}
-        placeholder="Write as many lines as you like — nothing reaches the remote until you send."
-        className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
-      />
+      {displayMode === 'open' && (
+        <div className="flex flex-col">
+          <div className="flex shrink-0 items-center gap-2 px-3 pt-2">
+            <span className="eyebrow shrink-0 text-accent">prompt composer</span>
+            {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
+            <div className="flex-1" />
+            <button
+              onClick={onClose}
+              title="Close (Esc)"
+              className="px-1 text-faint transition-colors hover:text-fg"
+            >
+              ×
+            </button>
+          </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-        <span className="text-[11px] text-faint">
-          {sendMode === 'enter' ? (
-            <>
-              <Key>Enter</Key> send · <Key>Shift+Enter</Key> newline ·{' '}
-            </>
-          ) : (
-            <>
-              <Key>{SEND_ACCEL}</Key> send · <Key>Enter</Key> newline ·{' '}
-            </>
-          )}
-          <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close
-        </span>
-        {!bracketed && (
-          <span className="text-[11px] text-amber">
-            Bracketed paste is off here — each line will run as its own command.
-          </span>
-        )}
-        <div className="flex-1" />
-        <button
-          onClick={onPasteButton}
-          title="Paste from clipboard"
-          className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
-        >
-          Paste
-        </button>
-        <button
-          disabled={!body}
-          onClick={() => send(false)}
-          className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg disabled:opacity-40 disabled:hover:text-muted"
-        >
-          Insert
-        </button>
-        <button
-          disabled={!body}
-          onClick={() => send(true)}
-          className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
-        >
-          Send ▸
-        </button>
-      </div>
+          <textarea
+            ref={ref}
+            value={draft}
+            onChange={onChange}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            spellCheck={false}
+            placeholder="Write as many lines as you like — nothing reaches the remote until you send."
+            className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
+          />
+
+          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+            <span className="text-[11px] text-faint">
+              {sendMode === 'enter' ? (
+                <>
+                  <Key>Enter</Key> send · <Key>Shift+Enter</Key> newline ·{' '}
+                </>
+              ) : (
+                <>
+                  <Key>{SEND_ACCEL}</Key> send · <Key>Enter</Key> newline ·{' '}
+                </>
+              )}
+              <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close
+            </span>
+            {!bracketed && (
+              <span className="text-[11px] text-amber">
+                Bracketed paste is off here — each line will run as its own command.
+              </span>
+            )}
+            <div className="flex-1" />
+            <button
+              onClick={onPasteButton}
+              title="Paste from clipboard"
+              className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
+            >
+              Paste
+            </button>
+            <button
+              disabled={!body}
+              onClick={() => send(false)}
+              className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg disabled:opacity-40 disabled:hover:text-muted"
+            >
+              Insert
+            </button>
+            <button
+              disabled={!body}
+              onClick={() => send(true)}
+              className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
+            >
+              Send ▸
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

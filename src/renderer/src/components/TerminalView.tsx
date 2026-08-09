@@ -554,53 +554,57 @@ export function TerminalView({
     mode: (ended.reason === 'gone' || !isTmux ? 'create' : 'attach') as 'attach' | 'create'
   }
   return (
-    <div className="relative h-full w-full">
-      <div
-        ref={scrollRef}
-        className={`absolute inset-0 overflow-x-hidden ${
-          tall ? 'overscroll-host overflow-y-auto' : 'overflow-hidden'
-        }`}
-      >
-        <div ref={containerRef} className="w-full" />
-      </div>
-      {/* z-30: xterm's canvas layers are position:absolute with z-index up to 10 and
-          hoist out of the non-stacking .xterm wrapper, so the overlay must sit above
-          them (and above pane chrome) or the reattach button can't be clicked. Stays
-          below the z-50 host-key / password modals. */}
-      {overlay && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
-          <div className="panel flex max-w-sm flex-col items-center gap-3 p-6 text-center">
-            <div className="eyebrow">{overlay.eyebrow}</div>
-            <p className="text-sm text-muted">{overlay.body}</p>
-            <button
-              onClick={() => reconnect(overlay.mode)}
-              className="mt-1 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
-            >
-              {overlay.action}
-            </button>
-          </div>
+    <div className="flex h-full w-full flex-col">
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          className={`absolute inset-0 overflow-x-hidden ${
+            tall ? 'overscroll-host overflow-y-auto' : 'overflow-hidden'
+          }`}
+        >
+          <div ref={containerRef} className="w-full" />
         </div>
-      )}
-      {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
-      <DropUploadLayer over={upload.over} status={upload.status} onDismiss={upload.dismiss} />
-      {find.open && (
-        <TerminalFindBar
-          focusKey={find.focusKey}
-          query={find.query}
-          onQuery={find.setQuery}
-          flags={find.flags}
-          onFlags={find.setFlags}
-          results={find.results}
-          badPattern={find.badPattern}
-          altScreen={find.altScreen}
-          onFind={find.find}
-          onClose={find.close}
-          onBlur={find.blur}
-        />
-      )}
-      {/* Overlaid on the terminal, never docked beside it: a sibling would change
-          the scroll host's box, and the ResizeObserver above turns that into a PTY
-          resize — under tmux, a reflow for every attached client. */}
+        {/* z-30: xterm's canvas layers are position:absolute with z-index up to 10 and
+            hoist out of the non-stacking .xterm wrapper, so the overlay must sit above
+            them (and above pane chrome) or the reattach button can't be clicked. Stays
+            below the z-50 host-key / password modals. */}
+        {overlay && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
+            <div className="panel flex max-w-sm flex-col items-center gap-3 p-6 text-center">
+              <div className="eyebrow">{overlay.eyebrow}</div>
+              <p className="text-sm text-muted">{overlay.body}</p>
+              <button
+                onClick={() => reconnect(overlay.mode)}
+                className="mt-1 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-ink transition-opacity hover:opacity-90"
+              >
+                {overlay.action}
+              </button>
+            </div>
+          </div>
+        )}
+        {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
+        <DropUploadLayer over={upload.over} status={upload.status} onDismiss={upload.dismiss} />
+        {find.open && (
+          <TerminalFindBar
+            focusKey={find.focusKey}
+            query={find.query}
+            onQuery={find.setQuery}
+            flags={find.flags}
+            onFlags={find.setFlags}
+            results={find.results}
+            badPattern={find.badPattern}
+            altScreen={find.altScreen}
+            onFind={find.find}
+            onClose={find.close}
+            onBlur={find.blur}
+          />
+        )}
+      </div>
+      {/* Docked below the terminal, not overlaid on it — a real flex sibling, so
+          opening it shrinks the scroll host's box above and the ResizeObserver
+          turns that into a PTY resize (under tmux, a reflow for every attached
+          client). Accepted trade-off for a composer that never hides terminal
+          rows; see PromptComposer's own doc comment for the animated collapse. */}
       <PromptComposer
         open={composing}
         focusKey={focusKey}

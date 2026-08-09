@@ -78,6 +78,26 @@ export const CLAUDE_RESOLVE = [
  * host is one click away on the dashboard regardless.
  */
 export function claudeScript(dir: string, pin?: string, resume?: string): string {
+  const resumeArg = resume ? ` --resume ${shQuote(resume)}` : ''
+  // Everything above runs under /bin/sh (shWrap, for the fish/csh hosts CLAUDE_RESOLVE's
+  // own comment describes), so it cannot source ~/.bashrc itself — bash-only syntax in a
+  // stock bashrc (e.g. `>&`) is a parse error under dash, and a parse error in a dot-sourced
+  // script kills the sourcing shell outright. A real bash has to do that part, as its own
+  // subprocess: found the same cheap way CLAUDE_RESOLVE finds claude, then handed the same
+  // PS1 trick — bash's stock bashrc returns on its first line for a non-interactive shell,
+  // which `$SHELL -c` always is even under tmux's pty, so PS1 is forced non-empty purely to
+  // clear that guard and unset right after. If the user's rc defines `claude` as a function
+  // or alias — a model/effort default, a proxy, a permissions bypass — that's what runs, so
+  // a tab behaves exactly like the user typing `claude` themselves, worktree directory or
+  // not (the cwd is already set by the `cd` above, and bash -c inherits it). Otherwise it
+  // falls back to the plain resolved binary, same as an explicit pin always does.
+  const bashRun =
+    `BB=$(command -v bash 2>/dev/null); ` +
+    `if [ -n "$BB" ]; then "$BB" -c ${shQuote(
+      `PS1=x; . "$HOME/.bashrc" >/dev/null 2>&1; unset PS1; t=$(type -t claude 2>/dev/null); ` +
+        `if [ "$t" = function ] || [ "$t" = alias ]; then claude${resumeArg}; else "$CLI"${resumeArg}; fi`
+    )}; rc=$?; ` +
+    `else "$CLI"${resumeArg}; rc=$?; fi`
   return [
     // `%b` so callers can put a line break in a message without putting one in
     // the script; `read` falls back to a sleep where stdin is not a terminal.
@@ -87,7 +107,10 @@ export function claudeScript(dir: string, pin?: string, resume?: string): string
     `CLI=${pin ? shQuote(pin) : ''}`,
     CLAUDE_RESOLVE,
     `[ -n "$CLI" ] || die 'Claude Code was not found on this host.\\nInstall it with:  curl -fsSL https://claude.ai/install.sh | bash\\nOr, if it lives behind a version manager, set its full path in Edit > Claude Code binary.'`,
-    `"$CLI"${resume ? ` --resume ${shQuote(resume)}` : ''}; rc=$?`,
+    'export CLI',
+    // A pin is an explicit, exact-binary override from Settings — it always wins outright,
+    // with no rc/wrapper involved, same as before this existed.
+    pin ? `"$CLI"${resumeArg}; rc=$?` : bashRun,
     '[ "$rc" = 0 ] && exit 0',
     'die "claude exited with status $rc"'
   ].join(SEP)
