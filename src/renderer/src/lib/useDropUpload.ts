@@ -1,6 +1,6 @@
 // Drop-to-upload: take local files (from an OS drag, or from the clipboard as an
-// image), stage them on the host over SFTP, and put the resulting remote paths on
-// a terminal's input line.
+// image or a Finder/Explorer copy), stage them on the host over SFTP, and put the
+// resulting remote paths on a terminal's input line.
 //
 // This is the one thing a raw SSH client can't do. Telling a terminal agent about
 // a screenshot or a log file otherwise means leaving the app, opening a second
@@ -38,8 +38,8 @@ export interface DropUpload {
   dismiss: () => void
   /** Stage these local files, then type their remote paths on `term`. */
   drop: (paths: string[], term: XTerm | null) => void
-  /** The same, for whatever image is sitting on the clipboard. */
-  pasteImage: (term: XTerm | null) => void
+  /** The same, for whatever's sitting on the clipboard — an image or file refs. */
+  pasteUpload: (term: XTerm | null) => void
 }
 
 /** Local basename — either separator, since the renderer has no `node:path`. */
@@ -152,27 +152,31 @@ export function useDropUpload(connectionId: string, password?: string): DropUplo
     [run]
   )
 
-  const pasteImage = useCallback(
+  const pasteUpload = useCallback(
     (term: XTerm | null): void => {
       chain.current = chain.current.then(async () => {
-        let file: string | null
+        let files: string[]
         try {
-          file = await window.api.clipboardImageToTemp()
+          // Image first — a screenshot has no file-list form, only a bitmap. If
+          // there isn't one, fall back to whatever file references (a Finder/
+          // Explorer copy) are on the clipboard instead.
+          const image = await window.api.clipboardImageToTemp()
+          files = image ? [image] : await window.api.clipboardFilesToPaths()
         } catch (e) {
           show({ kind: 'error', text: ipcMessage(e) }, ERROR_MS)
           return
         }
         // Nothing to paste is the common outcome of a chord pressed by habit,
         // so it's a note rather than a failure.
-        if (!file) {
-          show({ kind: 'note', text: 'No image on the clipboard.' }, DONE_MS)
+        if (!files.length) {
+          show({ kind: 'note', text: 'No image or file on the clipboard.' }, DONE_MS)
           return
         }
-        await run([file], term)
+        await run(files, term)
       })
     },
     [run, show]
   )
 
-  return { over, setOver, status, dismiss, drop, pasteImage }
+  return { over, setOver, status, dismiss, drop, pasteUpload }
 }

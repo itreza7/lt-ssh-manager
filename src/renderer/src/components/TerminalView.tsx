@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useReducer, useRef, useState, type Ref } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
-import { attachTerminal, sendComposed } from '../lib/xtermAttach'
+import { attachTerminal, sendComposed, type ComposerHandle } from '../lib/xtermAttach'
 import type { TerminalSearch } from '../lib/xtermSearch'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { useTerminalFind } from '../lib/useTerminalFind'
@@ -38,6 +38,8 @@ interface Props {
   draftKey: string
   /** The draft last persisted for this tab, loaded before mount so it isn't lost on restart. */
   initialDraft?: string
+  /** Lets a header button trigger this pane's composer without owning its state. */
+  ref?: Ref<ComposerHandle>
 }
 
 export function TerminalView({
@@ -53,7 +55,8 @@ export function TerminalView({
   onTitle,
   onAgentSignal,
   draftKey,
-  initialDraft
+  initialDraft,
+  ref
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
   // xterm mounts and is sized to overscroll× the visible height.
@@ -287,6 +290,30 @@ export function TerminalView({
     termRef.current?.focus()
   }, [])
 
+  // What the compose chord does: open when closed, close when already open —
+  // the keyboard way to turn the composer "off" the user asked for, alongside
+  // openComposer/closeComposer which the strip's own buttons still use directly.
+  const toggleComposer = useCallback(() => {
+    setComposing((c) => {
+      if (c) {
+        termRef.current?.focus()
+        return false
+      }
+      setBracketed(termRef.current?.modes.bracketedPasteMode ?? false)
+      bumpFocus()
+      return true
+    })
+  }, [])
+
+  useImperativeHandle(ref, () => ({ toggleComposer }), [toggleComposer])
+
+  // Read once at mount so a later settings change never reopens a composer the
+  // user closed on purpose.
+  useEffect(() => {
+    if (settingsRef.current.composerDefaultOpen) openComposer()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const sendDraft = useCallback(
     (submit: boolean) => {
       const term = termRef.current
@@ -296,8 +323,14 @@ export function TerminalView({
       if (!term || !body) return
       sendComposed(term, body, submit)
       setDraft('')
-      setComposing(false)
-      term.focus()
+      if (settingsRef.current.composerStayOpen) {
+        // Stay open, drafting the next message — just get focus back onto the
+        // (now empty) textarea.
+        bumpFocus()
+      } else {
+        setComposing(false)
+        term.focus()
+      }
     },
     [draft]
   )
@@ -332,11 +365,11 @@ export function TerminalView({
       sendData: send,
       settings: () => settingsRef.current,
       onTitle: (t) => onTitle?.(sessionId, t),
-      onCompose: openComposer,
+      onCompose: toggleComposer,
       onFind: startFind,
       onDragFiles: (o) => uploadRef.current.setOver(o),
       onDropFiles: (paths) => uploadRef.current.drop(paths, termRef.current),
-      onPasteImage: () => uploadRef.current.pasteImage(termRef.current)
+      onPasteUpload: () => uploadRef.current.pasteUpload(termRef.current)
     })
 
     // Attention signals. Separate from attachTerminal because it is purely
@@ -580,11 +613,11 @@ export function TerminalView({
         draft={draft}
         onDraft={setDraft}
         onSend={sendDraft}
+        sendMode={settings.composerSendMode}
         onOpen={openComposer}
         onClose={closeComposer}
         onDiscard={() => setDraft('')}
         bracketed={bracketed}
-        connectionId={connectionId}
       />
     </div>
   )

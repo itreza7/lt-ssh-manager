@@ -13,19 +13,19 @@ import {
 } from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import type {
   AgentHostScan,
   ClaudeHookStatus,
-  ClaudeRuntime,
+  ClaudeStatusLineStatus,
+  ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
-  ResumeHostScan,
   ServerStats,
   SettingsPatch,
-  SftpFindResult,
   SftpList,
-  SnippetDraft,
   StageResult,
   TmuxIntent,
   TmuxSession,
@@ -37,14 +37,17 @@ import { connectionStore } from './store/connections'
 import { draftStore } from './store/drafts'
 import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
-import { snippetStore } from './store/snippets'
 import { tunnelsStore } from './store/tunnels'
 import { workspaceStore } from './store/workspace'
 import { SshManager, isPermanentScanFailure } from './ssh/manager'
-import { CLAUDE_SETTINGS_PATH, planHooks } from './claudeHooks'
-import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
+import {
+  CLAUDE_SETTINGS_PATH,
+  TMUX_CONF_PATH,
+  planHooks,
+  planStatusLine,
+  planTmuxPassthrough
+} from './claudeHooks'
 import { agentScanScript, parseAgentScan } from '../shared/agents'
-import { RESUME_LIMIT, parseResumeScan, resumeReadScript, resumeScanScript } from '../shared/resume'
 import { SEP, shQuote, shWrap } from '../shared/shell'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
@@ -163,54 +166,6 @@ function kv(text: string): Map<string, string> {
   }
   return map
 }
-
-
-// One-shot probe for the Claude Code CLI on a host: which binary the launch will
-// actually run, what version it is, and whether it is signed in.
-//
-// The resolver block is CLAUDE_RESOLVE verbatim — the same text the launch script
-// uses — because a card that describes a different install than the tab starts is
-// worse than no card. `$CLI` is seeded by the caller with the connection's pin.
-//
-// Credentials: `[ -f ]` on the credentials file and nothing else — never cat'd,
-// stat'd for size, hashed, or fetched over the SFTP channel. Of `auth status
-// --json` only two scalars are extracted, inside the remote shell, so the account
-// email, org id and org name never enter stdout and there is nothing to strip at
-// the IPC boundary.
-const CLAUDE_PROBE = [
-  CLAUDE_TIMEOUT,
-  CLAUDE_RESOLVE,
-  // Canonicalised, not raw. `Claude here ▸` names its tmux session after this
-  // path, and the file browser names its own after the SFTP realpath — which is
-  // always symlink-resolved. On a host where /home is a symlink (Fedora
-  // Silverblue, or any box with /home on a data volume) a raw $HOME would hash
-  // to a different name than /var/home/…, and the two buttons would open two
-  // live agents on one directory.
-  'H=$(cd "$HOME" 2>/dev/null && pwd -P); echo "home=${H:-$HOME}"',
-  'CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}',
-  '[ -f "$CFG/.credentials.json" ] && echo "creds=1" || echo "creds=0"',
-  '[ -n "$CLI" ] || { echo "end=1"; exit 0; }',
-  'echo "path=$CLI"',
-  // `</dev/null` on every claude call: a subcommand that decides to prompt would
-  // otherwise inherit the exec channel's stdin, block, and burn the whole window.
-  `echo "version=$($TMO "$CLI" --version </dev/null 2>/dev/null | tr -d '\\n\\r')"`,
-  `A=$($TMO "$CLI" auth status --json </dev/null 2>/dev/null | tr -d '\\n\\r')`,
-  // Anchored on the key, not a substring search of the payload. The org name is
-  // free text and could contain `"loggedIn": false` — but JSON escapes a quote
-  // inside a string as `\"`, so the literal `"loggedIn"` can only ever be the
-  // real key. That also makes key *order* irrelevant. Verified against payloads
-  // with a hostile org name in both positions.
-  `echo "auth=$(printf '%s' "$A" | grep -o '"loggedIn"[[:space:]]*:[[:space:]]*[a-z]*' | head -n 1 | sed 's/.*://; s/[[:space:]]//g')"`,
-  `echo "method=$(printf '%s' "$A" | grep -o '"authMethod"[[:space:]]*:[[:space:]]*"[A-Za-z0-9_.@:+-]*"' | head -n 1 | sed 's/.*"\\([^"]*\\)"$/\\1/')"`,
-  // The completeness sentinel. exec() truncates at EXEC_MAX_BYTES and its
-  // deadline can cut the stream mid-line; without this a partial read is
-  // indistinguishable from a host with nothing installed, and the card would
-  // tell someone with a working agent to reinstall it.
-  'echo "end=1"'
-  // `'; '`, not a newline, and for a reason worth knowing: shWrap single-quotes
-  // this for a possibly-csh login shell, and csh cannot carry a single-quoted
-  // word across a line break. See SEP in shared/shell.ts.
-].join(SEP)
 
 function parseProbe(text: string): ServerStats {
   const map = kv(text)
@@ -349,11 +304,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
   ipcMain.handle('secrets:available', () => secrets.available())
   ipcMain.handle('secrets:has', (_e, id: string) => secrets.get(id) !== null)
-
-  // ---- prompt snippets (global, not per-connection) ----
-  ipcMain.handle('snippets:list', () => snippetStore.list())
-  ipcMain.handle('snippets:save', (_e, draft: SnippetDraft) => snippetStore.upsert(draft))
-  ipcMain.handle('snippets:delete', (_e, id: string) => snippetStore.remove(id))
 
   // ---- prompt composer drafts (local autosave — survives disconnects, restarts, crashes) ----
   ipcMain.handle('drafts:all', () => draftStore.all())
@@ -557,153 +507,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     }
   )
 
-  /**
-   * The same sweep, asking a different question: what saved Claude Code sessions
-   * does each host have that could be resumed?
-   *
-   * Deliberately a second handler rather than more fields on `agents:scan`, because
-   * the two answers go stale at completely different rates. A running agent's status
-   * changes second to second, which is why the inbox re-asks every ten; a transcript
-   * on disk changes when someone works in it, and re-listing sixty of them across
-   * every host on that cadence would be a poll that costs real work and almost never
-   * reports anything new. This one runs when the panel opens and when the user asks.
-   *
-   * Every refusal in `agents:scan` applies here unchanged, and for the same reasons —
-   * no stored password means skipped rather than attempted, a host that has already
-   * refused stays latched in `scanBlocked` until the user does something about it,
-   * and `unattended` declines an unknown host key instead of raising a dialog per
-   * host. The two sweeps share that map on purpose: a host that refused the inbox is
-   * not a host worth dialing again for this.
-   *
-   * The budget is bigger, though: sixty bounded reads is more work than one tmux
-   * listing, and the ceiling is set from what a row can actually weigh now that
-   * labels are truncated on the far side — about 450 bytes each — rather than from
-   * a hope about how long a prompt might be. It is set generously, because this is
-   * the one limit in the sweep that does not degrade: passing `maxBytes` *fails* the
-   * host outright, so a row weighing more than the estimate would not shorten the
-   * list, it would delete it. Three 200-byte labels plus a PATH_MAX path is the true
-   * worst case, and 8 KB a row leaves that room and stays well under EXEC_MAX_BYTES.
-   */
-  ipcMain.handle(
-    'resume:scan',
-    async (_e, args?: { retryFailed?: boolean; offset?: number }): Promise<ResumeHostScan[]> => {
-      if (args?.retryFailed) scanBlocked.clear()
-      // Clamped here rather than trusted: the renderer computes it from a count it
-      // got from this handler, and a negative or fractional offset would reach `head`
-      // and `tail` as a shell argument.
-      const offset = Math.max(0, Math.trunc(args?.offset ?? 0))
-      const command = shWrap(resumeScanScript(offset, RESUME_LIMIT))
-      const connections = connectionStore.list()
-      const out: ResumeHostScan[] = new Array(connections.length)
-      let next = 0
-
-      const scanOne = async (connection: Connection): Promise<ResumeHostScan> => {
-        const base = {
-          connectionId: connection.id,
-          name: connection.name,
-          sessions: [],
-          total: 0,
-          // A host we skipped or that refused us is not a *truncated* host, and
-          // rendering "list cut short" next to "no saved password" would be noise
-          // pointing at the wrong problem.
-          complete: true
-        }
-        const password = passwordFor(connection.id)
-        if (connection.authMethod === 'password' && !password) {
-          return { ...base, skipped: true, error: 'No saved password' }
-        }
-        const blocked = scanBlocked.get(connection.id)
-        if (blocked) return { ...base, skipped: true, error: blocked }
-        try {
-          const res = await ssh.exec(connection.id, connection, {
-            command,
-            password,
-            // Sized from measurement, not from taste. One page reads sixty files
-            // and spends about six processes on each, so the cost is ~360 remote
-            // processes however new the page is. On a host holding 959 transcripts
-            // that measured 2.2s warm and 15.7s under load — three quarters of a
-            // 20s budget, for a page whose rows are all fine. Timing out there
-            // would throw away a page the user asked for and waited on, so the
-            // deadline is set well clear of the observed spread; the in-flight
-            // guard and the button's own "Scanning…" state are what keep a slow
-            // host from piling up.
-            timeoutMs: 30000,
-            deadlineMs: 45000,
-            maxBytes: RESUME_LIMIT * 8192 + 65536,
-            unattended: true
-          })
-          const scan = parseResumeScan(res.stdout)
-          // parseResumeScan is host-agnostic and never sees a connection id;
-          // stamped on here, once, right where the scan is attributed to a host.
-          const sessions = scan.sessions.map((s) => ({ ...s, connectionId: connection.id }))
-          // The end marker is missing. Rows still render — an incomplete page's rows
-          // are each individually valid, and dropping sixty good ones to report one
-          // bad ending would be the worse trade — but the completeness claim is void,
-          // and the exit status is the only thing that can say why.
-          if (!scan.complete && res.code !== 0) {
-            return {
-              ...base,
-              ...scan,
-              sessions,
-              error: `The saved-session list came back incomplete (exit ${res.code ?? 'signal'})`
-            }
-          }
-          return { ...base, ...scan, sessions }
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e)
-          if (isPermanentScanFailure(e)) scanBlocked.set(connection.id, message)
-          return { ...base, error: message }
-        }
-      }
-
-      const worker = async (): Promise<void> => {
-        for (let i = next++; i < connections.length; i = next++) {
-          out[i] = await scanOne(connections[i])
-        }
-      }
-      await Promise.all(
-        Array.from({ length: Math.min(SCAN_FANOUT, connections.length) }, worker)
-      )
-      return out
-    }
-  )
-
-  /**
-   * Read one saved transcript's raw content, for the rendered-transcript tab.
-   *
-   * The scan above never learns a path, so the id has to be resolved to one
-   * first — a single glob, not the 60-file sweep resume:scan runs — before the
-   * file itself is opened over SFTP the same way every other file-reading
-   * handler in this file does.
-   */
-  ipcMain.handle(
-    'resume:read',
-    async (
-      _e,
-      args: { connectionId: string; password?: string; id: string }
-    ): Promise<{ path: string; content: string }> => {
-      const connection = connectionStore.get(args.connectionId)
-      if (!connection) throw new Error('Connection not found')
-      const password = passwordFor(args.connectionId, args.password)
-      const resolved = await ssh.exec(args.connectionId, connection, {
-        command: shWrap(resumeReadScript(args.id)),
-        password,
-        timeoutMs: 15000
-      })
-      const path = resolved.stdout.trim()
-      if (!path) throw new Error('Transcript not found on host')
-      let opened = false
-      try {
-        await ssh.openSftp(args.connectionId, connection, password, undefined, 30000)
-        opened = true
-        const { content } = await ssh.sftpReadFile(args.connectionId, path)
-        return { path, content }
-      } finally {
-        if (opened) ssh.closeSftp(args.connectionId)
-      }
-    }
-  )
-
   ipcMain.handle(
     'ssh:probe',
     async (_e, args: { connectionId: string; password?: string }): Promise<ServerStats> => {
@@ -736,34 +539,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
   ipcMain.handle('sftp:realpath', (_e, args: { connectionId: string; path: string }) =>
     ssh.sftpRealpath(args.connectionId, args.path)
-  )
-  // Composer's @-file picker: a terminal tab has no open Files channel, so this
-  // brackets its own SFTP session the same way sftp:upload-to does — the
-  // `opened` flag guards against decrementing a ref this call never took.
-  ipcMain.handle(
-    'sftp:find',
-    async (
-      _e,
-      args: { connectionId: string; password?: string; root: string; query: string }
-    ): Promise<SftpFindResult> => {
-      const connection = connectionStore.get(args.connectionId)
-      if (!connection) throw new Error('Connection not found')
-      let opened = false
-      try {
-        await ssh.openSftp(
-          args.connectionId,
-          connection,
-          passwordFor(args.connectionId, args.password),
-          undefined,
-          30000
-        )
-        opened = true
-        const root = args.root || connection.sftpPath || '.'
-        return await ssh.sftpFind(args.connectionId, root, args.query)
-      } finally {
-        if (opened) ssh.closeSftp(args.connectionId)
-      }
-    }
   )
   ipcMain.handle('sftp:mkdir', (_e, args: { connectionId: string; path: string }) =>
     ssh.sftpMkdir(args.connectionId, args.path)
@@ -934,6 +709,36 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return file
   })
 
+  // Read file references off the OS clipboard — files copied in Finder/Explorer,
+  // not a screenshot's bitmap (that's clipboard:imageToTemp above, a different
+  // clipboard slot entirely). Which format the OS actually populates is
+  // platform-specific, and Electron's clipboard API exposes raw formats rather
+  // than decoding them, so this tries the formats known to carry a file list, in
+  // the order they're most likely to be present. `text/uri-list` is the only one
+  // that reliably carries more than one path; a single-item pasteboard type like
+  // `public.file-url`/`FileNameW` is a known-narrower fallback, not a bug in this
+  // handler — multi-select copies on macOS/Windows only round-trip their first
+  // file through Electron's clipboard API at all.
+  ipcMain.handle('clipboard:filesToPaths', async (): Promise<string[]> => {
+    const raw =
+      (clipboard.has('text/uri-list') && clipboard.read('text/uri-list')) ||
+      (clipboard.has('public.file-url') && clipboard.read('public.file-url')) ||
+      (process.platform === 'win32' && clipboard.has('FileNameW') && clipboard.read('FileNameW')) ||
+      ''
+    const paths: string[] = []
+    for (const line of raw.split(/[\r\n]+/)) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      try {
+        const p = trimmed.startsWith('file://') ? fileURLToPath(trimmed) : trimmed
+        if (existsSync(p)) paths.push(p)
+      } catch {
+        // Not a valid file URL — skip it rather than staging garbage.
+      }
+    }
+    return paths
+  })
+
   ipcMain.on('sftp:close', (_e, connectionId: string) => ssh.closeSftp(connectionId))
 
   ipcMain.on('ssh:input', (_e, sessionId: string, data: string) => ssh.write(sessionId, data))
@@ -1083,54 +888,145 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       })
   )
 
-  // Describe the Claude Code CLI on one host.
-  //
-  // Every value is re-validated here rather than trusted from the wire: the probe
-  // runs in a shell we do not control, on a host we do not control, and a field
-  // that fails its shape check becomes "unknown" — never a guess, and never a
-  // fabricated version string.
+  // ---- Claude Code status line on the remote ----
+  // Same read-modify-write shape as the hook handlers above, for the
+  // `statusLine` setting instead of the `hooks.Notification` array.
   ipcMain.handle(
-    'claude:runtime',
-    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeRuntime> => {
-      const connection = connectionStore.get(args.connectionId)
-      if (!connection) throw new Error('Connection not found')
-      const started = Date.now()
-      const script = `CLI=${connection.claudePath ? shQuote(connection.claudePath) : ''}${SEP}${CLAUDE_PROBE}`
-      const res = await ssh.exec(args.connectionId, connection, {
-        command: shWrap(script),
-        password: passwordFor(args.connectionId, args.password),
-        timeoutMs: 15000,
-        // The 20s default is *smaller* than this probe's worst case: three
-        // remotely-bounded `claude` calls at 6s each. Leaving it would time out a
-        // slow-but-healthy host and render the card as "not installed" — the one
-        // wrong answer that makes someone break a working setup. Connecting is no
-        // longer inside this budget (timeoutMs covers that), so 35s is now pure
-        // headroom over the commands themselves.
-        deadlineMs: 35000
+    'claude:statusline-status',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeStatusLineStatus> =>
+      withClaudeSettings(args.connectionId, args.password, async (path, raw) => {
+        const install = planStatusLine(raw, 'install')
+        const uninstall = planStatusLine(raw, 'uninstall')
+        return {
+          path,
+          before: install.before,
+          install: install.after,
+          uninstall: uninstall.after,
+          installed: install.installed,
+          present: install.present
+        }
       })
-      const m = kv(res.stdout)
-      if (m.get('end') !== '1') throw new Error('Probe did not complete')
-      const home = m.get('home') ?? ''
-      const path = m.get('path') ?? ''
-      const auth = m.get('auth')
-      const method = m.get('method') ?? ''
-      const version = /^(\d+\.\d+\.\d+[A-Za-z0-9.+-]*) \(Claude Code\)$/.exec(m.get('version') ?? '')
-      return {
-        // Absolute, and free of control characters — nothing more. `\S` would
-        // have been wrong: /opt/My Tools/claude is a perfectly good install, and
-        // rejecting it would make the card say "not installed" about a binary
-        // the probe had just run `--version` on. The remote `case` and `[ -x ]`
-        // are what decide it is real; this only keeps terminal escapes out of a
-        // string the UI renders.
-        home: /^\/[^\u0000-\u001f\u007f]{0,4096}$/.test(home) ? home : undefined,
-        path: /^\/[^\u0000-\u001f\u007f]{1,4096}$/.test(path) ? path : null,
-        version: version ? version[1] : null,
-        loggedIn: auth === 'true' ? true : auth === 'false' ? false : null,
-        authMethod: /^[A-Za-z0-9_.@:+-]{1,32}$/.test(method) ? method : undefined,
-        credsFile: m.get('creds') === '1',
-        probeMs: Date.now() - started
+  )
+
+  ipcMain.handle(
+    'claude:statusline-apply',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; action: 'install' | 'uninstall' }
+    ): Promise<ClaudeStatusLineStatus> =>
+      withClaudeSettings(args.connectionId, args.password, async (path, raw) => {
+        // Re-planned from a fresh read rather than trusting the preview the user
+        // approved: the file may have moved under us, and the alternative is
+        // writing back a document that no longer reflects what's on the server.
+        const plan = planStatusLine(raw, args.action)
+        if (plan.after !== plan.before) {
+          await ssh.sftpEnsureDir(args.connectionId, dirname(path), 0o700)
+          await ssh.sftpWriteFileAtomic(args.connectionId, path, plan.after, 0o600)
+        }
+        const after = planStatusLine(plan.after, 'install')
+        return {
+          path,
+          before: plan.after,
+          install: after.after,
+          uninstall: planStatusLine(plan.after, 'uninstall').after,
+          installed: after.installed,
+          present: after.present
+        }
+      })
+  )
+
+  // ---- tmux allow-passthrough, for the Notification hook above ----
+  // Read `~/.tmux.conf` (plain text, not JSON — see withClaudeSettings above for
+  // why a missing file still has to read as present-but-empty rather than an
+  // error), work out what installing or removing our passthrough line would do,
+  // and write it back. Same bracketed-SFTP-channel shape as withClaudeSettings.
+  const withTmuxConf = async <T,>(
+    connectionId: string,
+    password: string | undefined,
+    fn: (path: string, raw: string | null) => Promise<T>
+  ): Promise<T> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    let opened = false
+    try {
+      await ssh.openSftp(connectionId, connection, passwordFor(connectionId, password), undefined, 30000)
+      opened = true
+      const home = await ssh.sftpRealpath(connectionId, '.')
+      const path = rjoin(home, TMUX_CONF_PATH)
+      let raw: string | null = null
+      try {
+        raw = (await ssh.sftpReadFile(connectionId, path)).content
+      } catch (e) {
+        if ((e as { code?: number }).code !== 2) throw e
       }
+      return await fn(path, raw)
+    } finally {
+      if (opened) ssh.closeSftp(connectionId)
     }
+  }
+
+  ipcMain.handle(
+    'claude:tmux-passthrough-status',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeTmuxPassthroughStatus> =>
+      withTmuxConf(args.connectionId, args.password, async (path, raw) => {
+        const install = planTmuxPassthrough(raw, 'install')
+        const uninstall = planTmuxPassthrough(raw, 'uninstall')
+        return {
+          path,
+          before: install.before,
+          install: install.after,
+          uninstall: uninstall.after,
+          installed: install.installed,
+          present: install.present
+        }
+      })
+  )
+
+  ipcMain.handle(
+    'claude:tmux-passthrough-apply',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; action: 'install' | 'uninstall' }
+    ): Promise<ClaudeTmuxPassthroughStatus> =>
+      withTmuxConf(args.connectionId, args.password, async (path, raw) => {
+        const plan = planTmuxPassthrough(raw, args.action)
+        if (plan.after !== plan.before) {
+          await ssh.sftpEnsureDir(args.connectionId, dirname(path), 0o700)
+          await ssh.sftpWriteFileAtomic(args.connectionId, path, plan.after, 0o600)
+        }
+        // Best-effort: also flip the option on whatever tmux server is already
+        // running, so a session that predates this write does not have to wait
+        // for a server restart to pick up ~/.tmux.conf. Only on install — never
+        // the reverse. We can only honestly take back what we can prove is ours,
+        // and that is the persisted line, not the live value: the user may well
+        // have set allow-passthrough themselves at the live server, independent
+        // of this file, and uninstall must not silently take that away from
+        // them. Silent no-op if tmux is missing or no server is up.
+        if (args.action === 'install') {
+          const connection = connectionStore.get(args.connectionId)
+          if (connection) {
+            await ssh
+              .exec(args.connectionId, connection, {
+                command: shWrap(
+                  'command -v tmux >/dev/null 2>&1 && tmux set -g allow-passthrough all >/dev/null 2>&1; true'
+                ),
+                password: passwordFor(args.connectionId, args.password),
+                timeoutMs: 8000,
+                deadlineMs: 15000
+              })
+              .catch(() => {})
+          }
+        }
+        const after = planTmuxPassthrough(plan.after, 'install')
+        return {
+          path,
+          before: plan.after,
+          install: after.after,
+          uninstall: planTmuxPassthrough(plan.after, 'uninstall').after,
+          installed: after.installed,
+          present: after.present
+        }
+      })
   )
 
   // ---- git ----

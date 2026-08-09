@@ -1,21 +1,18 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type {
   AgentHostScan,
-  ResumeHostScan,
   AppSettings,
   ClaudeHookStatus,
-  ClaudeRuntime,
+  ClaudeStatusLineStatus,
+  ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
   ServerStats,
   SessionStatus,
   SettingsPatch,
-  SftpFindResult,
   SftpList,
   SftpReadResult,
-  Snippet,
-  SnippetDraft,
   StageResult,
   TmuxControlState,
   TmuxIntent,
@@ -59,11 +56,6 @@ const api = {
   secretsAvailable: (): Promise<boolean> => ipcRenderer.invoke('secrets:available'),
   hasSecret: (id: string): Promise<boolean> => ipcRenderer.invoke('secrets:has', id),
   pickKeyFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickKey'),
-
-  // prompt snippets (global, not per-connection)
-  snippetsList: (): Promise<Snippet[]> => ipcRenderer.invoke('snippets:list'),
-  snippetsSave: (draft: SnippetDraft): Promise<Snippet> => ipcRenderer.invoke('snippets:save', draft),
-  snippetsDelete: (id: string): Promise<void> => ipcRenderer.invoke('snippets:delete', id),
 
   // prompt composer drafts (local autosave, independent of the SSH connection)
   draftsAll: (): Promise<Record<string, string>> => ipcRenderer.invoke('drafts:all'),
@@ -113,18 +105,6 @@ const api = {
   agentsScan: (retryFailed?: boolean): Promise<AgentHostScan[]> =>
     ipcRenderer.invoke('agents:scan', { retryFailed }),
 
-  // The same sweep for sessions that are saved rather than running. Not folded into
-  // agentsScan because it is not polled: a transcript on disk does not change
-  // second to second, and sixty bounded reads per host on a ten-second timer would
-  // be steady work for an answer that almost never differs. See 'resume:scan'.
-  resumeScan: (args?: { retryFailed?: boolean; offset?: number }): Promise<ResumeHostScan[]> =>
-    ipcRenderer.invoke('resume:scan', args ?? {}),
-
-  // Read one saved transcript's raw content, for the rendered-transcript tab.
-  // Not part of the sweep above: a single file read, asked for on demand.
-  resumeRead: (args: { connectionId: string; password?: string; id: string }): Promise<{ path: string; content: string }> =>
-    ipcRenderer.invoke('resume:read', args),
-
   // host vitals probe
   probeServer: (args: { connectionId: string; password?: string }): Promise<ServerStats> =>
     ipcRenderer.invoke('ssh:probe', args),
@@ -136,13 +116,6 @@ const api = {
     ipcRenderer.invoke('sftp:list', args),
   sftpRealpath: (args: { connectionId: string; path: string }): Promise<string> =>
     ipcRenderer.invoke('sftp:realpath', args),
-  // Composer's @-file picker — brackets its own SFTP session, see sftp:find in ipc.ts.
-  sftpFind: (args: {
-    connectionId: string
-    password?: string
-    root: string
-    query: string
-  }): Promise<SftpFindResult> => ipcRenderer.invoke('sftp:find', args),
   sftpMkdir: (args: { connectionId: string; path: string }): Promise<void> =>
     ipcRenderer.invoke('sftp:mkdir', args),
   sftpRename: (args: { connectionId: string; from: string; to: string }): Promise<void> =>
@@ -201,6 +174,12 @@ const api = {
    * renderer never needs to hold the bytes.
    */
   clipboardImageToTemp: (): Promise<string | null> => ipcRenderer.invoke('clipboard:imageToTemp'),
+  /**
+   * Local paths for whatever files are on the clipboard (a Finder/Explorer
+   * copy) — empty when there are none. See clipboard:filesToPaths for why this
+   * can only ever see the first file of a multi-selection on some platforms.
+   */
+  clipboardFilesToPaths: (): Promise<string[]> => ipcRenderer.invoke('clipboard:filesToPaths'),
   openExternal: (url: string): void => void ipcRenderer.invoke('app:openExternal', url),
 
   // window controls (custom title bar)
@@ -336,11 +315,28 @@ const api = {
     action: 'install' | 'uninstall'
   }): Promise<ClaudeHookStatus> => ipcRenderer.invoke('claude:hook-apply', args),
 
-  /** What the Claude Code CLI looks like on a remote host. Carries no secrets. */
-  claudeRuntime: (args: {
+  // Claude Code status-line hook on a remote host
+  claudeStatusLineStatus: (args: {
     connectionId: string
     password?: string
-  }): Promise<ClaudeRuntime> => ipcRenderer.invoke('claude:runtime', args),
+  }): Promise<ClaudeStatusLineStatus> => ipcRenderer.invoke('claude:statusline-status', args),
+  claudeStatusLineApply: (args: {
+    connectionId: string
+    password?: string
+    action: 'install' | 'uninstall'
+  }): Promise<ClaudeStatusLineStatus> => ipcRenderer.invoke('claude:statusline-apply', args),
+
+  // tmux `allow-passthrough`, required under tmux for the Notification hook above
+  // (the status line has no such dependency; see claudeStatusLineStatus)
+  claudeTmuxPassthroughStatus: (args: {
+    connectionId: string
+    password?: string
+  }): Promise<ClaudeTmuxPassthroughStatus> => ipcRenderer.invoke('claude:tmux-passthrough-status', args),
+  claudeTmuxPassthroughApply: (args: {
+    connectionId: string
+    password?: string
+    action: 'install' | 'uninstall'
+  }): Promise<ClaudeTmuxPassthroughStatus> => ipcRenderer.invoke('claude:tmux-passthrough-apply', args),
 
   /** The git worktrees of the repo containing `dir`, plus its branches. */
   gitWorktrees: (args: {

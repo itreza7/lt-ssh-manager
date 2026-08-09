@@ -1,23 +1,22 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
   ClaudeHookStatus,
-  ClaudeRuntime,
+  ClaudeStatusLineStatus,
+  ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
   HostKeyPrompt,
   PersistedTab,
-  ResumeSession,
   SessionStatus,
   SplitDirection,
   TmuxIntent,
   Workspace
 } from '../../shared/types'
 import { DEFAULTS, type AppSettings, type SettingsPatch } from './lib/terminalSettings'
-import { TitleBar } from './components/TitleBar'
-import { Sidebar } from './components/Sidebar'
-import { Dashboard } from './components/Dashboard'
+import { MenuBar } from './components/MenuBar'
+import { WindowControls } from './components/WindowControls'
+import { SummaryView } from './components/SummaryView'
 import { SettingsPage } from './components/SettingsPage'
-import { AgentInbox } from './components/AgentInbox'
 import { CommandPalette } from './components/CommandPalette'
 import { ConnectionDialog } from './components/ConnectionDialog'
 import { HostKeyDialog } from './components/HostKeyDialog'
@@ -27,26 +26,31 @@ import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { WorktreeView } from './components/WorktreeView'
-import { TranscriptView } from './components/TranscriptView'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
-import { claudeResumeSessionName, claudeSessionName, claudeTabCommand } from './lib/claude'
+import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
+import { COMPOSE_ACCEL, type ComposerHandle } from './lib/xtermAttach'
 import { TERMINAL_BG } from './lib/xtermSetup'
 import { useAgentSessions } from './hooks/useAgentSessions'
-import { useSavedSessions } from './hooks/useSavedSessions'
+import { isMac } from './lib/platform'
 
 const SETTINGS_TAB_ID = 'settings'
-const INBOX_TAB_ID = 'inbox'
+const SUMMARY_TAB_ID = 'summary'
 
-interface DashboardTab {
-  kind: 'dashboard'
-  id: string
-  connectionId: string
+/**
+ * The active connection's live status — identity, vitals, tmux sessions, and
+ * the new-agent form. Always present and always first, since only one
+ * connection is ever active now; unlike Settings there is nothing to open
+ * lazily, so this never needs its own opener the way openSettings does.
+ */
+interface SummaryTab {
+  kind: 'summary'
+  id: typeof SUMMARY_TAB_ID
 }
 
 interface SessionTab {
@@ -89,16 +93,6 @@ interface SettingsTab {
   id: typeof SETTINGS_TAB_ID
 }
 
-/**
- * Every agent on every host, in one list. Global rather than per-connection —
- * the whole point is the hosts you *don't* have open — so like settings there is
- * exactly one of it, with a fixed id.
- */
-interface InboxTab {
-  kind: 'inbox'
-  id: typeof INBOX_TAB_ID
-}
-
 interface SftpTab {
   kind: 'sftp'
   id: string // sftpId
@@ -137,28 +131,16 @@ interface WorktreeTab {
   password?: string
 }
 
-/** A saved Claude Code transcript, rendered read-only rather than resumed. */
-interface TranscriptTab {
-  kind: 'transcript'
-  id: string // `tx:${connectionId}:${sessionId}`
-  connectionId: string
-  sessionId: string
-  title: string
-  password?: string
-}
-
 // A "leaf" — one unit of content. Leaves live inside views (see below).
 export type Tab =
-  | DashboardTab
+  | SummaryTab
   | SessionTab
   | ControlTab
   | SettingsTab
-  | InboxTab
   | SftpTab
   | EditorTab
   | TunnelTab
   | WorktreeTab
-  | TranscriptTab
 
 /**
  * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
@@ -208,15 +190,14 @@ interface PwRequest {
   resolve: (value: string | null) => void
 }
 
-const dashId = (connectionId: string): string => `dash:${connectionId}`
 const tunId = (connectionId: string): string => `tun:${connectionId}`
 
 // Strip a live tab down to what's safe + sufficient to recreate it later.
 // Passwords and volatile session ids/status are intentionally omitted.
 function serializeTab(t: Tab): PersistedTab {
   switch (t.kind) {
-    case 'dashboard':
-      return { kind: 'dashboard', connectionId: t.connectionId }
+    case 'summary':
+      return { kind: 'summary' }
     case 'session':
       return {
         kind: 'session',
@@ -237,8 +218,6 @@ function serializeTab(t: Tab): PersistedTab {
       }
     case 'settings':
       return { kind: 'settings' }
-    case 'inbox':
-      return { kind: 'inbox' }
     case 'sftp':
       return { kind: 'sftp', connectionId: t.connectionId, title: t.title, initialPath: t.initialPath }
     case 'editor':
@@ -252,8 +231,6 @@ function serializeTab(t: Tab): PersistedTab {
         title: t.title,
         initialPath: t.dir
       }
-    case 'transcript':
-      return { kind: 'transcript', connectionId: t.connectionId, title: t.title, sessionId: t.sessionId }
   }
 }
 
@@ -293,9 +270,15 @@ function statusDot(status: SessionStatus): string {
 
 export default function App() {
   const [connections, setConnections] = useState<Connection[]>([])
-  const [tabs, setTabs] = useState<Tab[]>([])
-  const [views, setViews] = useState<View[]>([])
-  const [activeViewId, setActiveViewId] = useState<string | null>(null)
+  // Summary is always open, always first — seeded synchronously rather than
+  // lazily opened, so there is never a frame with zero tabs.
+  const [initialView] = useState(() => makeView([SUMMARY_TAB_ID]))
+  const [tabs, setTabs] = useState<Tab[]>(() => [{ kind: 'summary', id: SUMMARY_TAB_ID }])
+  const [views, setViews] = useState<View[]>(() => [initialView])
+  const [activeViewId, setActiveViewId] = useState<string | null>(() => initialView.id)
+  // The one connection Summary/new-tab actions target — see the comment where
+  // it's read, further down, for why this is explicit state rather than derived.
+  const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [secretsAvailable, setSecretsAvailable] = useState(true)
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULTS)
   // Prompt composer drafts, local-autosave keyed by tabKey — see PersistedTab.tabKey.
@@ -305,12 +288,6 @@ export default function App() {
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
   const [pwRequest, setPwRequest] = useState<PwRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  // Latches true the first time the palette opens, the same "has X ever been
-  // opened this session" gate useAgentSessions/useSavedSessions read to decide
-  // whether their data is worth having ready — the palette needs saved sessions
-  // even when Home itself has never been opened.
-  const paletteEverOpenedRef = useRef(false)
-  if (paletteOpen) paletteEverOpenedRef.current = true
 
   // Workspace persistence: don't save until the previous session is restored,
   // so the empty initial state never clobbers the saved tabs on disk.
@@ -323,6 +300,18 @@ export default function App() {
 
   // The split container, so dividers can translate pointer travel into fractions.
   const contentRef = useRef<HTMLDivElement>(null)
+
+  // One composer handle per session/tmux tab, so the header's toggle button can
+  // reach whichever pane is focused without owning any drafting state itself.
+  const composerRefs = useRef(new Map<string, ComposerHandle>())
+  const setComposerRef = useCallback(
+    (id: string) =>
+      (h: ComposerHandle | null): void => {
+        if (h) composerRefs.current.set(id, h)
+        else composerRefs.current.delete(id)
+      },
+    []
+  )
 
   // Derived view state. The active view is the tab on screen; the focused pane's
   // leaf is the app's notion of the "active" tab (sidebar + keyboard follow it).
@@ -337,12 +326,17 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const selectedConnId = activeTab && 'connectionId' in activeTab ? activeTab.connectionId : null
 
+  // The one connection Summary/new-tab actions target — set explicitly by
+  // selectConnection rather than derived from open tabs, since Summary must
+  // show a connection's identity even with none of its other tabs open.
+
   // --- agent attention -------------------------------------------------------
   // Leaves that have rung since you last looked at them. Deliberately not
   // persisted with the workspace: an alert you never saw before quitting is not
   // one worth restoring three days later.
   const [waiting, setWaiting] = useState<ReadonlySet<string>>(() => new Set())
   const [winFocused, setWinFocused] = useState(() => document.hasFocus())
+  const [fullScreen, setFullScreen] = useState(false)
   const shownLeaves = activeView?.panes.filter((p): p is string => p !== null) ?? []
   const attnRef = useRef({ alerts: appSettings.terminal.agentAlerts, visible: new Set(shownLeaves) })
   attnRef.current = {
@@ -358,26 +352,22 @@ export default function App() {
   // --- view / pane helpers ---------------------------------------------------
 
   const leafLabel = (t: Tab): string =>
-    t.kind === 'dashboard'
-      ? nameOf(t.connectionId)
+    t.kind === 'summary'
+      ? 'Summary'
       : t.kind === 'settings'
         ? 'Settings'
-        : t.kind === 'inbox'
-          ? 'Agents'
-          : t.kind === 'session' && appSettings.terminal.liveTitles && t.liveTitle
-            ? t.liveTitle
-            : t.title
+        : t.kind === 'session' && appSettings.terminal.liveTitles && t.liveTitle
+          ? t.liveTitle
+          : t.title
 
   const leafIcon = (t: Tab, lit: boolean): ReactNode => {
     const c = lit ? 'text-accent' : 'text-faint'
-    if (t.kind === 'dashboard') return <span className={c}>▦</span>
+    if (t.kind === 'summary') return <span className={c}>◎</span>
     if (t.kind === 'settings') return <span className={c}>⚙</span>
-    if (t.kind === 'inbox') return <span className={c}>◎</span>
     if (t.kind === 'sftp') return <span className={lit ? 'text-amber' : 'text-faint'}>▸▸</span>
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
     if (t.kind === 'worktrees') return <span className={c}>⑂</span>
-    if (t.kind === 'transcript') return <span className={c}>▤</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
 
@@ -385,7 +375,7 @@ export default function App() {
   // single-pane view (a normal tab).
   //
   // Reads views through the ref rather than the render closure. The singleton
-  // openers — openSettings, openInbox — are useCallback([]), because the menu
+  // openers — openSettings, openSummary — are useCallback([]), because the menu
   // bridge registers them once and needs a stable identity, so they capture the
   // *first* render's showLeaf, whose `views` is still the initial empty array.
   // Through that closure the lookup below never found the existing view and fell
@@ -614,20 +604,12 @@ export default function App() {
       return next
     })
   }, [])
-  const toggleSidebar = useCallback((): void => {
-    setAppSettings((s) => {
-      const next = { ...s, sidebarCollapsed: !s.sidebarCollapsed }
-      void window.api.updateSettings({ sidebarCollapsed: next.sidebarCollapsed })
-      return next
-    })
-  }, [])
   const resetSettings = useCallback((): void => {
     setAppSettings(DEFAULTS)
     void window.api.updateSettings({
       terminal: DEFAULTS.terminal,
       editor: DEFAULTS.editor,
       connectRetries: DEFAULTS.connectRetries,
-      sidebarCollapsed: DEFAULTS.sidebarCollapsed,
       theme: DEFAULTS.theme
     })
   }, [])
@@ -640,36 +622,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const openInbox = useCallback((): void => {
-    setTabs((t) =>
-      t.some((x) => x.id === INBOX_TAB_ID) ? t : [...t, { kind: 'inbox', id: INBOX_TAB_ID }]
-    )
-    showLeaf(INBOX_TAB_ID)
+  const openSummary = useCallback((): void => {
+    showLeaf(SUMMARY_TAB_ID)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Lifted out of AgentInbox so the live-agent poll keeps running whichever tab
-  // is visible — hooks can't be called conditionally, so this runs on every
-  // render and gates itself internally on the same "has the inbox ever been
-  // opened this session" condition that decides whether AgentInbox is mounted
-  // at all (see the inbox mount below).
+  // Summary is always mounted, so the live-agent poll just always runs — no
+  // more "has the inbox ever been opened" gate to thread through.
   const {
     hosts: agentHosts,
     error: agentScanError,
     scanning: agentScanning,
     rescan: rescanAgents
-  } = useAgentSessions(tabs.some((t) => t.kind === 'inbox') || paletteEverOpenedRef.current)
-
-  // Lifted out of AgentInbox the same way. `enabled` adds one more condition
-  // than the live sweep needs: the palette must be able to show saved sessions
-  // even before Home has ever been opened, so it also counts as having asked.
-  const {
-    saved: savedSessions,
-    error: savedSessionsError,
-    scanning: savedSessionsScanning,
-    rescan: rescanSaved,
-    loadMore: loadMoreSaved
-  } = useSavedSessions(tabs.some((t) => t.kind === 'inbox') || paletteEverOpenedRef.current)
+  } = useAgentSessions(true)
 
   useEffect(() => {
     void (async () => {
@@ -681,12 +646,7 @@ export default function App() {
         // seed their initial state from disk on first mount instead of starting blank.
         setDrafts(await window.api.draftsAll())
         const ws = await window.api.getWorkspace()
-        const restored = await restoreWorkspace(ws, conns)
-        // Nothing came back — first launch, or last session ended with every tab
-        // closed. Land on Home instead of the empty placeholder. This only ever
-        // runs here, once at startup, so closing every tab later in the session
-        // is respected rather than fought.
-        if (!restored) openInbox()
+        await restoreWorkspace(ws, conns)
       } finally {
         restoredRef.current = true // from here on, tab changes are persisted
       }
@@ -762,6 +722,14 @@ export default function App() {
     }
   }, [])
 
+  // Native macOS fullscreen removes the traffic lights entirely, so the header
+  // row's reserved left padding for them would otherwise show as a dead gutter.
+  useEffect(() => {
+    if (!isMac) return
+    void window.api.winIsFullScreen().then(setFullScreen)
+    return window.api.onFullScreenChange(setFullScreen)
+  }, [])
+
   // Looking at a leaf is the acknowledgement — there is no separate dismiss, and
   // a dot that outlived the glance that answered it would train you to ignore
   // dots. Splits clear every leaf they show, since all of them are on screen.
@@ -833,11 +801,20 @@ export default function App() {
   const askPassword = (title: string, label: string): Promise<string | null> =>
     new Promise((resolve) => setPwRequest({ title, label, resolve }))
 
-  // Click in the sidebar -> open (or focus) the connection's dashboard tab.
+  // Make a connection active and focus Summary. Only one connection's tabs can
+  // be open at a time, so switching connections closes every tab that belongs to
+  // a different one first — with a confirm, since that can drop a live session.
   const selectConnection = (connectionId: string): void => {
-    const id = dashId(connectionId)
-    setTabs((t) => (t.some((x) => x.id === id) ? t : [...t, { kind: 'dashboard', id, connectionId }]))
-    showLeaf(id)
+    const foreign = tabs.filter((t) => 'connectionId' in t && t.connectionId !== connectionId)
+    if (foreign.length) {
+      const from = connections.find((c) => c.id === activeConnectionId)
+      const n = foreign.length
+      if (!confirm(`Switch server? This closes ${n} open tab${n === 1 ? '' : 's'}${from ? ` for ${from.name}` : ''}.`))
+        return
+      removeTabs(foreign.map((t) => t.id))
+    }
+    setActiveConnectionId(connectionId)
+    showLeaf(SUMMARY_TAB_ID)
   }
 
   const resolvePassword = async (conn: Connection): Promise<string | null | undefined> => {
@@ -850,9 +827,9 @@ export default function App() {
   // sessions get fresh ids and reconnect (tmux re-attaches if still alive); a
   // missing file just surfaces the editor's own error state. Passwords are
   // resolved once per connection (no prompt for key auth or saved secrets).
-  // Returns whether it actually restored any tabs, so the caller knows when to
-  // fall back to Home instead.
-  const restoreWorkspace = async (ws: Workspace, conns: Connection[]): Promise<boolean> => {
+  // Summary is guaranteed present and first regardless of what was persisted —
+  // the initial state already seeds it, so this only needs to avoid dropping it.
+  const restoreWorkspace = async (ws: Workspace, conns: Connection[]): Promise<void> => {
     const byId = new Map(conns.map((c) => [c.id, c]))
     const pwCache = new Map<string, string | null | undefined>()
     const getPw = async (conn: Connection): Promise<string | null | undefined> => {
@@ -864,6 +841,9 @@ export default function App() {
 
     const built: Tab[] = []
     let activeId: string | null = null
+    // The last connection any restored tab belonged to — Summary needs one to
+    // show, and a restored workspace only ever has tabs for a single connection.
+    let restoredConnectionId: string | null = null
     const has = (id: string): boolean => built.some((b) => b.id === id)
     // Map each persisted-tab index to the live leaf id it produced, so the saved
     // tab-bar views (which reference tabs by index) can be rebuilt afterwards.
@@ -873,10 +853,10 @@ export default function App() {
       const pt = ws.tabs[i]
       const makeActive = i === ws.active
 
-      if (pt.kind === 'inbox') {
-        if (!has(INBOX_TAB_ID)) built.push({ kind: 'inbox', id: INBOX_TAB_ID })
-        if (makeActive) activeId = INBOX_TAB_ID
-        idForIndex.set(i, INBOX_TAB_ID)
+      if (pt.kind === 'summary') {
+        if (!has(SUMMARY_TAB_ID)) built.push({ kind: 'summary', id: SUMMARY_TAB_ID })
+        if (makeActive) activeId = SUMMARY_TAB_ID
+        idForIndex.set(i, SUMMARY_TAB_ID)
         continue
       }
       if (pt.kind === 'settings') {
@@ -888,13 +868,9 @@ export default function App() {
 
       const conn = pt.connectionId ? byId.get(pt.connectionId) : undefined
       if (!conn) continue // connection deleted -> drop the tab
+      restoredConnectionId = conn.id
 
-      if (pt.kind === 'dashboard') {
-        const id = dashId(conn.id)
-        if (!has(id)) built.push({ kind: 'dashboard', id, connectionId: conn.id })
-        if (makeActive) activeId = id
-        idForIndex.set(i, id)
-      } else if (pt.kind === 'session') {
+      if (pt.kind === 'session') {
         const pw = await getPw(conn)
         if (pw === null) continue // cancelled prompt
         const id = crypto.randomUUID()
@@ -992,26 +968,13 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
-      } else if (pt.kind === 'transcript') {
-        if (!pt.sessionId) continue
-        const pw = await getPw(conn)
-        if (pw === null) continue
-        const id = `tx:${conn.id}:${pt.sessionId}`
-        if (!has(id))
-          built.push({
-            kind: 'transcript',
-            id,
-            connectionId: conn.id,
-            sessionId: pt.sessionId,
-            title: pt.title ?? 'Transcript',
-            password: pw ?? undefined
-          })
-        if (makeActive) activeId = id
-        idForIndex.set(i, id)
       }
     }
 
-    if (!built.length) return false
+    // Summary is never optional — add it if nothing persisted one (an older
+    // workspace, or a fresh install with no other tabs at all).
+    if (!has(SUMMARY_TAB_ID)) built.unshift({ kind: 'summary', id: SUMMARY_TAB_ID })
+    if (restoredConnectionId) setActiveConnectionId(restoredConnectionId)
     setTabs(built)
 
     // Rebuild the saved tab-bar views, best-effort. Each pane index maps back to
@@ -1056,6 +1019,9 @@ export default function App() {
         placed.add(t.id)
       }
     }
+    // Summary is always first, regardless of where it fell above.
+    const summaryViewIdx = rebuilt.findIndex((v) => v.panes.includes(SUMMARY_TAB_ID))
+    if (summaryViewIdx > 0) rebuilt.unshift(...rebuilt.splice(summaryViewIdx, 1))
     setViews(rebuilt)
     // Reselect the view that was active. Prefer the one holding the focused leaf;
     // if that pane was empty (no focused leaf saved), fall back to the saved
@@ -1068,7 +1034,6 @@ export default function App() {
       activeRebuilt = rebuilt.find((v) => wantIds.some((id) => v.panes.includes(id)))
     }
     setActiveViewId((activeRebuilt ?? rebuilt[rebuilt.length - 1])?.id ?? null)
-    return true
   }
 
   // Open a console/tmux session as a NEW tab — the dashboard tab stays open.
@@ -1076,27 +1041,21 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { session?: string; title?: string; agent?: { dir: string; resume?: string } }
+    opts?: { session?: string; title?: string; agent?: { dir: string } }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
     let { title } = opts ?? {}
     const control = !!(conn.tmux && conn.tmuxControl)
     const agentDir = opts?.agent?.dir
-    const agentResume = opts?.agent?.resume
     // The session name, if any: an explicit one (already exactly as tmux spells it)
     // wins over the connection's own. An agent's name comes from the directory it
     // runs in, so every entry point that opens on that directory lands on one
-    // session instead of forking a second agent into the same working tree — except
-    // a resumed one, which is named after the transcript instead, so that clicking
-    // Resume cannot attach to a different agent that happens to share the directory.
-    // See claudeResumeSessionName.
+    // session instead of forking a second agent into the same working tree.
     const session =
       opts?.session ??
       (agentDir
-        ? agentResume
-          ? claudeResumeSessionName(agentResume, agentDir)
-          : claudeSessionName(agentDir)
+        ? claudeSessionName(agentDir)
         : conn.tmux
           ? tmuxSessionName(conn.tmuxSession || conn.name)
           : undefined)
@@ -1115,7 +1074,7 @@ export default function App() {
       status: { kind: 'connecting' as const, attempt: 1, retries: appSettings.connectRetries },
       password: password ?? undefined,
       command: agentDir
-        ? claudeTabCommand(agentDir, conn.claudePath, conn.tmux ? tmux : undefined, agentResume)
+        ? claudeTabCommand(agentDir, conn.claudePath, conn.tmux ? tmux : undefined)
         : tmux
           ? tmuxCreateCommand(tmux)
           : undefined,
@@ -1257,10 +1216,15 @@ export default function App() {
     (password?: string): Promise<ClaudeHookStatus> =>
       window.api.claudeHookStatus({ connectionId: conn.id, password })
 
-  const fetchRuntimeFor =
+  const fetchStatusLineStatusFor =
     (conn: Connection) =>
-    (password?: string): Promise<ClaudeRuntime> =>
-      window.api.claudeRuntime({ connectionId: conn.id, password })
+    (password?: string): Promise<ClaudeStatusLineStatus> =>
+      window.api.claudeStatusLineStatus({ connectionId: conn.id, password })
+
+  const fetchTmuxPassthroughStatusFor =
+    (conn: Connection) =>
+    (password?: string): Promise<ClaudeTmuxPassthroughStatus> =>
+      window.api.claudeTmuxPassthroughStatus({ connectionId: conn.id, password })
 
   // Install/uninstall stays self-resolving: it is a separate deliberate click,
   // and it is the only one of the three, so it cannot collide with itself.
@@ -1268,6 +1232,18 @@ export default function App() {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required to write the Claude settings file.')
     return window.api.claudeHookApply({ connectionId: conn.id, password: password ?? undefined, action })
+  }
+
+  const applyStatusLineFor = (conn: Connection) => async (action: 'install' | 'uninstall') => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required to write the Claude settings file.')
+    return window.api.claudeStatusLineApply({ connectionId: conn.id, password: password ?? undefined, action })
+  }
+
+  const applyTmuxPassthroughFor = (conn: Connection) => async (action: 'install' | 'uninstall') => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required to write the tmux config file.')
+    return window.api.claudeTmuxPassthroughApply({ connectionId: conn.id, password: password ?? undefined, action })
   }
 
   // Open Claude Code in a directory, as a new tab.
@@ -1299,70 +1275,22 @@ export default function App() {
     void openSession(conn, { session: name, title: `${conn.name} · ${name}` })
   }
 
-  // --- Agent Inbox actions ---------------------------------------------------
-  // The inbox knows a connection only by id — it is a flat list across hosts, not
-  // a pane belonging to one — so both of these look the connection up first and
-  // then hand off to the same helpers the per-host panes use.
-
+  // --- agent actions ----------------------------------------------------------
+  // The command palette's agent results know a connection only by id — they come
+  // from the cross-host scan, not from `connections` — so this looks it up first
+  // and hands off to the same helper the per-host panes use.
   const attachFromInbox = (connectionId: string, session: string): void => {
     const conn = connections.find((c) => c.id === connectionId)
     if (conn) attachTmux(conn, session)
   }
 
-  // Launch a brand-new agent from Home's inline form. The directory picker there
-  // only knows connection ids (built from the scan, not from `connections`), so
-  // this is the one place that turns an id back into the Connection openClaude
-  // needs.
-  const newAgentFromInbox = (connectionId: string, dir: string): boolean => {
-    const conn = connections.find((c) => c.id === connectionId)
+  // Launch a brand-new agent from Summary's inline form, on the active connection.
+  const newAgentFromActive = (dir: string): boolean => {
+    const conn = connections.find((c) => c.id === activeConnectionId)
     return conn ? openClaude(conn, dir) : false
   }
 
-  // Resume a saved transcript in a new agent tab. The directory is not optional and
-  // not a guess: `claude --resume` looks an id up under the project directory of the
-  // cwd it starts in, so a session whose transcript recorded no cwd cannot be
-  // resumed anywhere — the inbox disables the button rather than opening a tab that
-  // would only ever print "No conversation found".
-  const resumeFromInbox = (connectionId: string, s: ResumeSession, label: string): void => {
-    const conn = connections.find((c) => c.id === connectionId)
-    if (!conn || !s.dir) return
-    void openSession(conn, {
-      // The transcript's own label, not the session name: a tab strip full of
-      // `claude-dt2-1f3a9c04` identifies nothing, and this is the one string the
-      // user already recognises the work by.
-      title: `${conn.name} · ${label.slice(0, 40)}`,
-      agent: { dir: s.dir, resume: s.id }
-    })
-  }
-
-  // Open a saved transcript read-only, rendered rather than resumed. Unlike
-  // resumeFromInbox this has no cwd requirement — a transcript is just a file to
-  // read — so it opens for any saved session, including ones Resume disables.
-  const openTranscript = async (connectionId: string, s: ResumeSession, label: string): Promise<void> => {
-    const conn = connections.find((c) => c.id === connectionId)
-    if (!conn) return
-    const password = await resolvePassword(conn)
-    if (password === null) return
-    const id = `tx:${connectionId}:${s.id}`
-    setTabs((t) =>
-      t.some((x) => x.id === id)
-        ? t
-        : [
-            ...t,
-            {
-              kind: 'transcript',
-              id,
-              connectionId,
-              sessionId: s.id,
-              title: `Transcript · ${label.slice(0, 40)}`,
-              password: password ?? undefined
-            }
-          ]
-    )
-    showLeaf(id)
-  }
-
-  // Kill / rename run as one-shot commands; the Dashboard refreshes its list after.
+  // Kill / rename run as one-shot commands; Summary refreshes its list after.
   const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required.')
@@ -1493,113 +1421,124 @@ export default function App() {
   const deleteConnection = async (conn: Connection): Promise<void> => {
     if (!confirm(`Delete connection “${conn.name}”?`)) return
     await window.api.removeConnection(conn.id)
-    removeTabs([dashId(conn.id), tunId(conn.id)])
+    removeTabs(tabs.filter((t) => 'connectionId' in t && t.connectionId === conn.id).map((t) => t.id))
+    if (activeConnectionId === conn.id) setActiveConnectionId(null)
     await refresh()
   }
 
-  const dashboardTabs = tabs.filter((t): t is DashboardTab => t.kind === 'dashboard')
   const sessionTabs = tabs.filter((t): t is SessionTab => t.kind === 'session')
   const controlTabs = tabs.filter((t): t is ControlTab => t.kind === 'tmux')
+  const activeConnection = connections.find((c) => c.id === activeConnectionId) ?? null
+
+  const activeIsPane = activeTab?.kind === 'session' || activeTab?.kind === 'tmux'
+  const toggleActiveComposer = useCallback(() => {
+    if (activeTabId) composerRefs.current.get(activeTabId)?.toggleComposer()
+  }, [activeTabId])
 
   return (
     <div className="flex h-full w-full flex-col">
-      <TitleBar onNewConnection={() => setDialogConn(null)} onOpenSettings={openSettings} />
-      <div className="flex min-h-0 flex-1">
-        <Sidebar
-          connections={connections}
-          selectedId={selectedConnId}
-          onSelect={selectConnection}
-          onAdd={() => setDialogConn(null)}
-          onEdit={(c) => setDialogConn(c)}
-          onDelete={deleteConnection}
-          onOpenInbox={openInbox}
-          onOpenTunnels={openTunnels}
-          onOpenFiles={openSftp}
-          collapsed={appSettings.sidebarCollapsed}
-          onToggleCollapse={toggleSidebar}
-        />
+      <div className="app-canvas flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Merged title/tab-bar row. `drag` on the root plus `no-drag` on every
+            interactive cluster mirrors how Chrome's own tab strip stays
+            draggable everywhere except its buttons and pills. */}
+        <div
+          className={`drag relative z-30 flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 ${
+            // leave room for the native traffic lights on macOS — they vanish
+            // in true fullscreen, so the reserved gutter would go dead too
+            isMac && !fullScreen ? 'pl-[78px]' : 'pl-2.5'
+          }`}
+        >
+          {/* brand mark + menus — macOS gets a real menu bar (menu.ts) and native
+              traffic lights instead; rendering both would give every command two
+              homes and no reason to prefer either */}
+          {!isMac && (
+            <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
+              <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
+              <MenuBar onNewConnection={() => setDialogConn(null)} />
+            </div>
+          )}
 
-        <div className="app-canvas flex min-w-0 flex-1 flex-col">
-          {/* tab bar */}
-          {views.length > 0 && (
-            <div className="flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 pt-1.5">
-              <div className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
-                {views.map((view) => {
-                  const active = view.id === activeViewId
-                  const split = view.panes.length > 1
-                  const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
-                  const waitingLeaves = leaves.filter((l): l is Tab => !!l && waiting.has(l.id))
-                  const label = split
-                    ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
-                    : leaves[0]
-                      ? leafLabel(leaves[0])
-                      : 'Tab'
-                  return (
-                    <div
-                      key={view.id}
-                      draggable
-                      onClick={() => setActiveViewId(view.id)}
-                      onDragStart={(e) => {
-                        dragViewId.current = view.id
-                        e.dataTransfer.effectAllowed = 'move'
-                        e.dataTransfer.setData('text/plain', view.id)
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault()
-                        e.dataTransfer.dropEffect = 'move'
-                        if (dragViewId.current && dragViewId.current !== view.id) setDragOverId(view.id)
-                      }}
-                      onDragLeave={() => setDragOverId((id) => (id === view.id ? null : id))}
-                      onDrop={(e) => {
-                        e.preventDefault()
-                        const from = dragViewId.current
-                        if (from) moveView(from, view.id)
-                        dragViewId.current = null
-                        setDragOverId(null)
-                      }}
-                      onDragEnd={() => {
-                        dragViewId.current = null
-                        setDragOverId(null)
-                      }}
-                      className={`group flex shrink-0 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
-                        dragOverId === view.id ? 'ring-2 ring-inset ring-accent/70' : ''
-                      } ${
-                        active
-                          ? 'border-line bg-ink text-fg'
-                          : 'border-transparent text-muted hover:bg-elevated/40 hover:text-fg/90'
-                      }`}
-                    >
-                      {split ? (
-                        <span className={active ? 'text-accent' : 'text-faint'} title="split tab">
-                          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-                            <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
-                            {view.direction === 'columns' ? (
-                              <line x1="7" y1="2.5" x2="7" y2="11.5" />
-                            ) : (
-                              <line x1="1.5" y1="7" x2="12.5" y2="7" />
-                            )}
-                          </svg>
-                        </span>
-                      ) : leaves[0] ? (
-                        leafIcon(leaves[0], active)
-                      ) : null}
-                      {/* One dot per leaf of this tab that's waiting on you. In a
-                          split they read left to right in the same order as the
-                          joined label, so the dot and the name line up. */}
-                      {waitingLeaves.length > 0 && (
-                        <span
-                          className="flex items-center gap-1"
-                          title={`Waiting: ${waitingLeaves.map(leafLabel).join(', ')}`}
-                        >
-                          {waitingLeaves.map((l) => (
-                            <span
-                              key={l.id}
-                              className="dot-glow h-1.5 w-1.5 shrink-0 rounded-full bg-amber text-amber"
-                            />
-                          ))}
-                        </span>
-                      )}
-                      <span className="max-w-[260px] truncate font-mono text-[12px]">{label}</span>
+          {/* tab pills — pt-1.5 here (not the row root) so they read as "poking
+              up" from the row's bottom border without pushing every other
+              cluster down */}
+          <div className="no-drag flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto pt-1.5">
+            {views.map((view) => {
+                const active = view.id === activeViewId
+                const split = view.panes.length > 1
+                const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
+                const waitingLeaves = leaves.filter((l): l is Tab => !!l && waiting.has(l.id))
+                const label = split
+                  ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
+                  : leaves[0]
+                    ? leafLabel(leaves[0])
+                    : 'Tab'
+                return (
+                  <div
+                    key={view.id}
+                    draggable
+                    onClick={() => setActiveViewId(view.id)}
+                    onDragStart={(e) => {
+                      dragViewId.current = view.id
+                      e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData('text/plain', view.id)
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'move'
+                      if (dragViewId.current && dragViewId.current !== view.id) setDragOverId(view.id)
+                    }}
+                    onDragLeave={() => setDragOverId((id) => (id === view.id ? null : id))}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      const from = dragViewId.current
+                      if (from) moveView(from, view.id)
+                      dragViewId.current = null
+                      setDragOverId(null)
+                    }}
+                    onDragEnd={() => {
+                      dragViewId.current = null
+                      setDragOverId(null)
+                    }}
+                    className={`group flex shrink-0 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
+                      dragOverId === view.id ? 'ring-2 ring-inset ring-accent/70' : ''
+                    } ${
+                      active
+                        ? 'border-line bg-ink text-fg'
+                        : 'border-transparent text-muted hover:bg-elevated/40 hover:text-fg/90'
+                    }`}
+                  >
+                    {split ? (
+                      <span className={active ? 'text-accent' : 'text-faint'} title="split tab">
+                        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                          <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
+                          {view.direction === 'columns' ? (
+                            <line x1="7" y1="2.5" x2="7" y2="11.5" />
+                          ) : (
+                            <line x1="1.5" y1="7" x2="12.5" y2="7" />
+                          )}
+                        </svg>
+                      </span>
+                    ) : leaves[0] ? (
+                      leafIcon(leaves[0], active)
+                    ) : null}
+                    {/* One dot per leaf of this tab that's waiting on you. In a
+                        split they read left to right in the same order as the
+                        joined label, so the dot and the name line up. */}
+                    {waitingLeaves.length > 0 && (
+                      <span
+                        className="flex items-center gap-1"
+                        title={`Waiting: ${waitingLeaves.map(leafLabel).join(', ')}`}
+                      >
+                        {waitingLeaves.map((l) => (
+                          <span
+                            key={l.id}
+                            className="dot-glow h-1.5 w-1.5 shrink-0 rounded-full bg-amber text-amber"
+                          />
+                        ))}
+                      </span>
+                    )}
+                    <span className="max-w-[260px] truncate font-mono text-[12px]">{label}</span>
+                    {!(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID) && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -1610,307 +1549,348 @@ export default function App() {
                       >
                         ×
                       </button>
-                    </div>
-                  )
-                })}
-              </div>
-              {/* split-screen controls (operate on the active tab) */}
-              <div className="flex shrink-0 items-center self-center border-l border-line pl-2">
-                <SplitControls
-                  count={activeView?.panes.length ?? 1}
-                  direction={activeView?.direction ?? 'columns'}
-                  onSingle={ungroup}
-                  onSplit={applySplit}
-                />
-              </div>
+                    )}
+                  </div>
+                )
+              })}
+          </div>
+          {/* split-screen controls, composer toggle, and settings — one
+              cluster of fixed-height header actions */}
+          <div className="no-drag flex shrink-0 items-center gap-1 self-center border-l border-line pl-2">
+            <SplitControls
+              count={activeView?.panes.length ?? 1}
+              direction={activeView?.direction ?? 'columns'}
+              onSingle={ungroup}
+              onSplit={applySplit}
+            />
+            <button
+              onClick={toggleActiveComposer}
+              disabled={!activeIsPane}
+              title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
+              className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+              </svg>
+            </button>
+            <button
+              onClick={openSettings}
+              title="Settings (Ctrl+,)"
+              className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-fg"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          </div>
+
+          {/* window controls — macOS supplies native traffic lights instead */}
+          {!isMac && (
+            <div className="no-drag flex h-full items-stretch">
+              <WindowControls />
+            </div>
+          )}
+        </div>
+
+        {/* main content */}
+        <div ref={contentRef} className="relative min-h-0 flex-1">
+          {/* Summary stays mounted so vitals don't re-fetch on every tab switch;
+              it's always present, so this needs no `tabs.some(...)` guard. */}
+          <div className={`overflow-hidden ${paneRing(SUMMARY_TAB_ID)}`} {...paneProps(SUMMARY_TAB_ID)}>
+            <SummaryView
+              connection={activeConnection}
+              hasConnections={connections.length > 0}
+              onOpenSettings={openSettings}
+              openSessions={
+                activeConnection
+                  ? sessionTabs.filter((t) => t.connectionId === activeConnection.id).length
+                  : 0
+              }
+              onOpenTerminal={() => activeConnection && void openSession(activeConnection)}
+              onOpenFiles={() => activeConnection && void openSftp(activeConnection)}
+              onOpenTunnels={() => activeConnection && void openTunnels(activeConnection)}
+              onEdit={() => activeConnection && setDialogConn(activeConnection)}
+              fetchTmux={activeConnection ? fetchTmuxFor(activeConnection) : async () => []}
+              fetchStats={
+                activeConnection
+                  ? fetchStatsFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              onAttach={(name) => activeConnection && attachTmux(activeConnection, name)}
+              // A name the user just typed, unlike onAttach's, has never been
+              // through tmux. Normalise it here so the tab records the name
+              // tmux will actually use — `.` and `:` split tmux's target
+              // syntax, so a session called "api.v2" could never be reattached.
+              onNewSession={(name) =>
+                activeConnection && attachTmux(activeConnection, tmuxSessionName(name))
+              }
+              onKillSession={activeConnection ? killTmux(activeConnection) : async () => {}}
+              onRenameSession={activeConnection ? renameTmux(activeConnection) : async () => {}}
+              resolvePassword={
+                activeConnection ? resolvePasswordFor(activeConnection) : async () => null
+              }
+              fetchHookStatus={
+                activeConnection
+                  ? fetchHookStatusFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              applyHook={
+                activeConnection
+                  ? applyHookFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              fetchStatusLineStatus={
+                activeConnection
+                  ? fetchStatusLineStatusFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              applyStatusLine={
+                activeConnection
+                  ? applyStatusLineFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              fetchTmuxPassthroughStatus={
+                activeConnection
+                  ? fetchTmuxPassthroughStatusFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              applyTmuxPassthrough={
+                activeConnection
+                  ? applyTmuxPassthroughFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              agentHosts={agentHosts}
+              agentScanError={agentScanError}
+              agentScanning={agentScanning}
+              rescanAgents={rescanAgents}
+              onNewAgent={newAgentFromActive}
+            />
+            {paneTools(SUMMARY_TAB_ID)}
+          </div>
+
+          {/* settings stays mounted so it can share a split pane like any tab */}
+          {tabs.some((t) => t.kind === 'settings') && (
+            <div className={`overflow-hidden ${paneRing(SETTINGS_TAB_ID)}`} {...paneProps(SETTINGS_TAB_ID)}>
+              <SettingsPage
+                settings={appSettings}
+                onChange={updateSettings}
+                onReset={resetSettings}
+                connections={connections}
+                activeConnectionId={activeConnectionId}
+                onSelectConnection={selectConnection}
+                onAddConnection={() => setDialogConn(null)}
+                onEditConnection={(c) => setDialogConn(c)}
+                onDeleteConnection={deleteConnection}
+              />
+              {paneTools(SETTINGS_TAB_ID)}
             </div>
           )}
 
-          {/* main content */}
-          <div ref={contentRef} className="relative min-h-0 flex-1">
-            {views.length === 0 && (
-              <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-                <div className="grid h-12 w-12 place-items-center rounded-xl bg-accent/10 ring-1 ring-accent/25">
-                  <span className="h-2.5 w-2.5 rounded-full bg-accent dot-glow text-accent" />
-                </div>
-                <p className="text-sm text-muted">Open Home in the sidebar to see every agent, on every host.</p>
-                <p className="eyebrow">no active session</p>
-              </div>
-            )}
-
-            {/* dashboards stay mounted so vitals don't re-fetch on every tab switch */}
-            {dashboardTabs.map((tab) => {
-              const conn = connections.find((c) => c.id === tab.connectionId)
-              if (!conn) return null
-              return (
-                <div key={tab.id} className={`overflow-hidden ${paneRing(tab.id)}`} {...paneProps(tab.id)}>
-                  <Dashboard
-                    connection={conn}
-                    openSessions={sessionTabs.filter((t) => t.connectionId === conn.id).length}
-                    onOpenTerminal={() => void openSession(conn)}
-                    onOpenFiles={() => void openSftp(conn)}
-                    onOpenTunnels={() => void openTunnels(conn)}
-                    onEdit={() => setDialogConn(conn)}
-                    fetchTmux={fetchTmuxFor(conn)}
-                    fetchStats={fetchStatsFor(conn)}
-                    onAttach={(name) => attachTmux(conn, name)}
-                    // A name the user just typed, unlike onAttach's, has never been
-                    // through tmux. Normalise it here so the tab records the name
-                    // tmux will actually use — `.` and `:` split tmux's target
-                    // syntax, so a session called "api.v2" could never be reattached.
-                    onNewSession={(name) => attachTmux(conn, tmuxSessionName(name))}
-                    onKillSession={killTmux(conn)}
-                    onRenameSession={renameTmux(conn)}
-                    resolvePassword={resolvePasswordFor(conn)}
-                    fetchHookStatus={fetchHookStatusFor(conn)}
-                    applyHook={applyHookFor(conn)}
-                    fetchRuntime={fetchRuntimeFor(conn)}
-                    onOpenClaude={(dir) => openClaude(conn, dir)}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              )
-            })}
-
-            {/* settings stays mounted so it can share a split pane like any tab */}
-            {tabs.some((t) => t.kind === 'settings') && (
-              <div className={`overflow-hidden ${paneRing(SETTINGS_TAB_ID)}`} {...paneProps(SETTINGS_TAB_ID)}>
-                <SettingsPage settings={appSettings} onChange={updateSettings} onReset={resetSettings} />
-                {paneTools(SETTINGS_TAB_ID)}
-              </div>
-            )}
-
-            {/* the inbox stays mounted so its scan results survive a tab switch;
-                `active` is what gates the polling, not the mount */}
-            {tabs.some((t) => t.kind === 'inbox') && (
-              <div className={`overflow-hidden ${paneRing(INBOX_TAB_ID)}`} {...paneProps(INBOX_TAB_ID)}>
-                <AgentInbox
-                  hosts={agentHosts}
-                  error={agentScanError}
-                  scanning={agentScanning}
-                  rescan={rescanAgents}
-                  saved={savedSessions}
-                  savedError={savedSessionsError}
-                  savedScanning={savedSessionsScanning}
-                  rescanSaved={rescanSaved}
-                  loadMoreSaved={loadMoreSaved}
-                  onAttach={attachFromInbox}
-                  onResume={resumeFromInbox}
-                  onOpenTranscript={openTranscript}
-                  onNewAgent={newAgentFromInbox}
-                />
-                {paneTools(INBOX_TAB_ID)}
-              </div>
-            )}
-
-            {/* terminals stay mounted so sessions persist; only shown ones are visible.
-                Padding is colored to match xterm's own background (not the app's
-                `bg-ink`), so the frame around the terminal reads as one continuous
-                surface instead of a mismatched border. */}
-            {sessionTabs.map((tab) => {
-              const pp = paneProps(tab.id)
-              return (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line p-3 ${paneRing(tab.id)}`}
-                  {...pp}
-                  style={{ ...pp.style, backgroundColor: TERMINAL_BG }}
-                >
-                  <TerminalView
-                    sessionId={tab.id}
-                    connectionId={tab.connectionId}
-                    active={activeTabId === tab.id}
-                    password={tab.password}
-                    command={tab.command}
-                    tmux={tab.tmux}
-                    retries={appSettings.connectRetries}
-                    settings={appSettings.terminal}
-                    onStatus={onStatus}
-                    onTitle={onTitle}
-                    onAgentSignal={onAgentSignal}
-                    draftKey={tab.tabKey}
-                    initialDraft={drafts[tab.tabKey] ?? ''}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              )
-            })}
-
-            {/* tmux control-mode sessions stay mounted so pane content persists */}
-            {controlTabs.map((tab) => (
+          {/* terminals stay mounted so sessions persist; only shown ones are visible.
+              Padding is colored to match xterm's own background (not the app's
+              `bg-ink`), so the frame around the terminal reads as one continuous
+              surface instead of a mismatched border. */}
+          {sessionTabs.map((tab) => {
+            const pp = paneProps(tab.id)
+            return (
               <div
                 key={tab.id}
-                className={`overflow-hidden border-t border-line bg-ink ${paneRing(tab.id)}`}
-                {...paneProps(tab.id)}
+                className={`overflow-hidden border-t border-line p-3 ${paneRing(tab.id)}`}
+                {...pp}
+                style={{ ...pp.style, backgroundColor: TERMINAL_BG }}
               >
-                <TmuxControlView
+                <TerminalView
+                  ref={setComposerRef(tab.id)}
                   sessionId={tab.id}
                   connectionId={tab.connectionId}
                   active={activeTabId === tab.id}
-                  onScreen={onScreen(tab.id)}
                   password={tab.password}
                   command={tab.command}
                   tmux={tab.tmux}
                   retries={appSettings.connectRetries}
                   settings={appSettings.terminal}
                   onStatus={onStatus}
+                  onTitle={onTitle}
                   onAgentSignal={onAgentSignal}
                   draftKey={tab.tabKey}
-                  initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
+                  initialDraft={drafts[tab.tabKey] ?? ''}
+                />
+                {paneTools(tab.id)}
+              </div>
+            )
+          })}
+
+          {/* tmux control-mode sessions stay mounted so pane content persists */}
+          {controlTabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`overflow-hidden border-t border-line bg-ink ${paneRing(tab.id)}`}
+              {...paneProps(tab.id)}
+            >
+              <TmuxControlView
+                ref={setComposerRef(tab.id)}
+                sessionId={tab.id}
+                connectionId={tab.connectionId}
+                active={activeTabId === tab.id}
+                onScreen={onScreen(tab.id)}
+                password={tab.password}
+                command={tab.command}
+                tmux={tab.tmux}
+                retries={appSettings.connectRetries}
+                settings={appSettings.terminal}
+                onStatus={onStatus}
+                onAgentSignal={onAgentSignal}
+                draftKey={tab.tabKey}
+                initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
+              />
+              {paneTools(tab.id)}
+            </div>
+          ))}
+
+          {/* file managers stay mounted so the SFTP channel + transfers persist */}
+          {tabs
+            .filter((t): t is SftpTab => t.kind === 'sftp')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <FileManager
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  initialPath={tab.initialPath}
+                  active={onScreen(tab.id)}
+                  onOpenFile={(path, name) => openFile(tab.connectionId, tab.password, path, name)}
+                  onCwdChange={(path) => {
+                    rememberSftpPath(tab.connectionId, path)
+                    updateSftpTabPath(tab.id, path)
+                  }}
+                  onOpenClaude={(dir) => {
+                    const conn = connections.find((c) => c.id === tab.connectionId)
+                    if (conn) openClaude(conn, dir)
+                  }}
+                  onOpenWorktrees={(dir) => openWorktrees(tab.connectionId, tab.password, dir)}
                 />
                 {paneTools(tab.id)}
               </div>
             ))}
 
-            {/* file managers stay mounted so the SFTP channel + transfers persist */}
-            {tabs
-              .filter((t): t is SftpTab => t.kind === 'sftp')
-              .map((tab) => (
+          {/* editor tabs stay mounted so unsaved edits survive tab switches */}
+          {tabs
+            .filter((t): t is EditorTab => t.kind === 'editor')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <EditorView
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  path={tab.path}
+                  name={tab.name}
+                  active={activeTabId === tab.id}
+                  settings={appSettings.editor}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* worktree panes stay mounted so a half-filled create form survives a
+              tab switch — and so the list doesn't re-read on every glance */}
+          {tabs
+            .filter((t): t is WorktreeTab => t.kind === 'worktrees')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <WorktreeView
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  dir={tab.dir}
+                  active={onScreen(tab.id)}
+                  onOpenClaude={(wt) => {
+                    const conn = connections.find((c) => c.id === tab.connectionId)
+                    // Labelled with the worktree's own folder, since opening
+                    // several of these at once is what this pane is for.
+                    if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
+                  }}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* tunnel managers stay mounted so live tunnel state survives tab switches */}
+          {tabs
+            .filter((t): t is TunnelTab => t.kind === 'tunnels')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <TunnelManager
+                  connectionId={tab.connectionId}
+                  connectionName={nameOf(tab.connectionId)}
+                  password={tab.password}
+                  active={onScreen(tab.id)}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* empty split panes: pick a tab to join here */}
+          {isSplit &&
+            activeView &&
+            activeView.panes.map((pid, i) =>
+              pid !== null ? null : (
                 <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
+                  key={`empty-${activeView.id}-${i}`}
+                  onMouseDown={() => focusPane(i)}
+                  className={`absolute overflow-hidden ${
+                    i === activeView.focused ? 'ring-2 ring-inset ring-accent/60' : 'ring-1 ring-inset ring-line/70'
+                  }`}
+                  style={{ position: 'absolute', visibility: 'visible', ...paneRect(i) }}
                 >
-                  <FileManager
-                    connectionId={tab.connectionId}
-                    password={tab.password}
-                    initialPath={tab.initialPath}
-                    active={onScreen(tab.id)}
-                    onOpenFile={(path, name) => openFile(tab.connectionId, tab.password, path, name)}
-                    onCwdChange={(path) => {
-                      rememberSftpPath(tab.connectionId, path)
-                      updateSftpTabPath(tab.id, path)
-                    }}
-                    onOpenClaude={(dir) => {
-                      const conn = connections.find((c) => c.id === tab.connectionId)
-                      if (conn) openClaude(conn, dir)
-                    }}
-                    onOpenWorktrees={(dir) => openWorktrees(tab.connectionId, tab.password, dir)}
+                  <PanePicker
+                    options={tabs
+                      .filter((t) => !activeView.panes.includes(t.id))
+                      .map((t) => ({ id: t.id, label: leafLabel(t) }))}
+                    onPick={(leafId) => fillPane(activeView.id, i, leafId)}
+                    onClose={() => closePaneLeaf(activeView.id, i)}
                   />
-                  {paneTools(tab.id)}
                 </div>
-              ))}
-
-            {/* editor tabs stay mounted so unsaved edits survive tab switches */}
-            {tabs
-              .filter((t): t is EditorTab => t.kind === 'editor')
-              .map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
-                >
-                  <EditorView
-                    connectionId={tab.connectionId}
-                    password={tab.password}
-                    path={tab.path}
-                    name={tab.name}
-                    active={activeTabId === tab.id}
-                    settings={appSettings.editor}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              ))}
-
-            {/* worktree panes stay mounted so a half-filled create form survives a
-                tab switch — and so the list doesn't re-read on every glance */}
-            {tabs
-              .filter((t): t is WorktreeTab => t.kind === 'worktrees')
-              .map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
-                >
-                  <WorktreeView
-                    connectionId={tab.connectionId}
-                    password={tab.password}
-                    dir={tab.dir}
-                    active={onScreen(tab.id)}
-                    onOpenClaude={(wt) => {
-                      const conn = connections.find((c) => c.id === tab.connectionId)
-                      // Labelled with the worktree's own folder, since opening
-                      // several of these at once is what this pane is for.
-                      if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
-                    }}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              ))}
-
-            {/* transcript panes stay mounted so switching tabs doesn't re-read
-                and re-parse the file every time */}
-            {tabs
-              .filter((t): t is TranscriptTab => t.kind === 'transcript')
-              .map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
-                >
-                  <TranscriptView
-                    connectionId={tab.connectionId}
-                    password={tab.password}
-                    sessionId={tab.sessionId}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              ))}
-
-            {/* tunnel managers stay mounted so live tunnel state survives tab switches */}
-            {tabs
-              .filter((t): t is TunnelTab => t.kind === 'tunnels')
-              .map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
-                  {...paneProps(tab.id)}
-                >
-                  <TunnelManager
-                    connectionId={tab.connectionId}
-                    connectionName={nameOf(tab.connectionId)}
-                    password={tab.password}
-                    active={onScreen(tab.id)}
-                  />
-                  {paneTools(tab.id)}
-                </div>
-              ))}
-
-            {/* empty split panes: pick a tab to join here */}
-            {isSplit &&
-              activeView &&
-              activeView.panes.map((pid, i) =>
-                pid !== null ? null : (
-                  <div
-                    key={`empty-${activeView.id}-${i}`}
-                    onMouseDown={() => focusPane(i)}
-                    className={`absolute overflow-hidden ${
-                      i === activeView.focused ? 'ring-2 ring-inset ring-accent/60' : 'ring-1 ring-inset ring-line/70'
-                    }`}
-                    style={{ position: 'absolute', visibility: 'visible', ...paneRect(i) }}
-                  >
-                    <PanePicker
-                      options={tabs
-                        .filter((t) => !activeView.panes.includes(t.id))
-                        .map((t) => ({ id: t.id, label: leafLabel(t) }))}
-                      onPick={(leafId) => fillPane(activeView.id, i, leafId)}
-                      onClose={() => closePaneLeaf(activeView.id, i)}
-                    />
-                  </div>
-                )
-              )}
-
-            {isSplit && activeView && (
-              <PaneDividers
-                direction={activeView.direction}
-                sizes={activeView.sizes}
-                containerRef={contentRef}
-                onResize={(sizes) =>
-                  setViews((vs) => vs.map((v) => (v.id === activeView.id ? { ...v, sizes } : v)))
-                }
-              />
+              )
             )}
-          </div>
+
+          {isSplit && activeView && (
+            <PaneDividers
+              direction={activeView.direction}
+              sizes={activeView.sizes}
+              containerRef={contentRef}
+              onResize={(sizes) =>
+                setViews((vs) => vs.map((v) => (v.id === activeView.id ? { ...v, sizes } : v)))
+              }
+            />
+          )}
         </div>
       </div>
 
@@ -1952,13 +1932,10 @@ export default function App() {
         leafLabel={leafLabel}
         leafIcon={leafIcon}
         agentHosts={agentHosts}
-        saved={savedSessions}
         selectConnection={selectConnection}
         showLeaf={showLeaf}
         attachFromInbox={attachFromInbox}
-        resumeFromInbox={resumeFromInbox}
-        openTranscript={openTranscript}
-        openInbox={openInbox}
+        openSummary={openSummary}
       />
     </div>
   )

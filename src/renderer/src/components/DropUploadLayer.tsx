@@ -1,5 +1,5 @@
 import type { DropStatus } from '../lib/useDropUpload'
-import { IMAGE_PASTE_ACCEL } from '../lib/xtermAttach'
+import { PASTE_UPLOAD_ACCEL } from '../lib/xtermAttach'
 
 /**
  * The chrome for drop-to-upload, in two pieces because the tmux view needs them
@@ -27,7 +27,7 @@ export function DropHint() {
         <div className="eyebrow text-accent">drop to upload</div>
         <p className="text-sm text-fg">Files go to a private folder on the host</p>
         <p className="text-[11px] text-faint">
-          The path is typed at your cursor — nothing runs. Images: {IMAGE_PASTE_ACCEL}
+          The path is typed at your cursor — nothing runs. Paste: {PASTE_UPLOAD_ACCEL}
         </p>
       </div>
     </div>

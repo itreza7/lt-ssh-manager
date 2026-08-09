@@ -116,108 +116,6 @@ export interface AgentHostScan {
   skipped?: boolean
 }
 
-/**
- * One saved Claude Code transcript on one host — something that can be resumed.
- *
- * Built by shared/resume.ts, which is where the layout it is read out of, and the
- * reason every field is nullable, are explained. The short version: half of these
- * sessions have no title, and a field the far side could not establish is left null
- * rather than filled in with a plausible-looking default.
- */
-export interface ResumeSession {
-  /**
-   * Which saved connection this transcript lives on. Stamped by the IPC
-   * handler right after a scan returns — parseResumeScan() itself is a
-   * host-agnostic pure function and never sees a connection id.
-   */
-  connectionId: string
-  /** The transcript's filename stem, which is the id `--resume` takes. */
-  id: string
-  /**
-   * Absolute working directory the session ran in, or null when the transcript
-   * records none. Not decorative: `--resume` only finds an id under the project
-   * directory belonging to the cwd it starts in, so a row without this cannot be
-   * resumed at all.
-   */
-  dir: string | null
-  /**
-   * Whether `dir` is still a directory on the host. Three states, and the third is
-   * the point: `null` means the scan did not check — no cwd was recorded, or the
-   * value still carries a JSON escape and testing the escaped text would report a
-   * directory that is really there as missing. "Could not check" must never render
-   * as "it is gone", so the panel disables the button on `false` alone.
-   */
-  dirExists: boolean | null
-  /**
-   * The path came back through a UTF-8 decode that replaced bytes it could not read,
-   * so the string here is not the path on disk. Resuming is refused rather than
-   * attempted: `cd` against a rewritten path can only fail, and it would fail inside
-   * a terminal tab that had already opened instead of on the row that knew.
-   */
-  dirLossy: boolean
-  /** Seconds since the transcript was last written, on the SERVER's clock. */
-  ageSeconds: number | null
-  /**
-   * The SERVER-clock instant (epoch seconds) the transcript was last written —
-   * the same fact `ageSeconds` measures, as an absolute point in time rather
-   * than an age. Null exactly when `ageSeconds` is.
-   */
-  lastWrittenAt: number | null
-  /**
-   * Size of the transcript in bytes, or null where `stat` could not say.
-   *
-   * Here because a third of a real host's newest sixty had no label at all: pressing
-   * `/clear` starts a fresh transcript holding nothing but a caveat record and the
-   * command that produced it, so there is no title and no prompt to show. Those rows
-   * are still real and still resumable, so they are not filtered out — "small" is not
-   * the same fact as "empty", and guessing which is which would hide live work.
-   *
-   * What this measures, measured rather than assumed: a transcript's floor is 50-70 KB
-   * of hook and system boilerplate whatever it contains, so size tells a substantial
-   * conversation (megabytes) from a session that never went anywhere (tens of KB). It
-   * does NOT distinguish a `/clear` husk from a one-shot `claude -p` run — both sit in
-   * that same floor. That is the honest limit of it, and it is still the one number on
-   * the row that says whether resuming is worth the click.
-   */
-  sizeBytes: number | null
-  /** A name the user set with `/title` — the strongest label there is. */
-  customTitle: string | null
-  /** Claude's own summary. Present in roughly half of all sessions. */
-  aiTitle: string | null
-  /** The last thing the user typed. A weak label, but often the only one. */
-  lastPrompt: string | null
-}
-
-/** What one host contributed to a resume scan. Mirrors AgentHostScan. */
-export interface ResumeHostScan {
-  connectionId: string
-  name: string
-  sessions: ResumeSession[]
-  /**
-   * Transcripts found on the host, which may exceed `sessions.length`: only one
-   * page is described. The panel shows both numbers, because a list that stops
-   * at sixty without saying so reads as "that is all there is".
-   */
-  total: number
-  /**
-   * The script printed its end marker, so this list is the whole page it meant to
-   * send. False means the remote shell died mid-stream — the exec RESOLVES with
-   * whatever stdout had arrived when the channel closed, which is the one path
-   * where a truncated list would otherwise be presented as a complete short one.
-   */
-  complete: boolean
-  /** The host has no transcript directory — Claude Code has never run there. */
-  empty?: boolean
-  /**
-   * `projects/` exists and holds entries, but nothing under it could be listed —
-   * permissions, or a listing too large for the shell. Distinct from `empty` and
-   * from `total: 0`, both of which claim "there is nothing here".
-   */
-  listFailed?: boolean
-  error?: string
-  skipped?: boolean
-}
-
 /** One entry of `git worktree list --porcelain` on a remote host. */
 export interface RemoteWorktree {
   /**
@@ -385,30 +283,6 @@ export interface StageResult {
   errors: { name: string; error: string }[]
 }
 
-// ---- Composer @-file picker ----
-
-export interface SftpFindEntry {
-  /** Absolute remote path — typed at the cursor, same rationale as StagedUpload.path. */
-  path: string
-  type: 'file' | 'directory'
-}
-
-export interface SftpFindResult {
-  entries: SftpFindEntry[]
-  /** True when the walk hit its entry cap before finishing the tree. */
-  truncated: boolean
-}
-
-// ---- Prompt snippets ----
-
-export interface Snippet {
-  id: string
-  name: string
-  body: string
-}
-
-export type SnippetDraft = Omit<Snippet, 'id'> & { id?: string }
-
 /**
  * The state of our Claude Code notification hook on one server, plus both
  * candidate outcomes so the UI can show the exact change before it happens.
@@ -430,44 +304,47 @@ export interface ClaudeHookStatus {
 }
 
 /**
- * What the Claude Code CLI looks like on one server, as of the last probe.
- *
- * Every field is nullable or optional on purpose: a probe that reaches the host
- * but cannot answer a question reports "unknown", never a guess. A `false` here
- * means the remote shell actually said so. That distinction is load-bearing,
- * because the card turns these into advice — install this, sign in — and advice
- * is worse than useless when it is wrong about a working install.
- *
- * Nothing in this shape can carry a secret. `credsFile` is the result of a bare
- * `[ -f ]`, and `loggedIn`/`authMethod` are the only two scalars taken from
- * `claude auth status --json`; the account email, org id and org name are
- * dropped inside the remote shell, so they never reach stdout, IPC, or a log.
+ * Same shape as {@link ClaudeHookStatus}, for the `statusLine` setting that
+ * makes Claude Code's own native status line show the model, directory,
+ * worktree, effort, context usage, and rate limits — see STATUSLINE_COMMAND
+ * in main/claudeHooks.ts.
  */
-export interface ClaudeRuntime {
-  /**
-   * The remote `$HOME`, absolute, as the probe saw it. Not cosmetic: a dashboard
-   * launch hashes this path into the tmux session name, and hashing a guessed
-   * `~` would name a different session than a file-browser launch on the very
-   * same directory — two agents in one home, which is the failure the whole
-   * path-derived naming scheme exists to prevent. Undefined hides that button.
-   */
-  home?: string
-  /** Absolute path to the resolved binary, or null when no rung of the ladder matched. */
-  path: string | null
-  /**
-   * Semver only, taken from the `<semver> (Claude Code)` line. Null when the
-   * output did not match that exact shape — a shell wrapper or some future
-   * banner must read as "unknown version", not as a version we invented.
-   */
-  version: string | null
-  /** Tri-state: null means `auth status` gave no parsable answer, not signed out. */
-  loggedIn: boolean | null
-  /** e.g. "claude.ai". Charset-clamped on both sides; undefined when unrecognized. */
-  authMethod?: string
-  /** Presence of `$CLAUDE_CONFIG_DIR/.credentials.json`. Existence only, never contents. */
-  credsFile: boolean
-  /** Round-trip in ms. Diagnostic only. */
-  probeMs?: number
+export interface ClaudeStatusLineStatus {
+  /** Absolute remote path of the settings file, resolved from the server's home. */
+  path: string
+  /** The file as it stands. `{}` when the server has none yet. */
+  before: string
+  /** What installing would write. Equal to `before` when it's already current. */
+  install: string
+  /** What removing would write. Equal to `before` when nothing of ours is there. */
+  uninstall: string
+  /** Our command is present and up to date. */
+  installed: boolean
+  /** Our command is present — possibly an older version, or someone else's entirely. */
+  present: boolean
+}
+
+/**
+ * Same shape again, for the `~/.tmux.conf` line that turns on tmux's
+ * `allow-passthrough` — required for the Notification hook above to reach the
+ * user at all under tmux (the status line has no such dependency; see
+ * ClaudeStatusLineStatus). `before`/`install`/`uninstall` are the raw file
+ * text here, not JSON, but the caller (a diff-preview modal) treats them
+ * identically either way.
+ */
+export interface ClaudeTmuxPassthroughStatus {
+  /** Absolute remote path of `~/.tmux.conf`, resolved from the server's home. */
+  path: string
+  /** The file as it stands. `''` when the server has none yet. */
+  before: string
+  /** What installing would write. Equal to `before` when it's already current. */
+  install: string
+  /** What removing would write. Equal to `before` when nothing of ours is there. */
+  uninstall: string
+  /** Our line is present and up to date. */
+  installed: boolean
+  /** Our line is present — possibly an older form. */
+  present: boolean
 }
 
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */
@@ -505,6 +382,16 @@ export type CursorStyle = 'block' | 'bar' | 'underline'
  */
 export type ShiftEnterMode = 'newline' | 'escape-cr' | 'submit'
 
+/**
+ * What plain Enter does inside the prompt composer (see PromptComposer):
+ * - `mod-enter`: Enter makes a newline, ⌘/Ctrl+Enter sends. The composer's
+ *   original behavior — safest default since a stray Enter can't send early.
+ * - `enter`: Enter sends, Shift+Enter makes a newline — chat-app muscle memory.
+ * ⌘/Ctrl+Enter always sends and ⌥/Alt+Enter always inserts without sending,
+ * regardless of this setting.
+ */
+export type ComposerSendMode = 'mod-enter' | 'enter'
+
 export interface TerminalSettings {
   fontFamily: string // id from the renderer's font list (see lib/terminalSettings)
   fontSize: number
@@ -531,6 +418,14 @@ export interface TerminalSettings {
   liveTitles: boolean
   /** How loudly to report an attention signal from a session — see AgentAlerts. */
   agentAlerts: AgentAlerts
+  /** Open the prompt composer as soon as a session/tmux pane is ready, instead of
+   *  waiting for the chord (see COMPOSE_ACCEL, which still toggles it either way). */
+  composerDefaultOpen: boolean
+  /** What plain Enter does in the composer — see ComposerSendMode. */
+  composerSendMode: ComposerSendMode
+  /** Keep the composer open (drafting for the same target) after a send, instead
+   *  of closing and handing focus back to the terminal. */
+  composerStayOpen: boolean
 }
 
 /**
@@ -570,8 +465,6 @@ export interface AppSettings {
   terminal: TerminalSettings
   editor: EditorSettings
   connectRetries: number
-  /** Whether the connections sidebar is collapsed to its narrow rail. */
-  sidebarCollapsed: boolean
   theme: Theme
   /**
    * Schema version of the saved settings file. Not user-facing — it exists so a
@@ -586,7 +479,6 @@ export interface SettingsPatch {
   terminal?: Partial<TerminalSettings>
   editor?: Partial<EditorSettings>
   connectRetries?: number
-  sidebarCollapsed?: boolean
   theme?: Theme
 }
 
@@ -604,7 +496,10 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   // as Enter) and it's what lets a terminal agent take a multi-line prompt.
   shiftEnter: 'newline',
   liveTitles: true,
-  agentAlerts: 'dot'
+  agentAlerts: 'dot',
+  composerDefaultOpen: false,
+  composerSendMode: 'mod-enter',
+  composerStayOpen: false
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
@@ -627,7 +522,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal: DEFAULT_TERMINAL_SETTINGS,
   editor: DEFAULT_EDITOR_SETTINGS,
   connectRetries: 4,
-  sidebarCollapsed: false,
   theme: 'system',
   version: SETTINGS_VERSION
 }
@@ -669,21 +563,13 @@ export interface TunnelStatus {
  * A tab serialized to disk. No passwords or live session ids are stored.
  *
  * A workspace written by an older version may name a `kind` that no longer
- * exists — `'review'`, dropped after 0.10.0. Restore matches kinds one by one and
- * skips what it does not recognise, so such a tab simply does not come back.
+ * exists — `'review'`, dropped after 0.10.0; `'dashboard'`/`'inbox'`, both
+ * superseded by the always-present Summary tab. Restore matches kinds one by
+ * one and skips what it does not recognise, so such a tab simply does not
+ * come back.
  */
 export interface PersistedTab {
-  kind:
-    | 'dashboard'
-    | 'session'
-    | 'settings'
-    | 'sftp'
-    | 'editor'
-    | 'tunnels'
-    | 'tmux'
-    | 'worktrees'
-    | 'inbox'
-    | 'transcript'
+  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -695,7 +581,6 @@ export interface PersistedTab {
   initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo
   path?: string // editor: remote file path
   name?: string // editor: file name
-  sessionId?: string // transcript: the resumable session id
   /**
    * session/tmux: a stable id for this tab, independent of the live (regenerated
    * every launch) session id. Keys the prompt composer's persisted draft, so a

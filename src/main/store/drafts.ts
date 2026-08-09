@@ -1,7 +1,7 @@
 // Prompt composer draft persistence: a flat JSON file in the app's userData
-// dir, same shape as snippets.ts. Keyed by a tab's stable tabKey so a draft
-// survives disconnects, crashes, and full app restarts — cleared only on
-// explicit send, discard, or tab close.
+// dir. Keyed by a tab's stable tabKey so a draft survives disconnects,
+// crashes, and full app restarts — cleared only on explicit send, discard,
+// or tab close.
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'

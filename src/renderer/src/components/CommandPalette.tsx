@@ -1,14 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type {
-  AgentHostScan,
-  AgentSession,
-  Connection,
-  ResumeHostScan,
-  ResumeSession
-} from '../../../shared/types'
+import type { AgentHostScan, AgentSession, Connection } from '../../../shared/types'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
-import { resumeTitle } from '../lib/resume'
 import type { Tab } from '../App'
 
 interface Props {
@@ -19,13 +12,10 @@ interface Props {
   leafLabel: (t: Tab) => string
   leafIcon: (t: Tab, lit: boolean) => ReactNode
   agentHosts: AgentHostScan[] | null
-  saved: ResumeHostScan[] | null
   selectConnection: (connectionId: string) => void
   showLeaf: (id: string) => void
   attachFromInbox: (connectionId: string, session: string) => void
-  resumeFromInbox: (connectionId: string, s: ResumeSession, label: string) => void
-  openTranscript: (connectionId: string, s: ResumeSession, label: string) => void
-  openInbox: () => void
+  openSummary: () => void
 }
 
 /** How many rows one section shows — a jump list, not the full inbox. */
@@ -61,13 +51,10 @@ export function CommandPalette({
   leafLabel,
   leafIcon,
   agentHosts,
-  saved,
   selectConnection,
   showLeaf,
   attachFromInbox,
-  resumeFromInbox,
-  openTranscript,
-  openInbox
+  openSummary
 }: Props) {
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -138,77 +125,31 @@ export function CommandPalette({
     }))
   }, [agentHosts, q, attachFromInbox])
 
-  // Only sessions `resumeFromInbox` can actually open — same guard AgentInbox
-  // uses to disable its own Resume button (no cwd, or the cwd is gone/unreadable).
-  const savedResults = useMemo<ResultItem[]>(() => {
-    const rows: { connectionId: string; host: string; s: ResumeSession; label: string }[] = []
-    for (const h of saved ?? []) {
-      for (const s of h.sessions) {
-        if (!s.dir || s.dirExists === false || s.dirLossy) continue
-        rows.push({ connectionId: h.connectionId, host: h.name, s, label: resumeTitle(s) ?? 'Untitled session' })
-      }
-    }
-    const filtered = rows.filter((r) =>
-      `${r.host} ${r.label} ${r.s.dir ?? ''}`.toLowerCase().includes(q)
-    )
-    return filtered.slice(0, MAX_RESULTS).map((r) => ({
-      key: `saved:${r.connectionId}:${r.s.id}`,
-      label: r.label,
-      sub: `${r.host} · ${shortPath(r.s.dir ?? '')}`,
-      icon: <span className="text-accent">↺</span>,
-      run: () => resumeFromInbox(r.connectionId, r.s, r.label)
-    }))
-  }, [saved, q, resumeFromInbox])
-
-  // No dir filter here, unlike savedResults: viewing a transcript only reads a
-  // file, it doesn't `--resume` into a cwd, so every saved session qualifies —
-  // including the ones Resume disables for having no directory, or a gone one.
-  const transcriptResults = useMemo<ResultItem[]>(() => {
-    const rows: { connectionId: string; host: string; s: ResumeSession; label: string }[] = []
-    for (const h of saved ?? []) {
-      for (const s of h.sessions) {
-        rows.push({ connectionId: h.connectionId, host: h.name, s, label: resumeTitle(s) ?? 'Untitled session' })
-      }
-    }
-    const filtered = rows.filter((r) =>
-      `${r.host} ${r.label} ${r.s.dir ?? ''}`.toLowerCase().includes(q)
-    )
-    return filtered.slice(0, MAX_RESULTS).map((r) => ({
-      key: `transcript:${r.connectionId}:${r.s.id}`,
-      label: r.label,
-      sub: `${r.host} · transcript`,
-      icon: <span className="text-accent">▤</span>,
-      run: () => openTranscript(r.connectionId, r.s, r.label)
-    }))
-  }, [saved, q, openTranscript])
-
-  const homeResult = useMemo<ResultItem | null>(() => {
-    const label = 'Open Home'
+  const summaryResult = useMemo<ResultItem | null>(() => {
+    const label = 'Open Summary'
     if (!label.toLowerCase().includes(q)) return null
     return {
-      key: 'action:home',
+      key: 'action:summary',
       label,
-      sub: 'Every agent, every host',
+      sub: 'The active server, at a glance',
       icon: <span className="text-accent">◎</span>,
-      run: () => openInbox()
+      run: () => openSummary()
     }
-  }, [q, openInbox])
+  }, [q, openSummary])
 
   const sections = useMemo(
     () =>
       [
         { title: 'Hosts', items: hostResults },
         { title: 'Open Tabs', items: tabResults },
-        { title: 'Running Agents', items: agentResults },
-        { title: 'Saved Sessions', items: savedResults },
-        { title: 'Transcripts', items: transcriptResults }
+        { title: 'Running Agents', items: agentResults }
       ].filter((s) => s.items.length > 0),
-    [hostResults, tabResults, agentResults, savedResults, transcriptResults]
+    [hostResults, tabResults, agentResults]
   )
 
   const flatResults = useMemo(
-    () => [...sections.flatMap((s) => s.items), ...(homeResult ? [homeResult] : [])],
-    [sections, homeResult]
+    () => [...sections.flatMap((s) => s.items), ...(summaryResult ? [summaryResult] : [])],
+    [sections, summaryResult]
   )
 
   const resultIndex = useMemo(() => {
@@ -288,7 +229,7 @@ export function CommandPalette({
             </div>
           ))}
 
-          {homeResult && <div className="mt-1 border-t border-line/70 pt-1">{row(homeResult)}</div>}
+          {summaryResult && <div className="mt-1 border-t border-line/70 pt-1">{row(summaryResult)}</div>}
 
           {flatResults.length === 0 && (
             <p className="px-3 py-8 text-center text-xs text-faint">No matches.</p>
