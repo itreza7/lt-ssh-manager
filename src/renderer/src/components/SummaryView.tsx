@@ -14,6 +14,13 @@ import { Button, Modal } from './Modal'
 import { isClaudeSession } from '../lib/claude'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
+import {
+  checkedOutBranches,
+  mainWorktree,
+  refNameError,
+  worktreeBase,
+  worktreeNameError
+} from '../../../shared/worktrees'
 
 interface Props {
   connection: Connection | null
@@ -320,6 +327,18 @@ function NewAgentForm({
   const [worktreeLoading, setWorktreeLoading] = useState(false)
   const [worktreeError, setWorktreeError] = useState<string | null>(null)
 
+  // The "new worktree" sub-form, nested inside the worktree picker — closed
+  // until asked for, same shape as WorktreeView's own create form.
+  const [wtCreating, setWtCreating] = useState(false)
+  const [wtName, setWtName] = useState('')
+  const [wtMode, setWtMode] = useState<'new' | 'existing'>('new')
+  const [wtBranch, setWtBranch] = useState('')
+  const [wtBranchTouched, setWtBranchTouched] = useState(false)
+  const [wtFrom, setWtFrom] = useState('')
+  const [wtExisting, setWtExisting] = useState('')
+  const [wtWorking, setWtWorking] = useState(false)
+  const [wtFormError, setWtFormError] = useState<string | null>(null)
+
   useEffect(() => {
     return () => {
       if (sftpReadyRef.current) window.api.sftpClose(connectionId)
@@ -448,6 +467,73 @@ function NewAgentForm({
     setError(null)
   }
 
+  const main = useMemo(() => (worktreeScan ? mainWorktree(worktreeScan) : null), [worktreeScan])
+  const base = useMemo(() => (worktreeScan ? worktreeBase(worktreeScan) : null), [worktreeScan])
+  const taken = useMemo(
+    () => (worktreeScan ? checkedOutBranches(worktreeScan) : new Set<string>()),
+    [worktreeScan]
+  )
+  const free = useMemo(
+    () => (worktreeScan?.branches ?? []).filter((b) => !taken.has(b)),
+    [worktreeScan, taken]
+  )
+
+  const openWtCreate = (): void => {
+    setWtCreating(true)
+    setWtFormError(null)
+    setWtName('')
+    setWtBranch('')
+    setWtBranchTouched(false)
+    setWtMode('new')
+    setWtExisting(free[0] ?? '')
+    setWtFrom(main?.branch ?? 'HEAD')
+  }
+
+  const wtEffectiveBranch = wtMode === 'new' ? (wtBranchTouched ? wtBranch : wtName) : wtExisting
+
+  const submitWtCreate = async (): Promise<void> => {
+    if (!main) return
+    const nameErr = worktreeNameError(wtName)
+    if (nameErr) {
+      setWtFormError(nameErr)
+      return
+    }
+    const branchErr = refNameError(wtEffectiveBranch)
+    if (branchErr) {
+      setWtFormError(branchErr)
+      return
+    }
+    if (wtMode === 'new') {
+      const fromErr = refNameError(wtFrom, 'start point')
+      if (fromErr) {
+        setWtFormError(fromErr)
+        return
+      }
+    }
+    setWtFormError(null)
+    setWtWorking(true)
+    try {
+      const password = await resolvePassword()
+      if (password === null) throw new Error('Password required to create a worktree.')
+      const res = await window.api.gitWorktreeAdd({
+        connectionId,
+        repoRoot: main.path,
+        name: wtName,
+        start:
+          wtMode === 'new'
+            ? { kind: 'new', branch: wtEffectiveBranch, from: wtFrom }
+            : { kind: 'existing', branch: wtEffectiveBranch },
+        password: password ?? undefined
+      })
+      setWtCreating(false)
+      pickWorktree(res.path)
+    } catch (e) {
+      setWtFormError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setWtWorking(false)
+    }
+  }
+
   return (
     <div className="mb-4 rounded-lg border border-line/70 bg-elevated/20 p-3">
       <div className="mb-2 flex items-center justify-between">
@@ -518,9 +604,135 @@ function NewAgentForm({
               No git repository found there — type a path inside one first.
             </p>
           )}
-          {!worktreeLoading && !worktreeError && worktreeScan && worktreeScan.worktrees.length === 0 && (
-            <p className="font-mono text-[11px] text-faint">No worktrees for this repository yet.</p>
+
+          {!worktreeLoading && !worktreeError && worktreeScan && main && (
+            <>
+              <div className="mb-2 flex items-center justify-between">
+                <span className="font-mono text-[10px] text-faint">
+                  {worktreeScan.worktrees.length === 0
+                    ? 'No worktrees for this repository yet.'
+                    : `${worktreeScan.worktrees.length} worktree${worktreeScan.worktrees.length === 1 ? '' : 's'}`}
+                </span>
+                <button
+                  onClick={() => (wtCreating ? setWtCreating(false) : openWtCreate())}
+                  className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/20"
+                >
+                  {wtCreating ? 'Cancel' : 'New worktree'}
+                </button>
+              </div>
+
+              {wtCreating && (
+                <div className="animate-rise mb-3 rounded-lg border border-line bg-elevated/40 p-2.5">
+                  <label className="mb-2 block">
+                    <span className="mb-1 block text-[10px] text-muted">Folder name</span>
+                    <input
+                      autoFocus
+                      value={wtName}
+                      onChange={(e) => setWtName(e.target.value)}
+                      placeholder="dt4"
+                      className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent/50"
+                    />
+                    <span className="mt-1 block truncate font-mono text-[10px] text-faint">
+                      {base}/{wtName || '…'}
+                    </span>
+                  </label>
+
+                  <div className="mb-2 flex gap-3 text-[10px]">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-muted">
+                      <input
+                        type="radio"
+                        checked={wtMode === 'new'}
+                        onChange={() => setWtMode('new')}
+                        className="accent-accent"
+                      />
+                      New branch
+                    </label>
+                    <label
+                      className={`flex items-center gap-1.5 ${free.length === 0 ? 'text-faint' : 'cursor-pointer text-muted'}`}
+                      title={
+                        free.length === 0
+                          ? 'Every branch in this repo is already checked out in a worktree'
+                          : undefined
+                      }
+                    >
+                      <input
+                        type="radio"
+                        checked={wtMode === 'existing'}
+                        disabled={free.length === 0}
+                        onChange={() => setWtMode('existing')}
+                        className="accent-accent"
+                      />
+                      Existing branch
+                    </label>
+                  </div>
+
+                  {wtMode === 'new' ? (
+                    <div className="mb-2 grid grid-cols-2 gap-2">
+                      <label className="block">
+                        <span className="mb-1 block text-[10px] text-muted">Branch</span>
+                        <input
+                          value={wtEffectiveBranch}
+                          onChange={(e) => {
+                            setWtBranchTouched(true)
+                            setWtBranch(e.target.value)
+                          }}
+                          placeholder="feature/thing"
+                          className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent/50"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-[10px] text-muted">Starting from</span>
+                        <input
+                          value={wtFrom}
+                          onChange={(e) => setWtFrom(e.target.value)}
+                          placeholder="main"
+                          list="summary-wt-branches"
+                          className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent/50"
+                        />
+                        <datalist id="summary-wt-branches">
+                          {(worktreeScan.branches ?? []).map((b) => (
+                            <option key={b} value={b} />
+                          ))}
+                        </datalist>
+                      </label>
+                    </div>
+                  ) : (
+                    <label className="mb-2 block">
+                      <span className="mb-1 block text-[10px] text-muted">
+                        Branch · {free.length} available
+                      </span>
+                      <select
+                        value={wtExisting}
+                        onChange={(e) => setWtExisting(e.target.value)}
+                        className="w-full rounded-md border border-line bg-ink px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent/50"
+                      >
+                        {free.map((b) => (
+                          <option key={b} value={b}>
+                            {b}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+
+                  {wtFormError && (
+                    <p className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 font-mono text-[10px] text-danger">
+                      {wtFormError}
+                    </p>
+                  )}
+
+                  <button
+                    onClick={() => void submitWtCreate()}
+                    disabled={wtWorking || !wtName}
+                    className="rounded-md border border-accent/40 bg-accent/10 px-3 py-1 text-[10px] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
+                  >
+                    {wtWorking ? 'Creating…' : 'Create worktree'}
+                  </button>
+                </div>
+              )}
+            </>
           )}
+
           {!worktreeLoading && worktreeScan && worktreeScan.worktrees.length > 0 && (
             <div className="space-y-1">
               {worktreeScan.worktrees.map((w) => (
