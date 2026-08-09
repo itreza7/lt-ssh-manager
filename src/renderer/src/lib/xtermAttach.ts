@@ -98,24 +98,33 @@ const isComposeChord = (e: KeyboardEvent): boolean =>
     ? e.metaKey && !e.ctrlKey && !e.altKey
     : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey
 
+/** DEC bracketed-paste start/end markers (CSI 200~ / CSI 201~). */
+const BRACKET_START = '\x1b[200~'
+const BRACKET_END = '\x1b[201~'
+
 /**
  * Put a composed body on the remote's input as one unit, then submit it.
  *
- * `term.paste()` is what wraps the body in the bracketed-paste markers when the
- * remote has that mode on, and those markers are the whole trick: inside them
- * the embedded newlines arrive as line breaks in the program's prompt rather
- * than as N separate commands. The submitting CR goes through `term.input()`
- * *afterwards*, never inside the paste — bracketed, it would be literal text and
- * nothing would be submitted at all.
+ * `term.paste()` only wraps in the bracketed-paste markers when the terminal's
+ * own negotiated `bracketedPasteMode` happens to be on at the moment of the
+ * call — which is exactly the wrong thing for a composer send: the whole point
+ * is a program's *own* prompt gets to see embedded newlines as line breaks
+ * rather than as N separate submitted commands, and that has nothing to do
+ * with whether some intermediate shell in front of it ever asked for the mode.
+ * So this wraps unconditionally and sends via `term.input()`, which — unlike
+ * `term.paste()` — puts raw bytes on the wire with no conditional in the way.
+ * A program that never asked for bracketed paste just sees (and ignores) the
+ * marker bytes, same as it would for a real terminal-emulator paste it wasn't
+ * expecting; one that did asked for exactly this.
  *
- * With bracketed paste off — a plain shell sitting at its prompt — this does
- * exactly what pasting the same text by hand does: every line runs. That's the
- * honest outcome rather than something to paper over, and the composer says so
- * before you send.
+ * The submitting CR goes through `term.input()` *afterwards*, never inside the
+ * bracketed region — inside it, it would be literal text and nothing would be
+ * submitted at all.
  */
 export function sendComposed(term: XTerm, body: string, submit = true): void {
-  term.paste(body)
-  if (submit) term.input('\r')
+  const normalized = body.replace(/\r\n|\r/g, '\n').replace(/\n/g, '\r')
+  term.input(BRACKET_START + normalized + BRACKET_END, true)
+  if (submit) term.input('\r', true)
 }
 
 /**

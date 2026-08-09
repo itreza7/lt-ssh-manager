@@ -91,7 +91,6 @@ export function TerminalView({
   // lost to a stray Esc.
   const [composing, setComposing] = useState(false)
   const [draft, setDraft] = useState(initialDraft ?? '')
-  const [bracketed, setBracketed] = useState(true)
 
   // Local autosave, independent of the SSH connection: survives disconnects,
   // crashes, and restarts. Cleared naturally when draft goes back to '' on
@@ -277,10 +276,6 @@ export function TerminalView({
   )
 
   const openComposer = useCallback(() => {
-    // Sampled at open time rather than at send: whether newlines survive is a
-    // property of whatever program is running *now*, and a shell at its prompt
-    // and an agent waiting for input answer differently.
-    setBracketed(termRef.current?.modes.bracketedPasteMode ?? false)
     setComposing(true)
     bumpFocus()
   }, [])
@@ -299,7 +294,6 @@ export function TerminalView({
         termRef.current?.focus()
         return false
       }
-      setBracketed(termRef.current?.modes.bracketedPasteMode ?? false)
       bumpFocus()
       return true
     })
@@ -312,6 +306,12 @@ export function TerminalView({
   useEffect(() => {
     if (settingsRef.current.composerDefaultOpen) openComposer()
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Raw key chords from the composer's quick-actions row (Shift+Tab, Esc) —
+  // straight to the remote, unbracketed, no draft involved.
+  const sendKey = useCallback((data: string) => {
+    termRef.current?.input(data, true)
   }, [])
 
   const sendDraft = useCallback((submit: boolean, body: string) => {
@@ -615,7 +615,7 @@ export function TerminalView({
         onOpen={openComposer}
         onClose={closeComposer}
         onDiscard={() => setDraft('')}
-        bracketed={bracketed}
+        onSendKey={sendKey}
       />
     </div>
   )
