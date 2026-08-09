@@ -303,12 +303,15 @@ export function TmuxControlView({
         setEnded(null)
       } else if (status.kind === 'ready') {
         setEnded(null)
+        // The control client's size came from a guess made at mount time,
+        // before a brand-new tab's layout was necessarily settled — re-measure
+        // now that the pane is definitely on screen, so a wrong initial guess
+        // gets corrected without the user having to toggle anything to trigger
+        // a ResizeObserver callback by accident.
+        requestAnimationFrame(pushSize)
         if (reattachingRef.current) {
           reattachingRef.current = false
           setReattach(null)
-          // The new control client hasn't been told our size yet, and lastSizeRef
-          // was cleared below so this actually sends.
-          requestAnimationFrame(pushSize)
           // Mark the seam in each pane's scrollback. Unlike the drawn view there's
           // no alternate buffer here — each pane is a plain xterm we append to — so
           // a line of text is both safe and the clearest signal that what follows

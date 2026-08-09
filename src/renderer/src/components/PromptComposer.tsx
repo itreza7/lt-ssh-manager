@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -21,6 +22,8 @@ const QUICK_COMMANDS: { label: string; text: string; title: string }[] = [
   { label: '/clear', text: '/clear', title: 'Clear conversation history' },
   { label: '/compact', text: '/compact', title: 'Compact conversation history' },
   { label: '/resume', text: '/resume', title: 'Resume a previous session' },
+  { label: '/context', text: '/context', title: 'Show context usage' },
+  { label: '/exit', text: '/exit', title: 'Exit Claude Code' },
   { label: '/help', text: '/help', title: 'Show available commands' }
 ]
 
@@ -28,7 +31,8 @@ const QUICK_COMMANDS: { label: string; text: string; title: string }[] = [
  *  these are keypresses Claude Code reads directly, not text to submit. */
 const QUICK_KEYS: { label: string; data: string; title: string }[] = [
   { label: 'Shift+Tab', data: '\x1b[Z', title: 'Cycle mode (plan / auto-accept / default)' },
-  { label: 'Esc', data: '\x1b', title: 'Interrupt the current turn' }
+  { label: 'Esc', data: '\x1b', title: 'Interrupt the current turn' },
+  { label: 'Stop (^C)', data: '\x03', title: 'Send Ctrl+C — stop the running process' }
 ]
 
 /** A paste past either threshold gets collapsed to a placeholder — short pastes
@@ -134,6 +138,28 @@ export function PromptComposer({
   const pastesRef = useRef<Map<string, string>>(new Map())
   const pasteCounterRef = useRef(0)
 
+  // Sent prompts, oldest first — shared across every pane/session, persisted
+  // to userData (see src/main/store/promptHistory.ts), never cleared by the
+  // app itself. Loaded once at mount for Up/Down recall, and refreshed
+  // whenever the browser panel opens so it reflects prompts sent from other
+  // tabs too.
+  const [history, setHistory] = useState<string[]>([])
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  // What was on the line before Up first walked away from it, so Down can
+  // land back on the in-progress draft instead of an empty line.
+  const draftBeforeHistoryRef = useRef('')
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyQuery, setHistoryQuery] = useState('')
+
+  useEffect(() => {
+    void window.api.promptHistoryAll().then(setHistory)
+  }, [])
+
+  // Leaving the composer always leaves the history browser behind it too.
+  useEffect(() => {
+    if (!open) setHistoryOpen(false)
+  }, [open])
+
   // Keyed on focusKey as well as open — see the prop. Re-focusing an element
   // that already has focus is a no-op in Chromium and leaves the caret alone,
   // so an extra bump costs nothing.
@@ -144,7 +170,56 @@ export function PromptComposer({
   const body = draft.replace(/\s+$/, '')
 
   const onChange = (e: ChangeEvent<HTMLTextAreaElement>): void => {
+    // Actual typing always means "leave history browsing" — otherwise the
+    // next Down would jump back to a stale recalled entry instead of
+    // continuing from what's now on the line.
+    setHistoryIndex(null)
     onDraft(e.target.value)
+  }
+
+  /** Walk the sent-prompt history. `dir` -1 is Up (older), 1 is Down (newer). */
+  const navigateHistory = (dir: -1 | 1): void => {
+    if (dir === -1) {
+      if (!history.length) return
+      if (historyIndex === null) draftBeforeHistoryRef.current = draft
+      const next = historyIndex === null ? 0 : Math.min(historyIndex + 1, history.length - 1)
+      setHistoryIndex(next)
+      onDraft(history[history.length - 1 - next])
+    } else {
+      if (historyIndex === null) return
+      if (historyIndex === 0) {
+        setHistoryIndex(null)
+        onDraft(draftBeforeHistoryRef.current)
+      } else {
+        const next = historyIndex - 1
+        setHistoryIndex(next)
+        onDraft(history[history.length - 1 - next])
+      }
+    }
+    // Land the caret at the end of the recalled line, same as a shell would.
+    requestAnimationFrame(() => {
+      const el = ref.current
+      if (el) el.setSelectionRange(el.value.length, el.value.length)
+    })
+  }
+
+  /** Open the browser panel, refreshed from disk so it reflects any prompts
+   *  sent from other panes/tabs since this composer last loaded history. */
+  const openHistoryBrowser = (): void => {
+    setHistoryQuery('')
+    setHistoryOpen(true)
+    void window.api.promptHistoryAll().then(setHistory)
+  }
+
+  const selectHistoryEntry = (entry: string): void => {
+    onDraft(entry)
+    setHistoryIndex(null)
+    setHistoryOpen(false)
+    requestAnimationFrame(() => {
+      const el = ref.current
+      el?.focus()
+      if (el) el.setSelectionRange(el.value.length, el.value.length)
+    })
   }
 
   /** Splice `insert` in at [start, end), returning the new draft and where the
@@ -190,8 +265,17 @@ export function PromptComposer({
   }
 
   const send = (submit: boolean): void => {
-    onSend(submit, expandPastes(body, pastesRef.current))
+    const full = expandPastes(body, pastesRef.current)
+    if (submit && full.trim() && history[history.length - 1] !== full) {
+      // Optimistic local append so the next Up recalls it immediately;
+      // promptHistoryAdd persists it (and is the source of truth other
+      // composer instances refresh from when their own panel opens).
+      setHistory((h) => [...h, full])
+      void window.api.promptHistoryAdd(full)
+    }
+    onSend(submit, full)
     pastesRef.current.clear()
+    setHistoryIndex(null)
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -229,6 +313,20 @@ export function PromptComposer({
     } else if (e.key === 'Escape') {
       e.preventDefault()
       onClose()
+    } else if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Only steal Up once the caret is already on the first line — otherwise
+      // it's plain caret movement within a multi-line draft.
+      const el = e.currentTarget
+      if (!draft.slice(0, el.selectionStart).includes('\n') && history.length) {
+        e.preventDefault()
+        navigateHistory(-1)
+      }
+    } else if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const el = e.currentTarget
+      if (!draft.slice(el.selectionEnd).includes('\n') && historyIndex !== null) {
+        e.preventDefault()
+        navigateHistory(1)
+      }
     }
   }
 
@@ -255,6 +353,10 @@ export function PromptComposer({
   }
 
   const lines = draft.split('\n')
+
+  const filteredHistory = historyQuery.trim()
+    ? history.filter((h) => h.toLowerCase().includes(historyQuery.trim().toLowerCase()))
+    : history
 
   return (
     <div
@@ -293,87 +395,138 @@ export function PromptComposer({
             <span className="eyebrow shrink-0 text-accent">prompt composer</span>
             {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
             <div className="flex-1" />
+            {!historyOpen && (
+              <button
+                onClick={openHistoryBrowser}
+                title="Browse and search sent prompts"
+                className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-fg"
+              >
+                History
+              </button>
+            )}
             <button
-              onClick={onClose}
-              title="Close (Esc)"
+              onClick={historyOpen ? () => setHistoryOpen(false) : onClose}
+              title={historyOpen ? 'Back to composing' : 'Close (Esc)'}
               className="px-1 text-faint transition-colors hover:text-fg"
             >
               ×
             </button>
           </div>
 
-          <textarea
-            ref={ref}
-            value={draft}
-            onChange={onChange}
-            onKeyDown={onKeyDown}
-            onPaste={onPaste}
-            spellCheck={false}
-            rows={2}
-            placeholder="Write as many lines as you like — nothing reaches the remote until you send."
-            className="mx-3 mt-1.5 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
-          />
+          {historyOpen ? (
+            <div className="flex min-h-0 flex-col px-3 pt-1.5 pb-2">
+              <input
+                autoFocus
+                value={historyQuery}
+                onChange={(e) => setHistoryQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setHistoryOpen(false)
+                  }
+                }}
+                placeholder="Search sent prompts…"
+                className="rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 font-mono text-[13px] text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
+              />
+              <div className="mt-1.5 max-h-64 overflow-y-auto rounded-lg border border-line">
+                {filteredHistory.length === 0 ? (
+                  <div className="px-2.5 py-3 text-center text-[12px] text-faint">
+                    {history.length === 0 ? 'No sent prompts yet' : 'No matches'}
+                  </div>
+                ) : (
+                  filteredHistory
+                    .slice()
+                    .reverse()
+                    .map((entry, i) => (
+                      <button
+                        key={i}
+                        onClick={() => selectHistoryEntry(entry)}
+                        title={entry}
+                        className="block w-full truncate border-b border-line/60 px-2.5 py-1.5 text-left font-mono text-[12px] text-muted transition-colors last:border-b-0 hover:bg-ink/40 hover:text-fg"
+                      >
+                        {entry.replace(/\s+/g, ' ')}
+                      </button>
+                    ))
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              <textarea
+                ref={ref}
+                value={draft}
+                onChange={onChange}
+                onKeyDown={onKeyDown}
+                onPaste={onPaste}
+                spellCheck={false}
+                rows={3}
+                placeholder="Write as many lines as you like — nothing reaches the remote until you send."
+                className="mx-3 mt-1.5 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
+              />
 
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pt-1.5">
-            <span className="text-[11px] text-faint">quick:</span>
-            {QUICK_COMMANDS.map((c) => (
-              <button
-                key={c.label}
-                onClick={() => onSend(true, c.text)}
-                title={c.title}
-                className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted transition-colors hover:text-fg"
-              >
-                {c.label}
-              </button>
-            ))}
-            {QUICK_KEYS.map((k) => (
-              <button
-                key={k.label}
-                onClick={() => onSendKey(k.data)}
-                title={k.title}
-                className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:text-fg"
-              >
-                {k.label}
-              </button>
-            ))}
-          </div>
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pt-1.5">
+                <span className="text-[11px] text-faint">quick:</span>
+                {QUICK_COMMANDS.map((c) => (
+                  <button
+                    key={c.label}
+                    onClick={() => onSend(true, c.text)}
+                    title={c.title}
+                    className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted transition-colors hover:text-fg"
+                  >
+                    {c.label}
+                  </button>
+                ))}
+                {QUICK_KEYS.map((k) => (
+                  <button
+                    key={k.label}
+                    onClick={() => onSendKey(k.data)}
+                    title={k.title}
+                    className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:text-fg"
+                  >
+                    {k.label}
+                  </button>
+                ))}
+              </div>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-            <span className="text-[11px] text-faint">
-              {sendMode === 'enter' ? (
-                <>
-                  <Key>Enter</Key> send · <Key>Shift+Enter</Key> newline ·{' '}
-                </>
-              ) : (
-                <>
-                  <Key>{SEND_ACCEL}</Key> send · <Key>Enter</Key> newline ·{' '}
-                </>
-              )}
-              <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close
-            </span>
-            <div className="flex-1" />
-            <button
-              onClick={onPasteButton}
-              title="Paste from clipboard"
-              className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
-            >
-              Paste
-            </button>
-            <button
-              disabled={!body}
-              onClick={() => send(false)}
-              className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg disabled:opacity-40 disabled:hover:text-muted"
-            >
-              Insert
-            </button>
-            <button
-              disabled={!body}
-              onClick={() => send(true)}
-              className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
-            >
-              Send ▸
-            </button>
-          </div>
+              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                <span className="text-[11px] text-faint">
+                  {sendMode === 'enter' ? (
+                    <>
+                      <Key>Enter</Key> send · <Key>Shift+Enter</Key> newline ·{' '}
+                    </>
+                  ) : (
+                    <>
+                      <Key>{SEND_ACCEL}</Key> send · <Key>Enter</Key> newline ·{' '}
+                    </>
+                  )}
+                  <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close ·{' '}
+                  <Key>↑↓</Key> history
+                </span>
+                <div className="flex-1" />
+                <button
+                  onClick={onPasteButton}
+                  title="Paste from clipboard"
+                  className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
+                >
+                  Paste
+                </button>
+                <button
+                  disabled={!body}
+                  onClick={() => send(false)}
+                  className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg disabled:opacity-40 disabled:hover:text-muted"
+                >
+                  Insert
+                </button>
+                <button
+                  disabled={!body}
+                  onClick={() => send(true)}
+                  className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  Send ▸
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

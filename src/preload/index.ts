@@ -60,6 +60,8 @@ const api = {
   // prompt composer drafts (local autosave, independent of the SSH connection)
   draftsAll: (): Promise<Record<string, string>> => ipcRenderer.invoke('drafts:all'),
   draftsSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('drafts:set', key, value),
+  promptHistoryAll: (): Promise<string[]> => ipcRenderer.invoke('promptHistory:all'),
+  promptHistoryAdd: (text: string): Promise<string[]> => ipcRenderer.invoke('promptHistory:add', text),
 
   // settings (persisted on disk in the app's user folder)
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
