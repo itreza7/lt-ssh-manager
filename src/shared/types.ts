@@ -385,6 +385,30 @@ export interface StageResult {
   errors: { name: string; error: string }[]
 }
 
+// ---- Composer @-file picker ----
+
+export interface SftpFindEntry {
+  /** Absolute remote path — typed at the cursor, same rationale as StagedUpload.path. */
+  path: string
+  type: 'file' | 'directory'
+}
+
+export interface SftpFindResult {
+  entries: SftpFindEntry[]
+  /** True when the walk hit its entry cap before finishing the tree. */
+  truncated: boolean
+}
+
+// ---- Prompt snippets ----
+
+export interface Snippet {
+  id: string
+  name: string
+  body: string
+}
+
+export type SnippetDraft = Omit<Snippet, 'id'> & { id?: string }
+
 /**
  * The state of our Claude Code notification hook on one server, plus both
  * candidate outcomes so the UI can show the exact change before it happens.

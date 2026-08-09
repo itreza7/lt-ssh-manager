@@ -567,6 +567,7 @@ export function TerminalView({
         onClose={closeComposer}
         onDiscard={() => setDraft('')}
         bracketed={bracketed}
+        connectionId={connectionId}
       />
     </div>
   )

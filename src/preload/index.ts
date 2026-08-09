@@ -11,8 +11,11 @@ import type {
   ServerStats,
   SessionStatus,
   SettingsPatch,
+  SftpFindResult,
   SftpList,
   SftpReadResult,
+  Snippet,
+  SnippetDraft,
   StageResult,
   TmuxControlState,
   TmuxIntent,
@@ -56,6 +59,11 @@ const api = {
   secretsAvailable: (): Promise<boolean> => ipcRenderer.invoke('secrets:available'),
   hasSecret: (id: string): Promise<boolean> => ipcRenderer.invoke('secrets:has', id),
   pickKeyFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickKey'),
+
+  // prompt snippets (global, not per-connection)
+  snippetsList: (): Promise<Snippet[]> => ipcRenderer.invoke('snippets:list'),
+  snippetsSave: (draft: SnippetDraft): Promise<Snippet> => ipcRenderer.invoke('snippets:save', draft),
+  snippetsDelete: (id: string): Promise<void> => ipcRenderer.invoke('snippets:delete', id),
 
   // settings (persisted on disk in the app's user folder)
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
@@ -124,6 +132,13 @@ const api = {
     ipcRenderer.invoke('sftp:list', args),
   sftpRealpath: (args: { connectionId: string; path: string }): Promise<string> =>
     ipcRenderer.invoke('sftp:realpath', args),
+  // Composer's @-file picker — brackets its own SFTP session, see sftp:find in ipc.ts.
+  sftpFind: (args: {
+    connectionId: string
+    password?: string
+    root: string
+    query: string
+  }): Promise<SftpFindResult> => ipcRenderer.invoke('sftp:find', args),
   sftpMkdir: (args: { connectionId: string; path: string }): Promise<void> =>
     ipcRenderer.invoke('sftp:mkdir', args),
   sftpRename: (args: { connectionId: string; from: string; to: string }): Promise<void> =>
