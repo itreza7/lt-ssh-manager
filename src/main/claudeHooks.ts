@@ -2,10 +2,17 @@
 // into a server's `~/.claude/settings.json` so that Claude Code running there
 // can tell this app it needs a human.
 //
-// The hook is a shell command Claude Code runs as a child process. Its stdout is
-// Claude Code's, not the terminal's, so the sequence has to be written to
-// `/dev/tty` — the controlling terminal, which is our PTY (or, under tmux, the
-// pane's).
+// The hook is a shell command Claude Code runs as a child process, and since
+// Claude Code v2.1.139 that process has no controlling terminal at all — every
+// interactive session is daemon-hosted, so a direct write to `/dev/tty` fails
+// outright. The `terminalSequence` field on the hook's JSON stdout (Claude Code
+// v2.1.141+) is the supported replacement: Claude Code's own front-end process,
+// which still holds the real controlling terminal, relays the sequence through
+// its internal terminal-write path instead. That path already knows how to
+// reach the user under tmux and GNU screen, so — unlike the old `/dev/tty`
+// write — this needs no `$TMUX` branching or passthrough-wrapping of our own;
+// only tmux's `allow-passthrough` still has to be on for it to get through
+// (see the tmux-passthrough section below).
 //
 // Read-modify-write lives here rather than in the renderer because a missing
 // file has to be told apart from a failed read, and the SFTP error code that
@@ -23,52 +30,30 @@ export const HOOK_MARKER = 'lt-ssh-manager-attention'
 export const CLAUDE_SETTINGS_PATH = '.claude/settings.json'
 
 /**
- * `OSC 777 ; notify ; title ; body` as printf format text — the sequence
- * xtermAgentSignal listens for. Written as a printf format rather than raw
- * bytes so the JSON we store on the server stays plain ASCII and stays legible
- * to whoever opens it next.
- */
-const NOTIFY = String.raw`\033]777;notify;Claude Code;Needs your attention\033\\`
-
-/**
- * The same sequence wrapped for tmux passthrough, with every ESC in the body
- * doubled as the wrapper requires. Under tmux the pane's tty belongs to tmux,
- * so an unwrapped OSC would be tmux's to interpret and would stop there.
- *
- * …and the wrapper alone is not enough, which is what the trailing BEL is for.
- * tmux drops passthrough unless `allow-passthrough` is set, and it has been off
- * by default since tmux 3.3 — so on a stock server the wrapped OSC reaches
- * nothing. A bell is the one attention signal tmux forwards out of the box
- * (`bell-action any`, `visual-bell off`), including from a background window,
- * where even `allow-passthrough on` stays silent. So we send both: the OSC
- * carries the text when the server allows it, and the bell always lights the
- * tab dot. Both land on the same leaf id, and `waiting` is a set, so the pair
- * marks one session once.
- */
-const NOTIFY_TMUX =
-  String.raw`\033Ptmux;\033\033]777;notify;Claude Code;Needs your attention\033\033\\\033\\` + String.raw`\007`
-
-/**
  * The command itself.
  *
- * The message text is fixed rather than lifted from the hook's JSON payload on
- * stdin. Reading it would mean depending on `jq` being installed and re-escaping
- * arbitrary remote text into the middle of an escape sequence; the tab dot
- * already says *which* session wants you, which is the part a fixed string
- * can't tell you.
+ * Prints `{"terminalSequence": "<OSC 777 notify sequence>"}` on stdout —
+ * `OSC 777` (urxvt/Ghostty/Warp notifications) is one of the handful of
+ * sequences `terminalSequence` allowlists; everything else, including any
+ * DCS/tmux-passthrough wrapper, is rejected. The JSON is a fixed string
+ * literal rather than built with `jq`: the message text is fixed too (see
+ * below), so there is nothing to escape, and this is the one hook where a
+ * missing `jq` on the remote host must never be the reason an attention ping
+ * silently doesn't fire.
  *
- * `exit 0` because a hook that fails is noise in Claude Code's log, and there is
- * no useful recovery from "this session has no tty" — that's just a Claude Code
- * running somewhere we can't see.
+ * The message text is fixed rather than lifted from the hook's JSON payload on
+ * stdin. Reading it would mean depending on `jq` being installed and
+ * re-escaping arbitrary remote text into the middle of a JSON string; the tab
+ * dot already says *which* session wants you, which is the part a fixed
+ * string can't tell you.
+ *
+ * `exit 0` because a hook that fails is noise in Claude Code's log, and there
+ * is no useful recovery from "this session has no tty" — that's just a Claude
+ * Code running somewhere we can't see.
  */
 export const HOOK_COMMAND =
-  `if [ -n "$TMUX" ]; then printf '${NOTIFY_TMUX}'; else printf '${NOTIFY}'; fi ` +
-  // stderr is silenced *before* /dev/tty is opened, because the failure being
-  // silenced is the opening of /dev/tty. Redirections apply left to right, so
-  // the other way round the shell's "cannot create /dev/tty" lands on Claude
-  // Code's still-inherited stderr — the one place this hook must never be heard,
-  // and the one case (a session with no controlling terminal) where it happens.
-  `2>/dev/null >/dev/tty; exit 0 # ${HOOK_MARKER}`
+  "printf '%s\\n' '{\"terminalSequence\":\"\\u001b]777;notify;Claude Code;Needs your attention\\u0007\"}'; " +
+  `exit 0 # ${HOOK_MARKER}`
 
 /** One command inside a hook entry. Unknown keys are preserved on write. */
 interface HookCommand extends Record<string, unknown> {
@@ -154,4 +139,176 @@ export function planHooks(raw: string | null, action: 'install' | 'uninstall'): 
   else delete nextDoc.hooks
 
   return { before, after: render(nextDoc), installed, present }
+}
+
+// ---------------------------------------------------------------------------
+// The remote half of the status-line feature: a `statusLine` command we
+// install so Claude Code's own native status line — the row it already
+// renders at the bottom of the interface — shows the model, directory,
+// worktree, reasoning effort, context usage, and rate limits. Unlike the
+// Notification hook above, this never touches `/dev/tty` or any escape
+// sequence: Claude Code pipes the session's JSON to this command on stdin and
+// renders whatever it prints on stdout as plain text (see
+// code.claude.com/docs/en/statusline) — the same mechanism whether or not the
+// session is daemon-hosted or running under tmux, so there is nothing here for
+// the daemon-tty change to break. Same read-modify-write shape as the
+// Notification hook above, but `statusLine` is a single slot in the settings
+// document rather than an array, so installing always replaces whatever
+// command is there — the before/after diff the caller shows is what keeps
+// that from being a silent clobber of a command the user wrote themselves.
+
+/** What marks a `statusLine.command` as ours, the same way HOOK_MARKER does. */
+export const STATUSLINE_MARKER = 'lt-ssh-manager-statusline'
+
+/**
+ * The command itself: pulls a handful of fields out of Claude Code's JSON
+ * payload on stdin with `jq` — the same tool every example in Claude Code's
+ * own statusline docs uses — and prints one ANSI-colored line. Colors are
+ * plain SGR escape codes in the printed text (code.claude.com/docs/en/statusline
+ * documents this as supported, distinct from the OSC `terminalSequence` field
+ * hooks use) — no JSON/relay involved, Claude Code just renders whatever bytes
+ * the command prints. Percentages are colored green/yellow/red at the same
+ * 70%/90% thresholds the official docs' own example uses. `rate_limits` is a
+ * Claude Code field that is only
+ * populated for Claude.ai Pro/Max accounts, and only once the session's first
+ * API response has come back — on any other plan, or before that first
+ * response, `FIVE`/`WEEK` are legitimately empty and those segments just
+ * don't print, the same as every other optional field here. A remote host
+ * without `jq` gets an empty status line, the same failure mode the official
+ * examples accept; there is no hand-rolled fallback parser here for the same
+ * reason there isn't one there.
+ */
+export const STATUSLINE_COMMAND =
+  'd=$(cat); ' +
+  "MODEL=$(printf '%s' \"$d\" | jq -r '.model.display_name // empty'); " +
+  "DIR=$(printf '%s' \"$d\" | jq -r '.workspace.current_dir // empty'); " +
+  "WT=$(printf '%s' \"$d\" | jq -r '.workspace.git_worktree // empty'); " +
+  "EFFORT=$(printf '%s' \"$d\" | jq -r '.effort.level // empty'); " +
+  "PCT=$(printf '%s' \"$d\" | jq -r '.context_window.used_percentage // empty'); " +
+  "FIVE=$(printf '%s' \"$d\" | jq -r '.rate_limits.five_hour.used_percentage // empty'); " +
+  "WEEK=$(printf '%s' \"$d\" | jq -r '.rate_limits.seven_day.used_percentage // empty'); " +
+  "RESET='\x1b[0m'; DIM='\x1b[2m'; CYAN='\x1b[1;36m'; MAG='\x1b[35m'; BLU='\x1b[34m'; GRN='\x1b[32m'; YEL='\x1b[33m'; RED='\x1b[31m'; " +
+  'DOT="${DIM} · ${RESET}"; ' +
+  'pcolor() { v=${1%.*}; if [ -z "$v" ]; then printf \'\'; elif [ "$v" -ge 90 ] 2>/dev/null; then printf \'%s\' "$RED"; elif [ "$v" -ge 70 ] 2>/dev/null; then printf \'%s\' "$YEL"; else printf \'%s\' "$GRN"; fi; }; ' +
+  'PCTI=${PCT%.*}; FIVEI=${FIVE%.*}; WEEKI=${WEEK%.*}; ' +
+  'PCOL=$(pcolor "$PCT"); FCOL=$(pcolor "$FIVE"); WCOL=$(pcolor "$WEEK"); ' +
+  'OUT="${CYAN}${MODEL}${RESET}"; ' +
+  '[ -n "$DIR" ] && OUT="$OUT${DOT}${DIR##*/}"; ' +
+  '[ -n "$WT" ] && OUT="$OUT${DOT}${DIM}(${RESET}${MAG}⑂ ${WT}${RESET}${DIM})${RESET}"; ' +
+  '[ -n "$EFFORT" ] && OUT="$OUT${DOT}${BLU}${EFFORT}${RESET}"; ' +
+  '[ -n "$PCTI" ] && OUT="$OUT${DOT}${DIM}ctx${RESET} ${PCOL}${PCTI}%${RESET}"; ' +
+  '[ -n "$FIVE" ] && OUT="$OUT${DOT}${DIM}5h${RESET} ${FCOL}${FIVEI}%${RESET}"; ' +
+  '[ -n "$WEEK" ] && OUT="$OUT${DOT}${DIM}7d${RESET} ${WCOL}${WEEKI}%${RESET}"; ' +
+  `echo "$OUT"; exit 0 # ${STATUSLINE_MARKER}`
+
+/** One `statusLine` entry. Unknown keys are preserved on write. */
+interface StatusLineCommand extends Record<string, unknown> {
+  type?: string
+  command?: string
+}
+
+export interface StatusLinePlan {
+  /** The file as it stands, pretty-printed. `{}` when there is no file yet. */
+  before: string
+  /** What we would write. Identical to `before` when there is nothing to do. */
+  after: string
+  /** Our command is present *and* current — i.e. install would change nothing. */
+  installed: boolean
+  /** Our command is present, current or not — i.e. uninstall has work to do. */
+  present: boolean
+}
+
+const isOurStatusLine = (v: unknown): v is StatusLineCommand =>
+  isRecord(v) && typeof v.command === 'string' && v.command.includes(STATUSLINE_MARKER)
+
+/**
+ * Same contract as {@link planHooks}, for the `statusLine` setting.
+ *
+ * The one structural difference: `statusLine` is a single object, not an
+ * array of matcher groups, so there is no "ours among others" to merge —
+ * install always replaces the whole value, and uninstall only ever removes a
+ * value that is already ours. A `statusLine` some other tool or the user
+ * configured is left exactly as it is by uninstall, and is only replaced by
+ * install after the caller has shown the user what that replacement is.
+ */
+export function planStatusLine(raw: string | null, action: 'install' | 'uninstall'): StatusLinePlan {
+  const text = raw === null ? '' : raw.trim()
+  let doc: unknown
+  try {
+    doc = text === '' ? {} : JSON.parse(text)
+  } catch {
+    throw new Error(`${CLAUDE_SETTINGS_PATH} is not valid JSON — fix or move it, then try again`)
+  }
+  if (!isRecord(doc)) throw new Error(`${CLAUDE_SETTINGS_PATH} is not a JSON object`)
+
+  const before = render(doc)
+  const current = doc.statusLine
+  const present = isOurStatusLine(current)
+  const installed =
+    present &&
+    (current as StatusLineCommand).type === 'command' &&
+    (current as StatusLineCommand).command === STATUSLINE_COMMAND
+
+  const nextDoc = { ...doc }
+  if (action === 'install') {
+    nextDoc.statusLine = { type: 'command', command: STATUSLINE_COMMAND }
+  } else if (present) {
+    delete nextDoc.statusLine
+  }
+  // uninstall on a foreign or absent statusLine: nextDoc is left as a copy of doc, unchanged.
+
+  return { before, after: render(nextDoc), installed, present }
+}
+
+// ---------------------------------------------------------------------------
+// The remote half of the tmux-passthrough requirement: `terminalSequence`
+// (used by the Notification hook above) reaches the user by having Claude
+// Code's own front-end process write the escape sequence to its controlling
+// terminal. Under tmux that terminal is the pane's tty, which belongs to the
+// tmux server — and tmux drops any escape sequence it doesn't itself
+// recognize unless `allow-passthrough` is on, which it has been off by
+// default since tmux 3.3. The status line above has no such dependency at
+// all: it is plain stdout text Claude Code renders directly, tmux or not.
+
+/** Where tmux reads its startup config, relative to the remote home. */
+export const TMUX_CONF_PATH = '.tmux.conf'
+
+/** What marks a `~/.tmux.conf` line as ours, the same way HOOK_MARKER does. */
+export const TMUX_PASSTHROUGH_MARKER = 'lt-ssh-manager-passthrough'
+
+/** The line itself — a tmux config statement, not a shell command. */
+export const TMUX_PASSTHROUGH_LINE = `set -g allow-passthrough all # ${TMUX_PASSTHROUGH_MARKER}`
+
+export interface TmuxPassthroughPlan {
+  /** The file as it stands, verbatim. `''` when there is no file yet. */
+  before: string
+  /** What we would write. Identical to `before` when there is nothing to do. */
+  after: string
+  /** Our line is present *and* current — i.e. install would change nothing. */
+  installed: boolean
+  /** Any of ours is present, current or not — i.e. uninstall has work to do. */
+  present: boolean
+}
+
+/**
+ * Same read-modify-write contract as {@link planHooks} and {@link
+ * planStatusLine}, but for a plain-text tmux config rather than JSON: a line
+ * is ours if it carries the marker, and everything else in the file — the
+ * user's own config, in whatever order they left it — passes through
+ * untouched. Only ever appended to, never reordered, so a re-run diffs as "no
+ * change" instead of shuffling someone's file.
+ */
+export function planTmuxPassthrough(raw: string | null, action: 'install' | 'uninstall'): TmuxPassthroughPlan {
+  const before = raw ?? ''
+  const lines = before.length > 0 ? before.split('\n') : []
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+
+  const isOurs = (line: string): boolean => line.includes(TMUX_PASSTHROUGH_MARKER)
+  const present = lines.some(isOurs)
+  const installed = present && lines.some((l) => l === TMUX_PASSTHROUGH_LINE)
+
+  const kept = lines.filter((l) => !isOurs(l))
+  const next = action === 'install' ? [...kept, TMUX_PASSTHROUGH_LINE] : kept
+
+  return { before, after: next.length > 0 ? `${next.join('\n')}\n` : '', installed, present }
 }

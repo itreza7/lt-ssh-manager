@@ -3,6 +3,7 @@
 export type {
   AgentAlerts,
   AppSettings,
+  ComposerSendMode,
   CursorStyle,
   EditorSettings,
   SettingsPatch,

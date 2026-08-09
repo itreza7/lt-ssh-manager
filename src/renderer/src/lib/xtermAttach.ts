@@ -43,12 +43,21 @@ export interface TerminalAttachOptions {
   onDragFiles?: (over: boolean) => void
   /** OS files were dropped on this terminal, as absolute local paths. */
   onDropFiles?: (paths: string[]) => void
-  /** The image-paste chord was pressed (see IMAGE_PASTE_ACCEL). */
-  onPasteImage?: () => void
+  /** The paste-upload chord was pressed (see PASTE_UPLOAD_ACCEL). */
+  onPasteUpload?: () => void
 }
 
 /** Longest remote-set title we'll surface — a tab is not a billboard. */
 const TITLE_MAX = 80
+
+/**
+ * What a pane exposes to a header-level composer-toggle button, via `ref` —
+ * the pane owns the drafting state, the button just needs a way to reach it
+ * without becoming the thing that owns it.
+ */
+export interface ComposerHandle {
+  toggleComposer: () => void
+}
 
 /**
  * The chord that opens the prompt composer.
@@ -61,15 +70,15 @@ const TITLE_MAX = 80
 export const COMPOSE_ACCEL = isMac ? fmtAccel('Cmd+Enter') : 'Ctrl+Shift+Enter'
 
 /**
- * The chord that uploads the clipboard's image and puts its remote path on the
- * line — screenshot to a terminal agent in one gesture.
+ * The chord that uploads whatever's on the clipboard — a screenshot or a file
+ * copied in Finder/Explorer — and puts its remote path on the line.
  *
  * ⌘⇧V on macOS, where ⌘V is the OS text paste and xterm already owns it. On
- * Windows/Linux Ctrl+Shift+V is *this app's* text paste, so the image chord
+ * Windows/Linux Ctrl+Shift+V is *this app's* text paste, so the upload chord
  * moves one key over rather than breaking paste for anyone who happens to have
- * an image on the clipboard.
+ * an image or file on the clipboard.
  */
-export const IMAGE_PASTE_ACCEL = isMac ? fmtAccel('Cmd+Shift+V') : 'Ctrl+Shift+U'
+export const PASTE_UPLOAD_ACCEL = isMac ? fmtAccel('Cmd+Shift+V') : 'Ctrl+Shift+U'
 
 /**
  * The chord that opens the find bar.
@@ -294,18 +303,18 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
       opts.sendData(mode === 'escape-cr' ? '\x1b\r' : '\n')
       return false
     }
-    // Image paste — see IMAGE_PASTE_ACCEL. Claimed ahead of the copy/paste
+    // Paste upload — see PASTE_UPLOAD_ACCEL. Claimed ahead of the copy/paste
     // branches below, which share its modifier prefix on both platforms.
     // preventDefault matters on macOS: ⌘⇧V is Chromium's paste-as-plain-text, so
     // without it the clipboard's *text* would also land on the line.
     if (
-      opts.onPasteImage &&
+      opts.onPasteUpload &&
       (isMac
         ? e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && k === 'v'
         : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && k === 'u')
     ) {
       e.preventDefault()
-      opts.onPasteImage()
+      opts.onPasteUpload()
       return false
     }
     // Explicit copy: ⌘C on macOS, Ctrl+Shift+C elsewhere (bare Ctrl+C is SIGINT).

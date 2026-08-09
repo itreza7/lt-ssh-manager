@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type Ref
+} from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type {
   CloseReason,
@@ -9,7 +18,7 @@ import type {
 } from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
-import { attachTerminal, sendComposed } from '../lib/xtermAttach'
+import { attachTerminal, sendComposed, type ComposerHandle } from '../lib/xtermAttach'
 import type { FindTarget } from '../lib/useTerminalFind'
 import { useTerminalFind } from '../lib/useTerminalFind'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
@@ -43,6 +52,8 @@ interface Props {
   draftKey: string
   /** The per-pane drafts last persisted for this tab, loaded before mount so they aren't lost on restart. */
   initialDrafts?: Record<string, string>
+  /** Lets a header button toggle the focused pane's composer without owning its state. */
+  ref?: Ref<ComposerHandle>
 }
 
 /** A registry that routes per-pane output, buffering until a pane mounts. */
@@ -81,7 +92,8 @@ export function TmuxControlView({
   onStatus,
   onAgentSignal,
   draftKey,
-  initialDrafts
+  initialDrafts,
+  ref
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<TmuxControlState | null>(null)
@@ -160,6 +172,23 @@ export function TmuxControlView({
     if (paneId) writers.current.get(paneId)?.term.focus()
   }, [])
 
+  // What the compose chord does for a given pane: open when nothing (or a
+  // different pane) is drafting, close when that same pane's composer is
+  // already open — the keyboard way to turn it "off". openComposer/closeComposer
+  // above are unchanged and still used by the strip's own buttons, which always
+  // mean what they say regardless of current state.
+  const toggleComposer = useCallback((paneId: string) => {
+    setTarget((cur) => {
+      if (cur === paneId) {
+        writers.current.get(paneId)?.term.focus()
+        return null
+      }
+      setBracketed(writers.current.get(paneId)?.term.modes.bracketedPasteMode ?? false)
+      bumpFocus()
+      return paneId
+    })
+  }, [])
+
   // Drop-to-upload. The status is per tab (one batch at a time), but the hover
   // affordance is per pane — a tab can show four terminals at once and "drop
   // here" has to mean one of them. Behind a ref because each pane's mount-once
@@ -185,8 +214,8 @@ export function TmuxControlView({
     [sessionId]
   )
 
-  const onPanePasteImage = useCallback((paneId: string) => {
-    uploadRef.current.pasteImage(writers.current.get(paneId)?.term ?? null)
+  const onPanePasteUpload = useCallback((paneId: string) => {
+    uploadRef.current.pasteUpload(writers.current.get(paneId)?.term ?? null)
   }, [])
 
   // Collapse every pane's signals onto this tab. Which pane rang is knowable but
@@ -366,6 +395,16 @@ export function TmuxControlView({
   // Read by onPaneAgentSignal, which is mount-stable and so can't close over this.
   shownPanesRef.current = new Set(activeWindow?.panes.map((p) => p.paneId) ?? [])
 
+  // For the header's composer-toggle button, which has no pane of its own to
+  // aim at — a no-op before the first attach reports which pane is focused.
+  const toggleComposerForActivePane = useCallback(() => {
+    if (focusedPane) toggleComposer(focusedPane)
+  }, [focusedPane, toggleComposer])
+
+  useImperativeHandle(ref, () => ({ toggleComposer: toggleComposerForActivePane }), [
+    toggleComposerForActivePane
+  ])
+
   // Render every pane across every window (kept mounted so content persists), but
   // only the active window's panes are visible.
   const allPanes = useMemo(
@@ -392,8 +431,14 @@ export function TmuxControlView({
       if (!target || !term || !body) return
       sendComposed(term, body, submit)
       setDrafts(({ [target]: _sent, ...rest }) => rest)
-      setTarget(null)
-      term.focus()
+      if (settingsRef.current.composerStayOpen) {
+        // Stay open, drafting the next message for the same pane — just get
+        // focus back onto the (now empty) textarea.
+        bumpFocus()
+      } else {
+        setTarget(null)
+        term.focus()
+      }
     },
     [target, drafts]
   )
@@ -414,6 +459,18 @@ export function TmuxControlView({
   }, [active, target])
 
   const isReady = windows.length > 0
+
+  // Open the composer for the focused pane as soon as one is ready, if the
+  // setting asks for it. Guarded to run once: a later settings change, or the
+  // focused pane changing as the user navigates tmux, must never reopen a
+  // composer that was already closed on purpose.
+  const defaultOpenedRef = useRef(false)
+  useEffect(() => {
+    if (defaultOpenedRef.current || !isReady || !focusedPane) return
+    defaultOpenedRef.current = true
+    if (settingsRef.current.composerDefaultOpen) openComposer(focusedPane)
+  }, [isReady, focusedPane, openComposer])
+
   // See TerminalView: a session that is *gone* must not offer "Reattach", since
   // reattaching there means running the create-or-attach command again.
   const recreate = ended?.reason === 'gone' || ended?.reason === 'exited'
@@ -491,10 +548,10 @@ export function TmuxControlView({
                   focused={active && isActivePane && !target}
                   settings={settings}
                   register={registerPane}
-                  onCompose={openComposer}
+                  onCompose={toggleComposer}
                   onDragFiles={onPaneDragFiles}
                   onDropFiles={onPaneDropFiles}
-                  onPasteImage={onPanePasteImage}
+                  onPasteUpload={onPanePasteUpload}
                   onAgentSignal={onPaneAgentSignal}
                   onSelect={() => window.api.tmuxSelectPane(sessionId, pane.paneId)}
                 />
@@ -521,12 +578,12 @@ export function TmuxControlView({
           draft={draft}
           onDraft={setDraft}
           onSend={sendDraft}
+          sendMode={settings.composerSendMode}
           onOpen={() => draftPane && openComposer(draftPane)}
           onClose={() => closeComposer(draftPane)}
           onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
           target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
           bracketed={bracketed}
-          connectionId={connectionId}
         />
       </div>
 
@@ -596,7 +653,7 @@ function TmuxPane({
   onCompose,
   onDragFiles,
   onDropFiles,
-  onPasteImage,
+  onPasteUpload,
   onAgentSignal,
   onSelect
 }: {
@@ -614,7 +671,7 @@ function TmuxPane({
   /** Stable across renders, as above. */
   onDropFiles: (paneId: string, paths: string[]) => void
   /** Stable across renders, as above. */
-  onPasteImage: (paneId: string) => void
+  onPasteUpload: (paneId: string) => void
   /** Stable across renders, as above. */
   onAgentSignal: (paneId: string, signal: AgentSignal) => void
   onSelect: () => void
@@ -650,7 +707,7 @@ function TmuxPane({
       onFind: startFind,
       onDragFiles: (over) => onDragFiles(paneId, over),
       onDropFiles: (paths) => onDropFiles(paneId, paths),
-      onPasteImage: () => onPasteImage(paneId)
+      onPasteUpload: () => onPasteUpload(paneId)
     })
     // Every pane in this tab reports to the same leaf: the dot lives on the tab,
     // and a tab is one tmux session no matter how many panes it holds.

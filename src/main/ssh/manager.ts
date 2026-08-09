@@ -10,8 +10,6 @@ import type {
   HostKeyPrompt,
   SessionStatus,
   SftpEntry,
-  SftpFindEntry,
-  SftpFindResult,
   SftpList,
   SftpReadResult,
   TmuxIntent,
@@ -953,68 +951,6 @@ export class SshManager extends EventEmitter {
         })
     )
     return { path, entries }
-  }
-
-  /** Directory entries walked before sftpFind gives up and reports truncated. */
-  private static readonly FIND_MAX_VISITED = 6000
-  /** Matches handed back to the composer — a dropdown only shows so many anyway. */
-  private static readonly FIND_MAX_RESULTS = 60
-  /** Heavy or noisy directories a file picker has no reason to descend into. */
-  private static readonly FIND_SKIP_DIRS = new Set([
-    'node_modules',
-    '.git',
-    'dist',
-    'build',
-    'out',
-    '.venv',
-    'venv',
-    '__pycache__',
-    'target',
-    '.next',
-    '.cache',
-    '.idea'
-  ])
-
-  /**
-   * Breadth-first substring search for the composer's @-file picker, rooted at
-   * `root` (the connection's saved SFTP path, or home). Sequential, not
-   * parallel — the entry cap already bounds worst-case time, and a debounced
-   * interactive search doesn't need pipelined readdirs for the common repo size.
-   *
-   * Symlinked directories are never queued: SFTP readdir reports a symlink's own
-   * attrs (lstat semantics), so `attrs.isDirectory()` is false for them — this
-   * also means a symlink cycle can't turn into an infinite walk.
-   */
-  async sftpFind(id: string, root: string, query: string): Promise<SftpFindResult> {
-    const sftp = this.sftpOf(id)
-    const base = await this.realpath(sftp, root || '.')
-    const q = query.trim().toLowerCase()
-    const entries: SftpFindEntry[] = []
-    const queue: string[] = [base]
-    let visited = 0
-    let truncated = false
-    outer: while (queue.length > 0) {
-      const dir = queue.shift() as string
-      let list: { filename: string; attrs: Stats }[]
-      try {
-        list = await this.readdir(sftp, dir)
-      } catch {
-        continue // permission denied or vanished mid-walk — skip this branch
-      }
-      for (const it of list) {
-        if (visited >= SshManager.FIND_MAX_VISITED || entries.length >= SshManager.FIND_MAX_RESULTS) {
-          truncated = true
-          break outer
-        }
-        visited++
-        const isDir = it.attrs.isDirectory()
-        if (isDir && SshManager.FIND_SKIP_DIRS.has(it.filename)) continue
-        const path = joinPath(dir, it.filename)
-        if (isDir) queue.push(path)
-        if (!q || path.toLowerCase().includes(q)) entries.push({ path, type: isDir ? 'directory' : 'file' })
-      }
-    }
-    return { entries, truncated }
   }
 
   sftpMkdir(id: string, p: string): Promise<void> {
