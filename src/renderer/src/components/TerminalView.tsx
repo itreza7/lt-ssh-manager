@@ -305,7 +305,7 @@ export function TerminalView({
     })
   }, [])
 
-  useImperativeHandle(ref, () => ({ toggleComposer }), [toggleComposer])
+  useImperativeHandle(ref, () => ({ toggleComposer, isOpen: composing }), [toggleComposer, composing])
 
   // Read once at mount so a later settings change never reopens a composer the
   // user closed on purpose.
@@ -314,26 +314,20 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const sendDraft = useCallback(
-    (submit: boolean) => {
-      const term = termRef.current
-      // Trailing whitespace is what a textarea collects on the way to the Send
-      // button; sending it would submit a blank line after the prompt.
-      const body = draft.replace(/\s+$/, '')
-      if (!term || !body) return
-      sendComposed(term, body, submit)
-      setDraft('')
-      if (settingsRef.current.composerStayOpen) {
-        // Stay open, drafting the next message — just get focus back onto the
-        // (now empty) textarea.
-        bumpFocus()
-      } else {
-        setComposing(false)
-        term.focus()
-      }
-    },
-    [draft]
-  )
+  const sendDraft = useCallback((submit: boolean, body: string) => {
+    const term = termRef.current
+    if (!term || !body) return
+    sendComposed(term, body, submit)
+    setDraft('')
+    if (settingsRef.current.composerStayOpen) {
+      // Stay open, drafting the next message — just get focus back onto the
+      // (now empty) textarea.
+      bumpFocus()
+    } else {
+      setComposing(false)
+      term.focus()
+    }
+  }, [])
 
   // Create the terminal + SSH session exactly once per sessionId.
   useEffect(() => {

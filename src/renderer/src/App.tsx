@@ -304,11 +304,20 @@ export default function App() {
   // One composer handle per session/tmux tab, so the header's toggle button can
   // reach whichever pane is focused without owning any drafting state itself.
   const composerRefs = useRef(new Map<string, ComposerHandle>())
+  // Mirrors each handle's `isOpen` into render-visible state — the map above is
+  // a ref precisely so touching it doesn't cause a render, but the toggle
+  // button's own color does need one. useImperativeHandle re-invokes this
+  // callback with a fresh handle whenever a pane's composer opens or closes.
+  const [composerOpen, setComposerOpen] = useState<Record<string, boolean>>({})
   const setComposerRef = useCallback(
     (id: string) =>
       (h: ComposerHandle | null): void => {
         if (h) composerRefs.current.set(id, h)
         else composerRefs.current.delete(id)
+        setComposerOpen((m) => {
+          const next = h?.isOpen ?? false
+          return m[id] === next ? m : { ...m, [id]: next }
+        })
       },
     []
   )
@@ -1434,6 +1443,7 @@ export default function App() {
   const toggleActiveComposer = useCallback(() => {
     if (activeTabId) composerRefs.current.get(activeTabId)?.toggleComposer()
   }, [activeTabId])
+  const activeComposerOpen = !!(activeTabId && composerOpen[activeTabId])
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -1567,7 +1577,11 @@ export default function App() {
               onClick={toggleActiveComposer}
               disabled={!activeIsPane}
               title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
-              className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+              className={`grid h-7 w-7 place-items-center rounded-md border transition-colors disabled:pointer-events-none disabled:opacity-30 ${
+                activeComposerOpen
+                  ? 'border-accent/50 bg-accent/15 text-accent'
+                  : 'border-transparent text-muted hover:bg-elevated hover:text-fg'
+              }`}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />

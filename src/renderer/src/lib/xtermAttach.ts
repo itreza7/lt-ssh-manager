@@ -57,6 +57,8 @@ const TITLE_MAX = 80
  */
 export interface ComposerHandle {
   toggleComposer: () => void
+  /** Whether the drafting panel is currently open — lets a header button reflect it. */
+  isOpen: boolean
 }
 
 /**

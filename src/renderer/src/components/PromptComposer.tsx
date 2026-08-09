@@ -2,6 +2,7 @@ import {
   useLayoutEffect,
   useRef,
   type ChangeEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode
 } from 'react'
@@ -18,6 +19,29 @@ const TEXTAREA_MAX = 240
  *  added back: scrollHeight is content + padding, `height` is that plus border. */
 const TEXTAREA_BORDER = 2
 
+/** A paste past either threshold gets collapsed to a placeholder — short pastes
+ *  (a URL, a one-liner) stay inline where they're easy to read and edit. */
+const PASTE_COLLAPSE_MIN_LINES = 4
+const PASTE_COLLAPSE_MIN_CHARS = 500
+
+function shouldCollapsePaste(text: string): boolean {
+  return text.length > PASTE_COLLAPSE_MIN_CHARS || text.split('\n').length > PASTE_COLLAPSE_MIN_LINES
+}
+
+function pasteLabel(n: number, text: string): string {
+  return `[Pasted text #${n} +${text.split('\n').length} lines]`
+}
+
+/** Substitute every placeholder this session has minted back into the body
+ *  that actually reaches the remote — the collapse is a display convenience,
+ *  never a data loss. */
+function expandPastes(text: string, pastes: Map<string, string>): string {
+  if (pastes.size === 0) return text
+  let out = text
+  for (const [label, full] of pastes) out = out.split(label).join(full)
+  return out
+}
+
 interface Props {
   /** The drafting panel is open. When closed, a draft still shows as a strip. */
   open: boolean
@@ -33,8 +57,12 @@ interface Props {
   focusKey: number
   draft: string
   onDraft: (v: string) => void
-  /** Send the draft; `submit` false leaves it on the remote's line unsent. */
-  onSend: (submit: boolean) => void
+  /**
+   * Send the draft; `submit` false leaves it on the remote's line unsent.
+   * `body` is the draft with any collapsed-paste placeholders expanded back
+   * to their full text — the caller sends this, not the raw `draft` value.
+   */
+  onSend: (submit: boolean, body: string) => void
   /** What plain Enter does here — see ComposerSendMode. */
   sendMode: ComposerSendMode
   onOpen: () => void
@@ -78,6 +106,13 @@ export function PromptComposer({
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
+  // Placeholders minted by this composer instance, label -> full pasted text.
+  // Never persisted (a restart losing the odd in-flight paste is an acceptable
+  // trade for not doubling the on-disk draft format) and never reset on its
+  // own — the counter only climbs, so two pastes never mint the same label.
+  const pastesRef = useRef<Map<string, string>>(new Map())
+  const pasteCounterRef = useRef(0)
+
   // Grow with the content up to a ceiling, then scroll. An explicit height, not
   // flex-1: a flex-basis of 0 in an auto-height column collapses the box, and the
   // panel's height should follow the draft anyway — it's covering terminal rows.
@@ -103,20 +138,85 @@ export function PromptComposer({
     onDraft(e.target.value)
   }
 
+  /** Splice `insert` in at [start, end), returning the new draft and where the
+   *  caret belongs afterward. */
+  const spliceDraft = (insert: string, start: number, end: number): { next: string; caret: number } => {
+    const next = draft.slice(0, start) + insert + draft.slice(end)
+    return { next, caret: start + insert.length }
+  }
+
+  /** Land text in the draft, collapsing it to a placeholder first if it's long
+   *  enough to be more noise than signal inline. Shared by the paste-intercept
+   *  below and the explicit Paste button, so clicking the button behaves
+   *  exactly like pasting into the textarea would. */
+  const landPastedText = (text: string, start: number, end: number): void => {
+    let insert = text
+    if (shouldCollapsePaste(text)) {
+      const label = pasteLabel(++pasteCounterRef.current, text)
+      pastesRef.current.set(label, text)
+      insert = label
+    }
+    const { next, caret } = spliceDraft(insert, start, end)
+    onDraft(next)
+    // The textarea re-renders with `next` before this runs, so the caret can
+    // land correctly instead of jumping to wherever the browser's own paste
+    // would have put it.
+    requestAnimationFrame(() => ref.current?.setSelectionRange(caret, caret))
+  }
+
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const text = e.clipboardData.getData('text/plain')
+    if (!text || !shouldCollapsePaste(text)) return // short paste — let the browser handle it normally
+    e.preventDefault()
+    const el = ref.current
+    landPastedText(text, el?.selectionStart ?? draft.length, el?.selectionEnd ?? draft.length)
+  }
+
+  const onPasteButton = (): void => {
+    const text = window.api.clipboardRead()
+    if (!text) return
+    const el = ref.current
+    landPastedText(text, el?.selectionStart ?? draft.length, el?.selectionEnd ?? draft.length)
+    el?.focus()
+  }
+
+  const send = (submit: boolean): void => {
+    onSend(submit, expandPastes(body, pastesRef.current))
+    pastesRef.current.clear()
+  }
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    // A placeholder reads and deletes as one unit — backspacing into the
+    // middle of "[Pasted text #1 +40 lines]" one character at a time would be
+    // exactly the noise the collapse exists to avoid.
+    if (e.key === 'Backspace' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const el = e.currentTarget
+      if (el.selectionStart === el.selectionEnd) {
+        const pos = el.selectionStart
+        for (const label of pastesRef.current.keys()) {
+          if (pos >= label.length && draft.slice(pos - label.length, pos) === label) {
+            e.preventDefault()
+            const { next, caret } = spliceDraft('', pos - label.length, pos)
+            onDraft(next)
+            requestAnimationFrame(() => ref.current?.setSelectionRange(caret, caret))
+            return
+          }
+        }
+      }
+    }
     // mod-Enter always sends and Alt+Enter always inserts without sending,
     // whatever sendMode is. Plain Enter is the setting: a newline by default (the
     // original behavior — nothing sends early), or the send key itself once the
     // newline has been traded for Shift+Enter (see ComposerSendMode).
     if (e.key === 'Enter' && (isMac ? e.metaKey : e.ctrlKey)) {
       e.preventDefault()
-      onSend(true)
+      send(true)
     } else if (e.key === 'Enter' && e.altKey) {
       e.preventDefault()
-      onSend(false)
+      send(false)
     } else if (e.key === 'Enter' && sendMode === 'enter' && !e.shiftKey) {
       e.preventDefault()
-      onSend(true)
+      send(true)
     } else if (e.key === 'Escape') {
       e.preventDefault()
       onClose()
@@ -174,6 +274,7 @@ export function PromptComposer({
         value={draft}
         onChange={onChange}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
         spellCheck={false}
         placeholder="Write as many lines as you like — nothing reaches the remote until you send."
         className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
@@ -199,15 +300,22 @@ export function PromptComposer({
         )}
         <div className="flex-1" />
         <button
+          onClick={onPasteButton}
+          title="Paste from clipboard"
+          className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg"
+        >
+          Paste
+        </button>
+        <button
           disabled={!body}
-          onClick={() => onSend(false)}
+          onClick={() => send(false)}
           className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:text-fg disabled:opacity-40 disabled:hover:text-muted"
         >
           Insert
         </button>
         <button
           disabled={!body}
-          onClick={() => onSend(true)}
+          onClick={() => send(true)}
           className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-ink transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           Send ▸

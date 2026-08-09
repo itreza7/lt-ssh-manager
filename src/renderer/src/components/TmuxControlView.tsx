@@ -401,9 +401,11 @@ export function TmuxControlView({
     if (focusedPane) toggleComposer(focusedPane)
   }, [focusedPane, toggleComposer])
 
-  useImperativeHandle(ref, () => ({ toggleComposer: toggleComposerForActivePane }), [
-    toggleComposerForActivePane
-  ])
+  useImperativeHandle(
+    ref,
+    () => ({ toggleComposer: toggleComposerForActivePane, isOpen: !!target }),
+    [toggleComposerForActivePane, target]
+  )
 
   // Render every pane across every window (kept mounted so content persists), but
   // only the active window's panes are visible.
@@ -425,9 +427,8 @@ export function TmuxControlView({
   )
 
   const sendDraft = useCallback(
-    (submit: boolean) => {
+    (submit: boolean, body: string) => {
       const term = target ? writers.current.get(target)?.term : undefined
-      const body = ((target && drafts[target]) || '').replace(/\s+$/, '')
       if (!target || !term || !body) return
       sendComposed(term, body, submit)
       setDrafts(({ [target]: _sent, ...rest }) => rest)
@@ -440,7 +441,7 @@ export function TmuxControlView({
         term.focus()
       }
     },
-    [target, drafts]
+    [target]
   )
 
   // A pane can be killed from the remote — by tmux itself, or from another
