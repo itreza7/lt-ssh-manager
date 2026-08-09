@@ -15,11 +15,21 @@ import { COMPOSE_ACCEL } from '../lib/xtermAttach'
 const SEND_ACCEL = fmtAccel('Ctrl+Enter')
 const INSERT_ACCEL = fmtAccel('Alt+Enter')
 
-/** Ceiling on the drafting area itself; the panel is capped again in CSS. */
-const TEXTAREA_MAX = 240
-/** Tailwind's preflight makes everything border-box, so the border has to be
- *  added back: scrollHeight is content + padding, `height` is that plus border. */
-const TEXTAREA_BORDER = 2
+/** Text commands the quick-actions row sends exactly like a typed + submitted
+ *  draft — same `onSend` path, just skipping the textarea. */
+const QUICK_COMMANDS: { label: string; text: string; title: string }[] = [
+  { label: '/clear', text: '/clear', title: 'Clear conversation history' },
+  { label: '/compact', text: '/compact', title: 'Compact conversation history' },
+  { label: '/resume', text: '/resume', title: 'Resume a previous session' },
+  { label: '/help', text: '/help', title: 'Show available commands' }
+]
+
+/** Raw key chords the quick-actions row sends unbracketed via `onSendKey` —
+ *  these are keypresses Claude Code reads directly, not text to submit. */
+const QUICK_KEYS: { label: string; data: string; title: string }[] = [
+  { label: 'Shift+Tab', data: '\x1b[Z', title: 'Cycle mode (plan / auto-accept / default)' },
+  { label: 'Esc', data: '\x1b', title: 'Interrupt the current turn' }
+]
 
 /** A paste past either threshold gets collapsed to a placeholder — short pastes
  *  (a URL, a one-liner) stay inline where they're easy to read and edit. */
@@ -72,8 +82,9 @@ interface Props {
   onDiscard: () => void
   /** Where the text will land. Shown when a tab has more than one target. */
   target?: string
-  /** The remote has bracketed paste on, so newlines stay newlines. */
-  bracketed: boolean
+  /** Send a raw key chord straight through, unbracketed — for quick actions
+   *  like Shift+Tab that Claude Code reads as a keypress, not text. */
+  onSendKey: (data: string) => void
 }
 
 /** The three heights this panel occupies, ordered short to tall. */
@@ -112,7 +123,7 @@ export function PromptComposer({
   onClose,
   onDiscard,
   target,
-  bracketed
+  onSendKey
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -122,18 +133,6 @@ export function PromptComposer({
   // own — the counter only climbs, so two pastes never mint the same label.
   const pastesRef = useRef<Map<string, string>>(new Map())
   const pasteCounterRef = useRef(0)
-
-  // Grow with the content up to a ceiling, then scroll. An explicit height, not
-  // flex-1: a flex-basis of 0 in an auto-height column collapses the box, and the
-  // panel's height should follow the draft anyway — it's covering terminal rows.
-  // Layout effect so the box is already right on the frame it appears; measuring
-  // after paint shows a one-line box that visibly jumps.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el || !open) return
-    el.style.height = '0px'
-    el.style.height = `${Math.min(el.scrollHeight + TEXTAREA_BORDER, TEXTAREA_MAX)}px`
-  }, [draft, open])
 
   // Keyed on focusKey as well as open — see the prop. Re-focusing an element
   // that already has focus is a no-op in Chromium and leaves the caret alone,
@@ -310,9 +309,34 @@ export function PromptComposer({
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             spellCheck={false}
+            rows={2}
             placeholder="Write as many lines as you like — nothing reaches the remote until you send."
-            className="mx-3 mt-1.5 min-h-0 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
+            className="mx-3 mt-1.5 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
           />
+
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pt-1.5">
+            <span className="text-[11px] text-faint">quick:</span>
+            {QUICK_COMMANDS.map((c) => (
+              <button
+                key={c.label}
+                onClick={() => onSend(true, c.text)}
+                title={c.title}
+                className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted transition-colors hover:text-fg"
+              >
+                {c.label}
+              </button>
+            ))}
+            {QUICK_KEYS.map((k) => (
+              <button
+                key={k.label}
+                onClick={() => onSendKey(k.data)}
+                title={k.title}
+                className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:text-fg"
+              >
+                {k.label}
+              </button>
+            ))}
+          </div>
 
           <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
             <span className="text-[11px] text-faint">
@@ -327,11 +351,6 @@ export function PromptComposer({
               )}
               <Key>{INSERT_ACCEL}</Key> insert without sending · <Key>Esc</Key> close
             </span>
-            {!bracketed && (
-              <span className="text-[11px] text-amber">
-                Bracketed paste is off here — each line will run as its own command.
-              </span>
-            )}
             <div className="flex-1" />
             <button
               onClick={onPasteButton}

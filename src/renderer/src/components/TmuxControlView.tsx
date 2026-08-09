@@ -61,9 +61,9 @@ type PaneWriter = (data: Uint8Array) => void
 
 /**
  * What a mounted pane hands back to the view. The terminal itself is part of it
- * because sending isn't only "write bytes to the wire": bracketed paste is a
- * mode xterm tracks per instance, and the composer needs the pane's own terminal
- * both to wrap its text correctly and to hand focus back afterwards.
+ * because sending isn't only "write bytes to the wire": the composer sends
+ * through the pane's own `term.input()` (see xtermAttach's `sendComposed`) and
+ * hands focus back to it afterwards.
  */
 interface PaneHandle {
   write: PaneWriter
@@ -120,7 +120,6 @@ export function TmuxControlView({
   // pane's half-written prompt to another.
   const [target, setTarget] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts ?? {})
-  const [bracketed, setBracketed] = useState(true)
 
   // Local autosave, independent of the SSH connection: all panes' drafts are
   // serialized as one JSON blob under this tab's key (an empty record persists
@@ -160,9 +159,6 @@ export function TmuxControlView({
   }, [])
 
   const openComposer = useCallback((paneId: string) => {
-    // Sampled per pane at open time: one window can hold a shell and an agent,
-    // and only one of them keeps the newlines.
-    setBracketed(writers.current.get(paneId)?.term.modes.bracketedPasteMode ?? false)
     setTarget(paneId)
     bumpFocus()
   }, [])
@@ -183,7 +179,6 @@ export function TmuxControlView({
         writers.current.get(paneId)?.term.focus()
         return null
       }
-      setBracketed(writers.current.get(paneId)?.term.modes.bracketedPasteMode ?? false)
       bumpFocus()
       return paneId
     })
@@ -426,6 +421,16 @@ export function TmuxControlView({
     [draftPane]
   )
 
+  // Raw key chords from the composer's quick-actions row (Shift+Tab, Esc) —
+  // straight to the focused pane's remote, unbracketed, no draft involved.
+  const sendKey = useCallback(
+    (data: string) => {
+      const term = target ? writers.current.get(target)?.term : undefined
+      term?.input(data, true)
+    },
+    [target]
+  )
+
   const sendDraft = useCallback(
     (submit: boolean, body: string) => {
       const term = target ? writers.current.get(target)?.term : undefined
@@ -588,7 +593,7 @@ export function TmuxControlView({
         onClose={() => closeComposer(draftPane)}
         onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
         target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
-        bracketed={bracketed}
+        onSendKey={sendKey}
       />
 
       {overlay && (
