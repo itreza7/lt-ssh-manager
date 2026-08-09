@@ -569,24 +569,27 @@ export function TmuxControlView({
         )}
         {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
         <DropStatusBar status={upload.status} onDismiss={upload.dismiss} />
-        {/* Inside the pane area and overlaid on it. Docking it below would shrink
-            areaRef, and this view turns that box straight into the tmux client
-            size — every other client attached to the session would see the
-            windows reflow because someone here opened a text box. */}
-        <PromptComposer
-          open={!!target}
-          focusKey={focusKey}
-          draft={draft}
-          onDraft={setDraft}
-          onSend={sendDraft}
-          sendMode={settings.composerSendMode}
-          onOpen={() => draftPane && openComposer(draftPane)}
-          onClose={() => closeComposer(draftPane)}
-          onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
-          target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
-          bracketed={bracketed}
-        />
       </div>
+
+      {/* Docked below the pane area, not overlaid on it — a real flex sibling, so
+          opening it shrinks areaRef, and this view turns that box straight into
+          the tmux client size: every other client attached to the session sees
+          the windows reflow while it's open. Accepted trade-off for a composer
+          that never hides pane rows; see PromptComposer's own doc comment for
+          the animated collapse. */}
+      <PromptComposer
+        open={!!target}
+        focusKey={focusKey}
+        draft={draft}
+        onDraft={setDraft}
+        onSend={sendDraft}
+        sendMode={settings.composerSendMode}
+        onOpen={() => draftPane && openComposer(draftPane)}
+        onClose={() => closeComposer(draftPane)}
+        onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
+        target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
+        bracketed={bracketed}
+      />
 
       {overlay && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
