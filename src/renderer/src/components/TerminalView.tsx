@@ -34,6 +34,10 @@ interface Props {
    * is showing, so is the thing that rang.
    */
   onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
+  /** Stable across a reconnect *and* a restart — keys the persisted draft on disk. */
+  draftKey: string
+  /** The draft last persisted for this tab, loaded before mount so it isn't lost on restart. */
+  initialDraft?: string
 }
 
 export function TerminalView({
@@ -47,7 +51,9 @@ export function TerminalView({
   settings,
   onStatus,
   onTitle,
-  onAgentSignal
+  onAgentSignal,
+  draftKey,
+  initialDraft
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
   // xterm mounts and is sized to overscroll× the visible height.
@@ -81,8 +87,19 @@ export function TerminalView({
   // it's sent — and survives closing the panel, so a half-written prompt isn't
   // lost to a stray Esc.
   const [composing, setComposing] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(initialDraft ?? '')
   const [bracketed, setBracketed] = useState(true)
+
+  // Local autosave, independent of the SSH connection: survives disconnects,
+  // crashes, and restarts. Cleared naturally when draft goes back to '' on
+  // send/discard (see sendDraft/onDiscard below) or on explicit tab close
+  // (handled by the caller via draftsSet(draftKey, '')).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void window.api.draftsSet(draftKey, draft)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [draft, draftKey])
   // Every request to compose bumps this, so the textarea is re-focused even when
   // the panel was already open. useReducer because its dispatch is guaranteed
   // stable, and openComposer below is captured by a mount-once effect.

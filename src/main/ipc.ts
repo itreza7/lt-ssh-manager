@@ -34,6 +34,7 @@ import type {
   WorktreeScan
 } from '../shared/types'
 import { connectionStore } from './store/connections'
+import { draftStore } from './store/drafts'
 import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
 import { snippetStore } from './store/snippets'
@@ -353,6 +354,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('snippets:list', () => snippetStore.list())
   ipcMain.handle('snippets:save', (_e, draft: SnippetDraft) => snippetStore.upsert(draft))
   ipcMain.handle('snippets:delete', (_e, id: string) => snippetStore.remove(id))
+
+  // ---- prompt composer drafts (local autosave — survives disconnects, restarts, crashes) ----
+  ipcMain.handle('drafts:all', () => draftStore.all())
+  ipcMain.handle('drafts:set', (_e, key: string, value: string) => draftStore.set(key, value))
 
   // ---- settings (persisted to userData/settings.json) ----
   ipcMain.handle('settings:get', () => settingsStore.getAll())

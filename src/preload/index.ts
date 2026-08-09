@@ -65,6 +65,10 @@ const api = {
   snippetsSave: (draft: SnippetDraft): Promise<Snippet> => ipcRenderer.invoke('snippets:save', draft),
   snippetsDelete: (id: string): Promise<void> => ipcRenderer.invoke('snippets:delete', id),
 
+  // prompt composer drafts (local autosave, independent of the SSH connection)
+  draftsAll: (): Promise<Record<string, string>> => ipcRenderer.invoke('drafts:all'),
+  draftsSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('drafts:set', key, value),
+
   // settings (persisted on disk in the app's user folder)
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   updateSettings: (patch: SettingsPatch): Promise<AppSettings> =>
