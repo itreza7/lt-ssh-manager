@@ -39,6 +39,10 @@ interface Props {
    * sits in a tmux window the user isn't currently looking at.
    */
   onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
+  /** Stable across a reconnect *and* a restart — keys the persisted per-pane drafts on disk. */
+  draftKey: string
+  /** The per-pane drafts last persisted for this tab, loaded before mount so they aren't lost on restart. */
+  initialDrafts?: Record<string, string>
 }
 
 /** A registry that routes per-pane output, buffering until a pane mounts. */
@@ -75,7 +79,9 @@ export function TmuxControlView({
   retries,
   settings,
   onStatus,
-  onAgentSignal
+  onAgentSignal,
+  draftKey,
+  initialDrafts
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<TmuxControlState | null>(null)
@@ -101,8 +107,21 @@ export function TmuxControlView({
   // open flag; drafts are kept per pane, so moving between panes never hands one
   // pane's half-written prompt to another.
   const [target, setTarget] = useState<string | null>(null)
-  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts ?? {})
   const [bracketed, setBracketed] = useState(true)
+
+  // Local autosave, independent of the SSH connection: all panes' drafts are
+  // serialized as one JSON blob under this tab's key (an empty record persists
+  // as '', which the store treats as "delete"). Survives disconnects, crashes,
+  // and restarts; cleared on send/discard (which empty a pane's entry) or on
+  // explicit tab close (handled by the caller via draftsSet(draftKey, '')).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const value = Object.keys(drafts).length ? JSON.stringify(drafts) : ''
+      void window.api.draftsSet(draftKey, value)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [drafts, draftKey])
   // See TerminalView: bumped on every request to compose so the textarea is
   // re-focused even when the panel was already open. Stable dispatch, because
   // openComposer is captured by each pane's mount-once effect.

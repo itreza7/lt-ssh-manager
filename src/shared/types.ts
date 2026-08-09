@@ -696,6 +696,14 @@ export interface PersistedTab {
   path?: string // editor: remote file path
   name?: string // editor: file name
   sessionId?: string // transcript: the resumable session id
+  /**
+   * session/tmux: a stable id for this tab, independent of the live (regenerated
+   * every launch) session id. Keys the prompt composer's persisted draft, so a
+   * draft finds its way back to the same tab across a restart. Tabs saved before
+   * this field existed just get a fresh one on restore — they never had a draft
+   * to recover anyway.
+   */
+  tabKey?: string
 }
 
 /** Which way a split screen is divided. */

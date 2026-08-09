@@ -52,6 +52,8 @@ interface DashboardTab {
 interface SessionTab {
   kind: 'session'
   id: string // sessionId
+  /** Stable across a reconnect *and* a restart — see PersistedTab.tabKey. */
+  tabKey: string
   connectionId: string
   title: string
   /**
@@ -72,6 +74,8 @@ interface SessionTab {
 interface ControlTab {
   kind: 'tmux'
   id: string // sessionId
+  /** Stable across a reconnect *and* a restart — see PersistedTab.tabKey. */
+  tabKey: string
   connectionId: string
   title: string
   status: SessionStatus
@@ -219,7 +223,8 @@ function serializeTab(t: Tab): PersistedTab {
         connectionId: t.connectionId,
         title: t.title,
         command: t.command,
-        tmux: t.tmux
+        tmux: t.tmux,
+        tabKey: t.tabKey
       }
     case 'tmux':
       return {
@@ -227,7 +232,8 @@ function serializeTab(t: Tab): PersistedTab {
         connectionId: t.connectionId,
         title: t.title,
         command: t.command,
-        tmux: t.tmux
+        tmux: t.tmux,
+        tabKey: t.tabKey
       }
     case 'settings':
       return { kind: 'settings' }
@@ -248,6 +254,19 @@ function serializeTab(t: Tab): PersistedTab {
       }
     case 'transcript':
       return { kind: 'transcript', connectionId: t.connectionId, title: t.title, sessionId: t.sessionId }
+  }
+}
+
+// A tmux tab's drafts are stored as one JSON blob per pane under the tab's
+// single tabKey (see TmuxControlView's persist effect) — parse it back out,
+// falling back to empty on missing/corrupt data.
+function parseTmuxDrafts(raw: string | undefined): Record<string, string> {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
   }
 }
 
@@ -279,6 +298,8 @@ export default function App() {
   const [activeViewId, setActiveViewId] = useState<string | null>(null)
   const [secretsAvailable, setSecretsAvailable] = useState(true)
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULTS)
+  // Prompt composer drafts, local-autosave keyed by tabKey — see PersistedTab.tabKey.
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
 
   const [dialogConn, setDialogConn] = useState<Connection | null | undefined>(undefined) // undefined = closed
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
@@ -656,6 +677,9 @@ export default function App() {
       setConnections(conns)
       void window.api.secretsAvailable().then(setSecretsAvailable)
       try {
+        // Load persisted drafts before restoring tabs so TerminalView/TmuxControlView
+        // seed their initial state from disk on first mount instead of starting blank.
+        setDrafts(await window.api.draftsAll())
         const ws = await window.api.getWorkspace()
         const restored = await restoreWorkspace(ws, conns)
         // Nothing came back — first launch, or last session ended with every tab
@@ -877,6 +901,7 @@ export default function App() {
         built.push({
           kind: 'session',
           id,
+          tabKey: pt.tabKey ?? crypto.randomUUID(),
           connectionId: conn.id,
           title: pt.title ?? conn.name,
           status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
@@ -895,6 +920,7 @@ export default function App() {
         built.push({
           kind: 'tmux',
           id,
+          tabKey: pt.tabKey ?? crypto.randomUUID(),
           connectionId: conn.id,
           title: pt.title ?? conn.name,
           status: { kind: 'connecting', attempt: 1, retries: appSettings.connectRetries },
@@ -1083,6 +1109,7 @@ export default function App() {
     const sessionId = crypto.randomUUID()
     const base = {
       id: sessionId,
+      tabKey: crypto.randomUUID(),
       connectionId: conn.id,
       title: title ?? conn.name,
       status: { kind: 'connecting' as const, attempt: 1, retries: appSettings.connectRetries },
@@ -1359,7 +1386,10 @@ export default function App() {
   const removeTabs = (ids: string[]): void => {
     const dead = new Set(ids)
     for (const t of tabs)
-      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) window.api.closeSession(t.id)
+      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) {
+        window.api.closeSession(t.id)
+        void window.api.draftsSet(t.tabKey, '')
+      }
     setTabs((prev) => prev.filter((t) => !dead.has(t.id)))
     setViews((vs) => {
       const out: View[] = []
@@ -1698,6 +1728,8 @@ export default function App() {
                     onStatus={onStatus}
                     onTitle={onTitle}
                     onAgentSignal={onAgentSignal}
+                    draftKey={tab.tabKey}
+                    initialDraft={drafts[tab.tabKey] ?? ''}
                   />
                   {paneTools(tab.id)}
                 </div>
@@ -1723,6 +1755,8 @@ export default function App() {
                   settings={appSettings.terminal}
                   onStatus={onStatus}
                   onAgentSignal={onAgentSignal}
+                  draftKey={tab.tabKey}
+                  initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
                 />
                 {paneTools(tab.id)}
               </div>
