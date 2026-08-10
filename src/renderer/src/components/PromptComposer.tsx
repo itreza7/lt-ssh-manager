@@ -7,7 +7,8 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
-  type TransitionEvent
+  type TransitionEvent,
+  type UIEvent
 } from 'react'
 import type { ComposerSendMode } from '../../../shared/types'
 import { fmtAccel, isMac } from '../lib/platform'
@@ -39,6 +40,11 @@ const QUICK_KEYS: { label: string; data: string; title: string }[] = [
  *  (a URL, a one-liner) stay inline where they're easy to read and edit. */
 const PASTE_COLLAPSE_MIN_LINES = 4
 const PASTE_COLLAPSE_MIN_CHARS = 500
+
+/** How many history entries are rendered at a time — more are appended as the
+ *  list scrolls near its bottom, so a 1000-entry history never dumps 1000 DOM
+ *  nodes into the panel at once. */
+const HISTORY_PAGE = 50
 
 function shouldCollapsePaste(text: string): boolean {
   return text.length > PASTE_COLLAPSE_MIN_CHARS || text.split('\n').length > PASTE_COLLAPSE_MIN_LINES
@@ -150,6 +156,26 @@ export function PromptComposer({
   const draftBeforeHistoryRef = useRef('')
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyQuery, setHistoryQuery] = useState('')
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(HISTORY_PAGE)
+
+  // The textarea+quick-actions block's own rendered height, kept fresh by a
+  // ResizeObserver while it's mounted. The history browser reuses this exact
+  // pixel height so opening/closing it never changes the panel's overall
+  // size — only what's inside stays fixed height, with the results list
+  // scrolling to fill whatever's left over.
+  const composeBodyRef = useRef<HTMLDivElement>(null)
+  const [composeHeight, setComposeHeight] = useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    if (historyOpen) return
+    const el = composeBodyRef.current
+    if (!el) return
+    const measure = (): void => setComposeHeight(el.getBoundingClientRect().height)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [historyOpen])
 
   useEffect(() => {
     void window.api.promptHistoryAll().then(setHistory)
@@ -159,6 +185,12 @@ export function PromptComposer({
   useEffect(() => {
     if (!open) setHistoryOpen(false)
   }, [open])
+
+  // A fresh search (or a freshly opened panel) always starts from the top of
+  // the scroll-to-load-more window.
+  useEffect(() => {
+    setHistoryVisibleCount(HISTORY_PAGE)
+  }, [historyQuery, historyOpen])
 
   // Keyed on focusKey as well as open — see the prop. Re-focusing an element
   // that already has focus is a no-op in Chromium and leaves the caret alone,
@@ -354,9 +386,21 @@ export function PromptComposer({
 
   const lines = draft.split('\n')
 
-  const filteredHistory = historyQuery.trim()
-    ? history.filter((h) => h.toLowerCase().includes(historyQuery.trim().toLowerCase()))
-    : history
+  const filteredHistory = (
+    historyQuery.trim()
+      ? history.filter((h) => h.toLowerCase().includes(historyQuery.trim().toLowerCase()))
+      : history
+  )
+    .slice()
+    .reverse()
+  const visibleHistory = filteredHistory.slice(0, historyVisibleCount)
+
+  const onHistoryScroll = (e: UIEvent<HTMLDivElement>): void => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+      setHistoryVisibleCount((c) => Math.min(c + HISTORY_PAGE, filteredHistory.length))
+    }
+  }
 
   return (
     <div
@@ -405,7 +449,10 @@ export function PromptComposer({
           </div>
 
           {historyOpen ? (
-            <div className="flex min-h-0 flex-col px-3 pt-1.5 pb-2">
+            <div
+              className="flex flex-col overflow-hidden px-3 pt-1.5 pb-2"
+              style={composeHeight != null ? { height: composeHeight } : undefined}
+            >
               <input
                 autoFocus
                 value={historyQuery}
@@ -417,32 +464,32 @@ export function PromptComposer({
                   }
                 }}
                 placeholder="Search sent prompts…"
-                className="rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 font-mono text-[13px] text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
+                className="shrink-0 rounded-lg border border-line bg-ink/60 px-2.5 py-1.5 font-mono text-[13px] text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"
               />
-              <div className="mt-1.5 max-h-64 overflow-y-auto rounded-lg border border-line">
+              <div
+                onScroll={onHistoryScroll}
+                className="mt-1.5 min-h-0 flex-1 overflow-y-auto rounded-lg border border-line"
+              >
                 {filteredHistory.length === 0 ? (
                   <div className="px-2.5 py-3 text-center text-[12px] text-faint">
                     {history.length === 0 ? 'No sent prompts yet' : 'No matches'}
                   </div>
                 ) : (
-                  filteredHistory
-                    .slice()
-                    .reverse()
-                    .map((entry, i) => (
-                      <button
-                        key={i}
-                        onClick={() => selectHistoryEntry(entry)}
-                        title={entry}
-                        className="block w-full truncate border-b border-line/60 px-2.5 py-1.5 text-left font-mono text-[12px] text-muted transition-colors last:border-b-0 hover:bg-ink/40 hover:text-fg"
-                      >
-                        {entry.replace(/\s+/g, ' ')}
-                      </button>
-                    ))
+                  visibleHistory.map((entry, i) => (
+                    <button
+                      key={i}
+                      onClick={() => selectHistoryEntry(entry)}
+                      title={entry}
+                      className="block w-full truncate border-b border-line/60 px-2.5 py-1.5 text-left font-mono text-[12px] text-muted transition-colors last:border-b-0 hover:bg-ink/40 hover:text-fg"
+                    >
+                      {entry.replace(/\s+/g, ' ')}
+                    </button>
+                  ))
                 )}
               </div>
             </div>
           ) : (
-            <>
+            <div ref={composeBodyRef} className="flex flex-col">
               <textarea
                 ref={ref}
                 value={draft}
@@ -499,7 +546,7 @@ export function PromptComposer({
                   Send ▸
                 </button>
               </div>
-            </>
+            </div>
           )}
         </div>
       )}
