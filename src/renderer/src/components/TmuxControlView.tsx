@@ -308,6 +308,16 @@ export function TmuxControlView({
         // now that the pane is definitely on screen, so a wrong initial guess
         // gets corrected without the user having to toggle anything to trigger
         // a ResizeObserver callback by accident.
+        //
+        // Reset first: a ResizeObserver firing before this point (e.g. during
+        // the 'connecting' phase, or racing a just-restored window's own
+        // maximize animation) can already have recorded a size in
+        // lastSizeRef — but ssh/manager.ts's resize() silently no-ops for a
+        // session that isn't in its map yet, so that recorded value may never
+        // have actually reached the remote. Left alone, pushSize's own dedup
+        // guard would then see today's (correct) measurement "match" that
+        // stale-but-cached value and skip resending it for real.
+        lastSizeRef.current = { cols: 0, rows: 0 }
         requestAnimationFrame(pushSize)
         if (reattachingRef.current) {
           reattachingRef.current = false

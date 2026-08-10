@@ -166,17 +166,6 @@ export function PromptComposer({
   const composeBodyRef = useRef<HTMLDivElement>(null)
   const [composeHeight, setComposeHeight] = useState<number | null>(null)
 
-  useLayoutEffect(() => {
-    if (historyOpen) return
-    const el = composeBodyRef.current
-    if (!el) return
-    const measure = (): void => setComposeHeight(el.getBoundingClientRect().height)
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [historyOpen])
-
   useEffect(() => {
     void window.api.promptHistoryAll().then(setHistory)
   }, [])
@@ -383,6 +372,23 @@ export function PromptComposer({
     if (e.target !== e.currentTarget) return
     setDisplayMode(mode)
   }
+
+  // Depends on displayMode too, not just historyOpen: the compose block only
+  // exists in the DOM once displayMode first becomes 'open', so a measurement
+  // keyed on historyOpen alone would never run before the very first time
+  // History is opened (historyOpen starts — and stays — false right up until
+  // that click), leaving composeHeight null for that first open and letting
+  // the panel size itself off the results list instead of staying fixed.
+  useLayoutEffect(() => {
+    if (historyOpen) return
+    const el = composeBodyRef.current
+    if (!el) return
+    const measure = (): void => setComposeHeight(el.getBoundingClientRect().height)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [historyOpen, displayMode])
 
   const lines = draft.split('\n')
 
