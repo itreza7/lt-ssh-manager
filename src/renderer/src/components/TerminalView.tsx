@@ -89,7 +89,16 @@ export function TerminalView({
   // Prompt composer. The draft lives here — nothing reaches the remote until
   // it's sent — and survives closing the panel, so a half-written prompt isn't
   // lost to a stray Esc.
-  const [composing, setComposing] = useState(false)
+  // Starts already open when the setting says so, not flipped open by a later
+  // effect: the composer panel animates its height in over 200ms via CSS
+  // transition, and that transition only fires on a value *change* after
+  // mount. Opening it post-mount means the terminal below has already
+  // measured/connected at the composer-closed height, and only a later
+  // ResizeObserver firing (not guaranteed to land cleanly) claws it back —
+  // that's the mechanism behind the "opens broken until you resize" bug.
+  // Starting open avoids the animation (and the race) entirely: the
+  // composer's final height is what layout ever sees.
+  const [composing, setComposing] = useState(() => settings.composerDefaultOpen)
   const [draft, setDraft] = useState(initialDraft ?? '')
 
   // Local autosave, independent of the SSH connection: survives disconnects,
@@ -104,7 +113,7 @@ export function TerminalView({
   }, [draft, draftKey])
   // Every request to compose bumps this, so the textarea is re-focused even when
   // the panel was already open. useReducer because its dispatch is guaranteed
-  // stable, and openComposer below is captured by a mount-once effect.
+  // stable, and it's captured by a mount-once effect (composerDefaultOpen).
   const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
   // Read by the focus effect, which must not re-run when the composer opens.
   const composingRef = useRef(false)
@@ -301,10 +310,11 @@ export function TerminalView({
 
   useImperativeHandle(ref, () => ({ toggleComposer, isOpen: composing }), [toggleComposer, composing])
 
-  // Read once at mount so a later settings change never reopens a composer the
-  // user closed on purpose.
+  // Focus follows a composer that starts open (see the composing initializer
+  // above for why it no longer opens itself here) — read once at mount so a
+  // later settings change never re-focuses a composer the user closed.
   useEffect(() => {
-    if (settingsRef.current.composerDefaultOpen) openComposer()
+    if (settingsRef.current.composerDefaultOpen) bumpFocus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
