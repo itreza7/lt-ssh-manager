@@ -381,7 +381,24 @@ export function TmuxControlView({
     const ro = new ResizeObserver(() => pushSize())
     if (areaRef.current) ro.observe(areaRef.current)
 
+    // measureCell() above has the same problem xterm itself has (see
+    // createTerminal): it measures against whatever font the canvas can
+    // resolve right now, and on a cold launch that's routinely the fallback
+    // font because the real one hasn't loaded yet. That miscalculates cols
+    // and rows from a correct pixel area, so the wrong grid gets pushed to
+    // tmux — and nothing here calls pushSize() again on its own once the
+    // font actually arrives. Re-measure once it does, forcing past the dedup
+    // guard since the (wrong) value already latched into lastSizeRef would
+    // otherwise look unchanged even though it never matched the real font.
+    let live = true
+    void document.fonts.ready.then(() => {
+      if (!live) return
+      lastSizeRef.current = { cols: 0, rows: 0 }
+      pushSize()
+    })
+
     return () => {
+      live = false
       offOutput()
       offWindows()
       offStatus()
