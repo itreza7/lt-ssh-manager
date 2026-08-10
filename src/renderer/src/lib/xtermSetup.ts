@@ -79,6 +79,25 @@ export function createTerminal(
   } catch {
     /* WebGL unavailable — falls back to canvas/DOM renderer */
   }
+  // xterm measures its own character cell against whatever font is actually
+  // available the moment term.open() runs, and only re-measures later if
+  // fontFamily/fontSize change — never on its own once a pending web font
+  // finishes loading. The app's bundled fonts (main.tsx) are imported as CSS
+  // side effects with nobody awaiting them, so a cold launch that reconnects
+  // several terminals at once routinely opens them before the font is ready,
+  // silently measuring the fallback instead. That leaves xterm's rendered
+  // pixel size out of sync with its logical grid for the rest of the
+  // session — the wrong cell size never corrects itself — until something
+  // reassigns fontFamily and forces a real remeasure. Reassigning to the
+  // (unchanged) real value is a no-op change-detection-wise, so bounce
+  // through a throwaway value first to guarantee the final assignment is
+  // seen as a change.
+  const family = term.options.fontFamily
+  void document.fonts.ready.then(() => {
+    term.options.fontFamily = `${family}, monospace`
+    term.options.fontFamily = family
+    if (opts?.fit) fit?.fit()
+  })
   return { term, fit, search }
 }
 
