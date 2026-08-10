@@ -40,7 +40,7 @@ const THEME = {
 export function createTerminal(
   settings: TerminalSettings,
   container: HTMLElement,
-  opts?: { fit?: boolean }
+  opts?: { fit?: boolean; onFontsReady?: () => void }
 ): { term: XTerm; fit?: FitAddon; search: TerminalSearch } {
   const term = new XTerm({
     fontFamily: resolveFontStack(settings.fontFamily),
@@ -91,12 +91,15 @@ export function createTerminal(
   // reassigns fontFamily and forces a real remeasure. Reassigning to the
   // (unchanged) real value is a no-op change-detection-wise, so bounce
   // through a throwaway value first to guarantee the final assignment is
-  // seen as a change.
+  // seen as a change. A bare fit() only fixes the local grid — a caller
+  // driving a live PTY (a plain session, not a tmux control-mode pane)
+  // already told the remote the pre-remeasure cols/rows at connect time, so
+  // it needs onFontsReady to redo whatever step also notifies the remote.
   const family = term.options.fontFamily
   void document.fonts.ready.then(() => {
     term.options.fontFamily = `${family}, monospace`
     term.options.fontFamily = family
-    if (opts?.fit) fit?.fit()
+    opts?.onFontsReady?.()
   })
   return { term, fit, search }
 }

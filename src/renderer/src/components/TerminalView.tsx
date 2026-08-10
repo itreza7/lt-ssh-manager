@@ -337,7 +337,13 @@ export function TerminalView({
     // the first fit reports the right row count to connect().
     host.style.height = `${Math.max(1, scroll.clientHeight) * clampOverscroll(settingsRef.current.overscroll)}px`
 
-    const { term, fit: fitAddon, search } = createTerminal(settingsRef.current, host, { fit: true })
+    // onFontsReady, not a bare fit(): a corrected local grid is useless if the
+    // remote PTY is never told about it, and only layout() (fit + the resize
+    // IPC call + stickToBottom) does both. See xtermSetup's createTerminal.
+    const { term, fit: fitAddon, search } = createTerminal(settingsRef.current, host, {
+      fit: true,
+      onFontsReady: () => layout()
+    })
     const fit = fitAddon!
     fit.fit()
     termRef.current = term
