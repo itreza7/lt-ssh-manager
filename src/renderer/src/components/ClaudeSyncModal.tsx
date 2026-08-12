@@ -63,12 +63,6 @@ const STATE_TONE: Record<ClaudeSyncState, string> = {
   differ: 'text-danger'
 }
 
-function defaultDirection(state: ClaudeSyncState): ClaudeSyncDirection | null {
-  if (state === 'local-only') return 'push'
-  if (state === 'remote-only') return 'pull'
-  return null
-}
-
 const entryKey = (e: { category: string; relPath: string }): string => `${e.category}:${e.relPath}`
 
 function fmtBytes(n: number | null): string {
@@ -160,6 +154,16 @@ function buildTree(entries: ClaudeSyncEntry[]): TreeFolder {
   compactChains(root)
 
   return root
+}
+
+/** Every file entry in this subtree, recursively — used to cascade a folder-level selection down to its files. */
+function collectEntries(folder: TreeFolder): ClaudeSyncEntry[] {
+  const out: ClaudeSyncEntry[] = []
+  for (const c of folder.children) {
+    if (c.kind === 'file') out.push(c.entry)
+    else out.push(...collectEntries(c))
+  }
+  return out
 }
 
 function DiffPane({ label, body }: { label: string; body: string }) {
@@ -396,7 +400,7 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
       const m = await scan()
       setManifest(m)
       const next = new Map<string, ClaudeSyncDirection | null>()
-      for (const e of m.entries) next.set(entryKey(e), defaultDirection(e.state))
+      for (const e of m.entries) next.set(entryKey(e), null)
       setDirections(next)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -442,11 +446,28 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
     folder: TreeFolder,
     direction: ClaudeSyncDirection
   ): void => {
+    const wasSelected = bulkSelections.get(folder.path)?.direction === direction
     setBulkSelections((prev) => {
       const next = new Map(prev)
-      const existing = next.get(folder.path)
-      if (existing && existing.direction === direction) next.delete(folder.path)
-      else next.set(folder.path, { category, direction })
+      if (wasSelected) {
+        next.delete(folder.path)
+      } else {
+        next.set(folder.path, { category, direction })
+        // A folder's selection already covers everything under it — drop
+        // any more specific selections so the same subtree isn't queued twice.
+        for (const key of Array.from(next.keys())) {
+          if (key !== folder.path && key.startsWith(`${folder.path}/`)) next.delete(key)
+        }
+      }
+      return next
+    })
+    // A folder is just a shortcut for the files inside it — selecting or
+    // deselecting one, at any nesting depth, does the same to every file
+    // underneath so the review list (and its highlighting) stays consistent.
+    const entries = collectEntries(folder)
+    setDirections((prev) => {
+      const next = new Map(prev)
+      for (const e of entries) next.set(entryKey(e), wasSelected ? null : direction)
       return next
     })
   }
