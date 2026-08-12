@@ -3,6 +3,7 @@ import type {
   AgentHostScan,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncBulkOp,
   ClaudeSyncCategory,
   ClaudeSyncDiff,
   ClaudeSyncManifest,
@@ -54,6 +55,7 @@ interface Props {
   scanClaudeSync: () => Promise<ClaudeSyncManifest>
   readClaudeSyncFile: (category: ClaudeSyncCategory, relPath: string) => Promise<ClaudeSyncDiff>
   applyClaudeSync: (ops: ClaudeSyncOp[]) => Promise<ClaudeSyncOpResult[]>
+  bulkClaudeSync: (op: ClaudeSyncBulkOp) => Promise<void>
   /** The live-agent sweep, owned by useAgentSessions and lifted to App.tsx so it
    *  can keep polling in the background regardless of which tab is visible.
    *  Filtered down to the active connection below — every other host in the
@@ -794,6 +796,7 @@ export function SummaryView({
   scanClaudeSync,
   readClaudeSyncFile,
   applyClaudeSync,
+  bulkClaudeSync,
   agentHosts,
   agentScanError,
   agentScanning,
@@ -1392,6 +1395,7 @@ export function SummaryView({
           scan={scanClaudeSync}
           readFile={readClaudeSyncFile}
           apply={applyClaudeSync}
+          bulk={bulkClaudeSync}
         />
       )}
     </div>

@@ -397,6 +397,19 @@ export interface ClaudeSyncDiff {
   remote: string | null
 }
 
+/**
+ * Push/pull a whole subtree in one shot (tar over the wire) instead of one
+ * SFTP round trip per file — for a folder category (skills/agents/commands/
+ * hooks/plugins) with hundreds or thousands of entries, e.g. a marketplace
+ * clone under `plugins/marketplaces`. `relDir` must be that category's own
+ * dir-tree root, or a subfolder under it.
+ */
+export interface ClaudeSyncBulkOp {
+  category: ClaudeSyncCategory
+  relDir: string
+  direction: ClaudeSyncDirection
+}
+
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */
 export interface ServerStats {
   hostname?: string

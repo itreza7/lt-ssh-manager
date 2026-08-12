@@ -4,6 +4,7 @@ import type {
   AppSettings,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncBulkOp,
   ClaudeSyncCategory,
   ClaudeSyncDiff,
   ClaudeSyncManifest,
@@ -393,7 +394,12 @@ const api = {
     connectionId: string
     password?: string
     ops: ClaudeSyncOp[]
-  }): Promise<ClaudeSyncOpResult[]> => ipcRenderer.invoke('claude-sync:apply', args)
+  }): Promise<ClaudeSyncOpResult[]> => ipcRenderer.invoke('claude-sync:apply', args),
+  claudeSyncBulk: (args: {
+    connectionId: string
+    password?: string
+    op: ClaudeSyncBulkOp
+  }): Promise<void> => ipcRenderer.invoke('claude-sync:bulk', args)
 }
 
 export type Api = typeof api

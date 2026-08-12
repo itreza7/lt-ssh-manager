@@ -12,6 +12,7 @@ import {
   type WebContents
 } from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
+import { spawn } from 'node:child_process'
 import { mkdir, rm, stat, writeFile, readFile, readdir, rename, chmod } from 'node:fs/promises'
 import { existsSync, type Dirent } from 'node:fs'
 import { randomBytes } from 'node:crypto'
@@ -21,6 +22,7 @@ import type {
   AgentHostScan,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncBulkOp,
   ClaudeSyncCategory,
   ClaudeSyncDiff,
   ClaudeSyncManifest,
@@ -1390,6 +1392,95 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         }
         return results
       })
+  )
+
+  /**
+   * `relDir` must be exactly one of SYNC_DIR_CATEGORIES' own roots for the
+   * given category, or a subpath under it — never a sibling, never `..`. The
+   * scan handler only ever names paths of this shape, but this value crosses
+   * the IPC boundary from the renderer, so it's re-validated here rather than
+   * trusted.
+   */
+  function validateBulkRelDir(category: ClaudeSyncCategory, relDir: string): string {
+    const catDef = SYNC_DIR_CATEGORIES.find((c) => c.category === category)
+    if (!catDef) throw new Error(`"${category}" has no directory tree to bulk-transfer`)
+    if (relDir !== catDef.relDir && !relDir.startsWith(`${catDef.relDir}/`)) {
+      throw new Error('relDir is not inside its category root')
+    }
+    if (relDir.split('/').some((p) => p === '' || p === '.' || p === '..')) {
+      throw new Error('relDir contains an invalid path segment')
+    }
+    return relDir
+  }
+
+  /** Run a local command with no shell, capturing stdout; optionally feed it stdin. */
+  const runLocal = (cmd: string, cmdArgs: string[], input?: Buffer): Promise<Buffer> =>
+    new Promise((res, reject) => {
+      const child = spawn(cmd, cmdArgs)
+      const chunks: Buffer[] = []
+      let stderr = ''
+      child.stdout.on('data', (d: Buffer) => chunks.push(d))
+      child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf-8')))
+      child.on('error', reject)
+      child.on('close', (code) => {
+        if (code === 0) res(Buffer.concat(chunks))
+        else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`))
+      })
+      child.stdin.end(input)
+    })
+
+  const localTarCreate = (root: string, relDir: string): Promise<Buffer> =>
+    runLocal('tar', ['-czf', '-', '-C', root, '--', relDir])
+
+  const localTarExtract = async (root: string, data: Buffer): Promise<void> => {
+    await runLocal('tar', ['-xzf', '-', '-C', root], data)
+  }
+
+  /**
+   * Push or pull a whole subtree in one shot — tar over the existing pooled
+   * exec connection instead of one SFTP round trip per file. For a folder
+   * with hundreds or thousands of entries (a marketplace clone, say) this is
+   * the difference between one command and a slow per-file loop.
+   *
+   * Both directions are non-destructive overlays, same as the granular
+   * per-file apply: tar only creates/overwrites paths present in the
+   * archive, it never deletes anything the destination has that the source
+   * doesn't.
+   */
+  ipcMain.handle(
+    'claude-sync:bulk',
+    async (_e, args: { connectionId: string; password?: string; op: ClaudeSyncBulkOp }): Promise<void> => {
+      const relDir = validateBulkRelDir(args.op.category, args.op.relDir)
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const password = passwordFor(args.connectionId, args.password)
+
+      if (args.op.direction === 'push') {
+        const archive = await localTarCreate(localClaudeHome, relDir)
+        await ssh.execBytes(args.connectionId, connection, {
+          command: shWrap('mkdir -p "$HOME/.claude" && tar -xzf - -C "$HOME/.claude"'),
+          password,
+          input: archive,
+          timeoutMs: 30000,
+          deadlineMs: 300000,
+          // The extract itself prints nothing to stdout; this just guards
+          // against a misbehaving remote shell.
+          maxBytes: 1024 * 1024
+        })
+      } else {
+        const res = await ssh.execBytes(args.connectionId, connection, {
+          command: shWrap(`tar -czf - -C "$HOME/.claude" -- ${shQuote(relDir)}`),
+          password,
+          timeoutMs: 30000,
+          deadlineMs: 300000,
+          // Generous: this is the archive itself, which can be sizable for a
+          // marketplace clone.
+          maxBytes: 512 * 1024 * 1024
+        })
+        if (res.code !== 0) throw new Error(res.stderr.trim() || `remote tar exited with code ${res.code}`)
+        await localTarExtract(localClaudeHome, res.stdout)
+      }
+    }
   )
 
   // ---- git ----
