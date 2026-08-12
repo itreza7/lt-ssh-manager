@@ -347,6 +347,56 @@ export interface ClaudeTmuxPassthroughStatus {
   present: boolean
 }
 
+// ---- Claude config sync (computer ⇄ server) ----
+
+export type ClaudeSyncCategory =
+  | 'claudeMd'
+  | 'settings'
+  | 'mcpServers'
+  | 'skills'
+  | 'agents'
+  | 'commands'
+  | 'hooks'
+  | 'plugins'
+
+export type ClaudeSyncState = 'same' | 'local-only' | 'remote-only' | 'differ'
+
+/** One file (or, for `mcpServers`, one pseudo-file) as seen on both sides. */
+export interface ClaudeSyncEntry {
+  category: ClaudeSyncCategory
+  /** Path relative to `~/.claude` — a fixed name for the `mcpServers` pseudo-entry. */
+  relPath: string
+  state: ClaudeSyncState
+  localSize: number | null
+  remoteSize: number | null
+  executable: boolean
+}
+
+export interface ClaudeSyncManifest {
+  localHome: string
+  remoteHome: string
+  entries: ClaudeSyncEntry[]
+}
+
+export type ClaudeSyncDirection = 'push' | 'pull'
+
+export interface ClaudeSyncOp {
+  category: ClaudeSyncCategory
+  relPath: string
+  direction: ClaudeSyncDirection
+}
+
+export interface ClaudeSyncOpResult extends ClaudeSyncOp {
+  ok: boolean
+  error?: string
+}
+
+/** Before/after text for one entry, read on demand for the diff view. */
+export interface ClaudeSyncDiff {
+  local: string | null
+  remote: string | null
+}
+
 /** A snapshot of a remote host's vitals, gathered by a one-shot SSH probe. */
 export interface ServerStats {
   hostname?: string

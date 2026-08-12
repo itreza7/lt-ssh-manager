@@ -3,6 +3,11 @@ import type {
   AgentHostScan,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncCategory,
+  ClaudeSyncDiff,
+  ClaudeSyncManifest,
+  ClaudeSyncOp,
+  ClaudeSyncOpResult,
   ClaudeTmuxPassthroughStatus,
   Connection,
   ServerStats,
@@ -11,6 +16,7 @@ import type {
   WorktreeScan
 } from '../../../shared/types'
 import { Button, Modal } from './Modal'
+import { ClaudeSyncModal } from './ClaudeSyncModal'
 import { isClaudeSession } from '../lib/claude'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
@@ -45,6 +51,9 @@ interface Props {
   applyStatusLine: (action: 'install' | 'uninstall') => Promise<ClaudeStatusLineStatus>
   fetchTmuxPassthroughStatus: (password?: string) => Promise<ClaudeTmuxPassthroughStatus>
   applyTmuxPassthrough: (action: 'install' | 'uninstall') => Promise<ClaudeTmuxPassthroughStatus>
+  scanClaudeSync: () => Promise<ClaudeSyncManifest>
+  readClaudeSyncFile: (category: ClaudeSyncCategory, relPath: string) => Promise<ClaudeSyncDiff>
+  applyClaudeSync: (ops: ClaudeSyncOp[]) => Promise<ClaudeSyncOpResult[]>
   /** The live-agent sweep, owned by useAgentSessions and lifted to App.tsx so it
    *  can keep polling in the background regardless of which tab is visible.
    *  Filtered down to the active connection below — every other host in the
@@ -782,6 +791,9 @@ export function SummaryView({
   applyStatusLine,
   fetchTmuxPassthroughStatus,
   applyTmuxPassthrough,
+  scanClaudeSync,
+  readClaudeSyncFile,
+  applyClaudeSync,
   agentHosts,
   agentScanError,
   agentScanning,
@@ -801,6 +813,7 @@ export function SummaryView({
   const [statsError, setStatsError] = useState<string | null>(null)
 
   const [setupOpen, setSetupOpen] = useState(false)
+  const [syncOpen, setSyncOpen] = useState(false)
   const [hook, setHook] = useState<ClaudeHookStatus | null>(null)
   const [claudeLoading, setClaudeLoading] = useState(false)
   const [hookError, setHookError] = useState<string | null>(null)
@@ -898,6 +911,7 @@ export function SummaryView({
     setStats(null)
     setEditing(null)
     setSetupOpen(false)
+    setSyncOpen(false)
     setHook(null)
     setHookError(null)
     setHookAction(null)
@@ -1057,6 +1071,7 @@ export function SummaryView({
             <Button onClick={onOpenTunnels}>Tunnels</Button>
             <Button onClick={onOpenFiles}>Browse Files</Button>
             <Button onClick={openSetup}>Set up Claude Code ▸</Button>
+            <Button onClick={() => setSyncOpen(true)}>Sync Claude Config ▸</Button>
             <Button variant="primary" onClick={onOpenTerminal}>
               Open Terminal ▸
             </Button>
@@ -1368,6 +1383,16 @@ export function SummaryView({
             />
           </div>
         </Modal>
+      )}
+
+      {syncOpen && (
+        <ClaudeSyncModal
+          connectionName={c.name}
+          onClose={() => setSyncOpen(false)}
+          scan={scanClaudeSync}
+          readFile={readClaudeSyncFile}
+          apply={applyClaudeSync}
+        />
       )}
     </div>
   )

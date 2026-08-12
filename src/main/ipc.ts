@@ -12,14 +12,20 @@ import {
   type WebContents
 } from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { mkdir, rm, stat, writeFile, readFile, readdir, rename, chmod } from 'node:fs/promises'
+import { existsSync, type Dirent } from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type {
   AgentHostScan,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncCategory,
+  ClaudeSyncDiff,
+  ClaudeSyncManifest,
+  ClaudeSyncOp,
+  ClaudeSyncOpResult,
   ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
@@ -48,6 +54,19 @@ import {
   planStatusLine,
   planTmuxPassthrough
 } from './claudeHooks'
+import {
+  CLAUDE_MD_RELPATH,
+  KEYBINDINGS_RELPATH,
+  MARKETPLACES_RELPATH,
+  MCP_SERVERS_PSEUDO_RELPATH,
+  SETTINGS_RELPATH,
+  SYNC_DIR_CATEGORIES,
+  diffState,
+  extractMcpServers,
+  isExecutableMode,
+  planMcpServersMerge,
+  planSettingsMerge
+} from './claudeSync'
 import { agentScanScript, parseAgentScan } from '../shared/agents'
 import { SEP, shQuote, shWrap } from '../shared/shell'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
@@ -1031,6 +1050,298 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           installed: after.installed,
           present: after.present
         }
+      })
+  )
+
+  // ---- Claude config sync (computer ⇄ server) ----
+  // Bidirectional sync of the global `~/.claude` config (plus the `mcpServers`
+  // subtree of `~/.claude.json`, one level up) between this machine and a
+  // remote. Same bracketed-SFTP-session shape as withClaudeSettings above; the
+  // merge/diff logic itself lives in claudeSync.ts.
+
+  const localClaudeHome = join(homedir(), '.claude')
+
+  const localReadFile = async (path: string): Promise<string | null> => {
+    try {
+      return await readFile(path, 'utf-8')
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+      return null
+    }
+  }
+
+  const localWriteFile = async (path: string, content: string, executable: boolean): Promise<void> => {
+    await mkdir(dirname(path), { recursive: true })
+    const tmp = `${path}.${randomBytes(4).toString('hex')}.tmp`
+    await writeFile(tmp, content, 'utf-8')
+    await chmod(tmp, executable ? 0o755 : 0o644)
+    await rename(tmp, path)
+  }
+
+  interface LocalTreeEntry {
+    relPath: string
+    size: number
+    executable: boolean
+  }
+
+  const walkLocalDir = async (root: string, relDir = ''): Promise<LocalTreeEntry[]> => {
+    const dirPath = relDir ? join(root, relDir) : root
+    let items: Dirent[]
+    try {
+      items = await readdir(dirPath, { withFileTypes: true, encoding: 'utf-8' })
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+      return []
+    }
+    const out: LocalTreeEntry[] = []
+    for (const it of items) {
+      const rel = relDir ? `${relDir}/${it.name}` : it.name
+      if (it.isDirectory()) {
+        out.push(...(await walkLocalDir(root, rel)))
+      } else if (it.isFile()) {
+        const st = await stat(join(root, rel))
+        out.push({ relPath: rel, size: st.size, executable: (st.mode & 0o111) !== 0 })
+      }
+    }
+    return out
+  }
+
+  interface RemoteTreeEntry {
+    relPath: string
+    size: number
+    mode: number
+  }
+
+  const walkRemoteDir = async (
+    connectionId: string,
+    absRoot: string,
+    relDir = ''
+  ): Promise<RemoteTreeEntry[]> => {
+    const dirPath = relDir ? rjoin(absRoot, relDir) : absRoot
+    let list: SftpList
+    try {
+      list = await ssh.sftpList(connectionId, dirPath)
+    } catch (e) {
+      if ((e as { code?: number }).code !== 2) throw e
+      return []
+    }
+    const out: RemoteTreeEntry[] = []
+    for (const entry of list.entries) {
+      if (entry.isSymlink) continue
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name
+      if (entry.type === 'directory') {
+        out.push(...(await walkRemoteDir(connectionId, absRoot, rel)))
+      } else if (entry.type === 'file') {
+        out.push({ relPath: rel, size: entry.size, mode: entry.mode })
+      }
+    }
+    return out
+  }
+
+  const remoteReadFile = async (connectionId: string, path: string): Promise<string | null> => {
+    try {
+      return (await ssh.sftpReadFile(connectionId, path)).content
+    } catch (e) {
+      if ((e as { code?: number }).code !== 2) throw e
+      return null
+    }
+  }
+
+  const WHOLE_FILE_RELPATHS = new Set([
+    CLAUDE_MD_RELPATH,
+    SETTINGS_RELPATH,
+    KEYBINDINGS_RELPATH,
+    MARKETPLACES_RELPATH
+  ])
+
+  const withClaudeHome = async <T,>(
+    connectionId: string,
+    password: string | undefined,
+    fn: (remoteHomeRoot: string, remoteHome: string) => Promise<T>
+  ): Promise<T> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    let opened = false
+    try {
+      await ssh.openSftp(connectionId, connection, passwordFor(connectionId, password), undefined, 30000)
+      opened = true
+      const remoteHomeRoot = await ssh.sftpRealpath(connectionId, '.')
+      return await fn(remoteHomeRoot, rjoin(remoteHomeRoot, '.claude'))
+    } finally {
+      if (opened) ssh.closeSftp(connectionId)
+    }
+  }
+
+  ipcMain.handle(
+    'claude-sync:scan',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ClaudeSyncManifest> =>
+      withClaudeHome(args.connectionId, args.password, async (remoteHomeRoot, remoteHome) => {
+        const entries: ClaudeSyncManifest['entries'] = []
+
+        for (const relPath of [CLAUDE_MD_RELPATH, SETTINGS_RELPATH, KEYBINDINGS_RELPATH, MARKETPLACES_RELPATH]) {
+          const category: ClaudeSyncCategory =
+            relPath === CLAUDE_MD_RELPATH ? 'claudeMd' : relPath === MARKETPLACES_RELPATH ? 'plugins' : 'settings'
+          const localRaw = await localReadFile(join(localClaudeHome, relPath))
+          const remoteRaw = await remoteReadFile(args.connectionId, rjoin(remoteHome, relPath))
+          entries.push({
+            category,
+            relPath,
+            state: diffState(localRaw, remoteRaw),
+            localSize: localRaw === null ? null : Buffer.byteLength(localRaw, 'utf-8'),
+            remoteSize: remoteRaw === null ? null : Buffer.byteLength(remoteRaw, 'utf-8'),
+            executable: false
+          })
+        }
+
+        const localClaudeJson = await localReadFile(join(homedir(), '.claude.json'))
+        const remoteClaudeJson = await remoteReadFile(args.connectionId, rjoin(remoteHomeRoot, '.claude.json'))
+        const localServers = extractMcpServers(localClaudeJson)
+        const remoteServers = extractMcpServers(remoteClaudeJson)
+        entries.push({
+          category: 'mcpServers',
+          relPath: MCP_SERVERS_PSEUDO_RELPATH,
+          state: diffState(localServers, remoteServers),
+          localSize: localServers === null ? null : Buffer.byteLength(localServers, 'utf-8'),
+          remoteSize: remoteServers === null ? null : Buffer.byteLength(remoteServers, 'utf-8'),
+          executable: false
+        })
+
+        for (const { category, relDir } of SYNC_DIR_CATEGORIES) {
+          const localFiles = await walkLocalDir(join(localClaudeHome, relDir))
+          const remoteFiles = await walkRemoteDir(args.connectionId, rjoin(remoteHome, relDir))
+          const localByRel = new Map(localFiles.map((f) => [f.relPath, f]))
+          const remoteByRel = new Map(remoteFiles.map((f) => [f.relPath, f]))
+          const allRel = new Set([...localByRel.keys(), ...remoteByRel.keys()])
+          for (const rel of allRel) {
+            const l = localByRel.get(rel)
+            const r = remoteByRel.get(rel)
+            let state: ClaudeSyncManifest['entries'][number]['state']
+            if (l && r) {
+              const lc = await localReadFile(join(localClaudeHome, relDir, rel))
+              const rc = await remoteReadFile(args.connectionId, rjoin(rjoin(remoteHome, relDir), rel))
+              state = diffState(lc, rc)
+            } else {
+              state = l ? 'local-only' : 'remote-only'
+            }
+            entries.push({
+              category,
+              relPath: `${relDir}/${rel}`,
+              state,
+              localSize: l ? l.size : null,
+              remoteSize: r ? r.size : null,
+              executable: l ? l.executable : r ? isExecutableMode(r.mode) : false
+            })
+          }
+        }
+
+        return { localHome: localClaudeHome, remoteHome, entries }
+      })
+  )
+
+  ipcMain.handle(
+    'claude-sync:read-file',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; category: ClaudeSyncCategory; relPath: string }
+    ): Promise<ClaudeSyncDiff> =>
+      withClaudeHome(args.connectionId, args.password, async (remoteHomeRoot, remoteHome) => {
+        if (args.category === 'mcpServers') {
+          const local = extractMcpServers(await localReadFile(join(homedir(), '.claude.json')))
+          const remote = extractMcpServers(
+            await remoteReadFile(args.connectionId, rjoin(remoteHomeRoot, '.claude.json'))
+          )
+          return { local, remote }
+        }
+        const local = await localReadFile(join(localClaudeHome, args.relPath))
+        const remote = await remoteReadFile(args.connectionId, rjoin(remoteHome, args.relPath))
+        return { local, remote }
+      })
+  )
+
+  const applyClaudeSyncOp = async (
+    connectionId: string,
+    op: ClaudeSyncOp,
+    remoteHomeRoot: string,
+    remoteHome: string
+  ): Promise<void> => {
+    if (op.category === 'mcpServers') {
+      const localPath = join(homedir(), '.claude.json')
+      const remotePath = rjoin(remoteHomeRoot, '.claude.json')
+      const localRaw = await localReadFile(localPath)
+      const remoteRaw = await remoteReadFile(connectionId, remotePath)
+      if (op.direction === 'push') {
+        await ssh.sftpWriteFileAtomic(connectionId, remotePath, planMcpServersMerge(localRaw, remoteRaw), 0o600)
+      } else {
+        await localWriteFile(localPath, planMcpServersMerge(remoteRaw, localRaw), false)
+      }
+      return
+    }
+
+    if (op.relPath === SETTINGS_RELPATH) {
+      const localPath = join(localClaudeHome, SETTINGS_RELPATH)
+      const remotePath = rjoin(remoteHome, SETTINGS_RELPATH)
+      const localRaw = await localReadFile(localPath)
+      const remoteRaw = await remoteReadFile(connectionId, remotePath)
+      if (op.direction === 'push') {
+        await ssh.sftpEnsureDir(connectionId, dirname(remotePath), 0o700)
+        await ssh.sftpWriteFileAtomic(connectionId, remotePath, planSettingsMerge(localRaw, remoteRaw), 0o600)
+      } else {
+        await localWriteFile(localPath, planSettingsMerge(remoteRaw, localRaw), false)
+      }
+      return
+    }
+
+    if (WHOLE_FILE_RELPATHS.has(op.relPath)) {
+      const localPath = join(localClaudeHome, op.relPath)
+      const remotePath = rjoin(remoteHome, op.relPath)
+      if (op.direction === 'push') {
+        const content = await localReadFile(localPath)
+        if (content === null) throw new Error('Local file no longer exists')
+        await ssh.sftpEnsureDir(connectionId, dirname(remotePath), 0o700)
+        await ssh.sftpWriteFileAtomic(connectionId, remotePath, content, 0o600)
+      } else {
+        const content = await remoteReadFile(connectionId, remotePath)
+        if (content === null) throw new Error('Remote file no longer exists')
+        await localWriteFile(localPath, content, false)
+      }
+      return
+    }
+
+    // Directory-tree categories: relPath already carries the dir prefix, e.g. "skills/foo/SKILL.md".
+    const localPath = join(localClaudeHome, op.relPath)
+    const remotePath = rjoin(remoteHome, op.relPath)
+    if (op.direction === 'push') {
+      const content = await localReadFile(localPath)
+      if (content === null) throw new Error('Local file no longer exists')
+      const st = await stat(localPath)
+      await ssh.sftpEnsureDir(connectionId, dirname(remotePath), 0o755)
+      await ssh.sftpWriteFileAtomic(connectionId, remotePath, content, (st.mode & 0o111) !== 0 ? 0o755 : 0o644)
+    } else {
+      const content = await remoteReadFile(connectionId, remotePath)
+      if (content === null) throw new Error('Remote file no longer exists')
+      const list = await ssh.sftpList(connectionId, dirname(remotePath))
+      const meta = list.entries.find((e) => e.path === remotePath)
+      await localWriteFile(localPath, content, meta ? isExecutableMode(meta.mode) : false)
+    }
+  }
+
+  ipcMain.handle(
+    'claude-sync:apply',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; ops: ClaudeSyncOp[] }
+    ): Promise<ClaudeSyncOpResult[]> =>
+      withClaudeHome(args.connectionId, args.password, async (remoteHomeRoot, remoteHome) => {
+        const results: ClaudeSyncOpResult[] = []
+        for (const op of args.ops) {
+          try {
+            await applyClaudeSyncOp(args.connectionId, op, remoteHomeRoot, remoteHome)
+            results.push({ ...op, ok: true })
+          } catch (e) {
+            results.push({ ...op, ok: false, error: e instanceof Error ? e.message : String(e) })
+          }
+        }
+        return results
       })
   )
 

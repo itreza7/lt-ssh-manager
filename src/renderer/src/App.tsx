@@ -2,6 +2,11 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import type {
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncCategory,
+  ClaudeSyncDiff,
+  ClaudeSyncManifest,
+  ClaudeSyncOp,
+  ClaudeSyncOpResult,
   ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
@@ -1263,6 +1268,33 @@ export default function App() {
     return window.api.claudeTmuxPassthroughApply({ connectionId: conn.id, password: password ?? undefined, action })
   }
 
+  const scanClaudeSyncFor = (conn: Connection) => async (): Promise<ClaudeSyncManifest> => {
+    const password = await resolvePassword(conn)
+    if (password === null) throw new Error('Password required to scan the Claude config.')
+    return window.api.claudeSyncScan({ connectionId: conn.id, password: password ?? undefined })
+  }
+
+  const readClaudeSyncFileFor =
+    (conn: Connection) =>
+    async (category: ClaudeSyncCategory, relPath: string): Promise<ClaudeSyncDiff> => {
+      const password = await resolvePassword(conn)
+      if (password === null) throw new Error('Password required to read the Claude config.')
+      return window.api.claudeSyncReadFile({
+        connectionId: conn.id,
+        password: password ?? undefined,
+        category,
+        relPath
+      })
+    }
+
+  const applyClaudeSyncFor =
+    (conn: Connection) =>
+    async (ops: ClaudeSyncOp[]): Promise<ClaudeSyncOpResult[]> => {
+      const password = await resolvePassword(conn)
+      if (password === null) throw new Error('Password required to write the Claude config.')
+      return window.api.claudeSyncApply({ connectionId: conn.id, password: password ?? undefined, ops })
+    }
+
   // Open Claude Code in a directory, as a new tab.
   //
   // Fails closed on anything that isn't an absolute path. The file manager's cwd
@@ -1692,6 +1724,27 @@ export default function App() {
               applyTmuxPassthrough={
                 activeConnection
                   ? applyTmuxPassthroughFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              scanClaudeSync={
+                activeConnection
+                  ? scanClaudeSyncFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              readClaudeSyncFile={
+                activeConnection
+                  ? readClaudeSyncFileFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              applyClaudeSync={
+                activeConnection
+                  ? applyClaudeSyncFor(activeConnection)
                   : async () => {
                       throw new Error('No active connection')
                     }
