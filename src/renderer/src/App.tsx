@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import type {
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncBulkOp,
   ClaudeSyncCategory,
   ClaudeSyncDiff,
   ClaudeSyncManifest,
@@ -1295,6 +1296,14 @@ export default function App() {
       return window.api.claudeSyncApply({ connectionId: conn.id, password: password ?? undefined, ops })
     }
 
+  const bulkClaudeSyncFor =
+    (conn: Connection) =>
+    async (op: ClaudeSyncBulkOp): Promise<void> => {
+      const password = await resolvePassword(conn)
+      if (password === null) throw new Error('Password required to write the Claude config.')
+      return window.api.claudeSyncBulk({ connectionId: conn.id, password: password ?? undefined, op })
+    }
+
   // Open Claude Code in a directory, as a new tab.
   //
   // Fails closed on anything that isn't an absolute path. The file manager's cwd
@@ -1745,6 +1754,13 @@ export default function App() {
               applyClaudeSync={
                 activeConnection
                   ? applyClaudeSyncFor(activeConnection)
+                  : async () => {
+                      throw new Error('No active connection')
+                    }
+              }
+              bulkClaudeSync={
+                activeConnection
+                  ? bulkClaudeSyncFor(activeConnection)
                   : async () => {
                       throw new Error('No active connection')
                     }

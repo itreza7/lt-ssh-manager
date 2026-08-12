@@ -95,6 +95,14 @@ interface ExecOpts {
    */
   maxBytes?: number
   /**
+   * Bytes written to the command's stdin, then EOF. For a command that reads
+   * its input rather than just running to completion — `tar -xzf -`, chiefly.
+   * Without this, stdin is simply never written to; a command that never
+   * blocks on it (the common case, every existing caller) behaves exactly as
+   * before.
+   */
+  input?: Buffer
+  /**
    * Nobody is at the keyboard for this call: refuse an unknown or changed host
    * key rather than raising the verification dialog.
    *
@@ -641,7 +649,8 @@ export class SshManager extends EventEmitter {
     try {
       return await this.execOnPooled(key, opts.command, {
         deadlineMs: opts.deadlineMs,
-        maxBytes: opts.maxBytes
+        maxBytes: opts.maxBytes,
+        input: opts.input
       })
     } finally {
       this.closeSftp(key)
@@ -848,7 +857,7 @@ export class SshManager extends EventEmitter {
   private execOnPooled(
     key: string,
     command: string,
-    opts?: { deadlineMs?: number; maxBytes?: number }
+    opts?: { deadlineMs?: number; maxBytes?: number; input?: Buffer }
   ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
     const entry = this.sftpPool.get(key)
     if (!entry) return Promise.reject(new Error('SFTP session is not open'))
@@ -878,6 +887,7 @@ export class SshManager extends EventEmitter {
         client.exec(command, (err, stream) => {
           if (err) return fail(err)
           channel = stream
+          if (opts?.input) stream.end(opts.input)
           const out: Buffer[] = []
           const errOut: Buffer[] = []
           let bytes = 0
