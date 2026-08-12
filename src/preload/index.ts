@@ -4,6 +4,11 @@ import type {
   AppSettings,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
+  ClaudeSyncCategory,
+  ClaudeSyncDiff,
+  ClaudeSyncManifest,
+  ClaudeSyncOp,
+  ClaudeSyncOpResult,
   ClaudeTmuxPassthroughStatus,
   Connection,
   ConnectionDraft,
@@ -370,7 +375,25 @@ const api = {
     connectionId: string
     path: string
     password?: string
-  }): Promise<WorktreeInspect> => ipcRenderer.invoke('git:worktreeInspect', args)
+  }): Promise<WorktreeInspect> => ipcRenderer.invoke('git:worktreeInspect', args),
+
+  // Global Claude config sync (~/.claude, plus ~/.claude.json's mcpServers) between
+  // this computer and a remote host
+  claudeSyncScan: (args: {
+    connectionId: string
+    password?: string
+  }): Promise<ClaudeSyncManifest> => ipcRenderer.invoke('claude-sync:scan', args),
+  claudeSyncReadFile: (args: {
+    connectionId: string
+    password?: string
+    category: ClaudeSyncCategory
+    relPath: string
+  }): Promise<ClaudeSyncDiff> => ipcRenderer.invoke('claude-sync:read-file', args),
+  claudeSyncApply: (args: {
+    connectionId: string
+    password?: string
+    ops: ClaudeSyncOp[]
+  }): Promise<ClaudeSyncOpResult[]> => ipcRenderer.invoke('claude-sync:apply', args)
 }
 
 export type Api = typeof api
