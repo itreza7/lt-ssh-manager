@@ -260,6 +260,12 @@ function EntryRow({
   )
 }
 
+/** A folder queued for a bulk tar transfer, keyed by the folder's path. */
+interface BulkSelection {
+  category: ClaudeSyncCategory
+  direction: ClaudeSyncDirection
+}
+
 interface TreeRenderProps {
   category: ClaudeSyncCategory
   depth: number
@@ -272,17 +278,20 @@ interface TreeRenderProps {
   diffs: Map<string, { local: string | null; remote: string | null }>
   diffLoading: string | null
   diffError: string | null
+  bulkSelections: Map<string, BulkSelection>
+  onToggleBulkSelection: (category: ClaudeSyncCategory, folder: TreeFolder, direction: ClaudeSyncDirection) => void
   bulkBusyPath: string | null
   bulkErrors: Map<string, string>
-  onBulk: (folder: TreeFolder, direction: ClaudeSyncDirection) => void
 }
 
 function FolderRow({
   folder,
   ...rest
 }: TreeRenderProps & { folder: TreeFolder }) {
-  const { category, depth, expandedFolders, onToggleFolder, bulkBusyPath, bulkErrors, onBulk } = rest
+  const { category, depth, expandedFolders, onToggleFolder, bulkSelections, onToggleBulkSelection, bulkBusyPath, bulkErrors } =
+    rest
   const expanded = expandedFolders.has(folder.path)
+  const selected = bulkSelections.get(folder.path)?.direction ?? null
   const busy = bulkBusyPath === folder.path
   const err = bulkErrors.get(folder.path)
   return (
@@ -302,18 +311,26 @@ function FolderRow({
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <button
-            onClick={() => onBulk(folder, 'push')}
+            onClick={() => onToggleBulkSelection(category, folder, 'push')}
             disabled={!folder.hasPush || busy}
-            title="Push this whole folder, local → remote"
-            className="rounded-md border border-line px-2 py-1 text-xs text-faint transition-colors hover:text-fg disabled:cursor-not-allowed disabled:opacity-30"
+            title="Select this whole folder to push, local → remote"
+            className={`rounded-md border px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+              selected === 'push'
+                ? 'border-accent/50 bg-accent-soft/40 text-accent'
+                : 'border-line text-faint hover:text-fg'
+            }`}
           >
             {busy ? '…' : 'Push folder ▸'}
           </button>
           <button
-            onClick={() => onBulk(folder, 'pull')}
+            onClick={() => onToggleBulkSelection(category, folder, 'pull')}
             disabled={!folder.hasPull || busy}
-            title="Pull this whole folder, remote → local"
-            className="rounded-md border border-line px-2 py-1 text-xs text-faint transition-colors hover:text-fg disabled:cursor-not-allowed disabled:opacity-30"
+            title="Select this whole folder to pull, remote → local"
+            className={`rounded-md border px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+              selected === 'pull'
+                ? 'border-accent/50 bg-accent-soft/40 text-accent'
+                : 'border-line text-faint hover:text-fg'
+            }`}
           >
             {busy ? '…' : '◂ Pull folder'}
           </button>
@@ -367,8 +384,10 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
   // keyed by the folder's path so state survives a rescan as long as the
   // folder itself still exists.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
+  const [bulkSelections, setBulkSelections] = useState<Map<string, BulkSelection>>(new Map())
   const [bulkBusyPath, setBulkBusyPath] = useState<string | null>(null)
   const [bulkErrors, setBulkErrors] = useState<Map<string, string>>(new Map())
+  const [transferring, setTransferring] = useState(false)
 
   const load = async (): Promise<void> => {
     setLoading(true)
@@ -418,29 +437,56 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
     })
   }
 
-  const bulkFolder = (category: ClaudeSyncCategory, folder: TreeFolder, direction: ClaudeSyncDirection): void => {
-    const verb = direction === 'push' ? 'Push' : 'Pull'
-    const arrow = direction === 'push' ? 'local → remote' : 'remote → local'
+  const toggleFolderSelection = (
+    category: ClaudeSyncCategory,
+    folder: TreeFolder,
+    direction: ClaudeSyncDirection
+  ): void => {
+    setBulkSelections((prev) => {
+      const next = new Map(prev)
+      const existing = next.get(folder.path)
+      if (existing && existing.direction === direction) next.delete(folder.path)
+      else next.set(folder.path, { category, direction })
+      return next
+    })
+  }
+
+  const transferSelected = async (): Promise<void> => {
+    const selections = Array.from(bulkSelections.entries())
+    if (selections.length === 0) return
+    const summary = selections
+      .map(([path, sel]) => `${sel.direction === 'push' ? '→' : '←'} ${path}`)
+      .join('\n')
     if (
       !confirm(
-        `${verb} “${folder.path}” (${folder.fileCount} file${folder.fileCount === 1 ? '' : 's'}), ${arrow}?\n\n` +
-          `This overwrites the destination's copy of every file in this folder in one shot — it does not go through the review step below.`
+        `Transfer ${selections.length} folder${selections.length === 1 ? '' : 's'}?\n\n${summary}\n\n` +
+          `This overwrites the destination's copy of every file in each folder in one shot — it does not go through the review step below.`
       )
     ) {
       return
     }
-    setBulkBusyPath(folder.path)
-    setBulkErrors((prev) => {
-      const next = new Map(prev)
-      next.delete(folder.path)
-      return next
-    })
-    bulk({ category, relDir: folder.path, direction })
-      .then(() => load())
-      .catch((e) => {
-        setBulkErrors((prev) => new Map(prev).set(folder.path, e instanceof Error ? e.message : String(e)))
+    setTransferring(true)
+    for (const [path, sel] of selections) {
+      setBulkBusyPath(path)
+      setBulkErrors((prev) => {
+        const next = new Map(prev)
+        next.delete(path)
+        return next
       })
-      .finally(() => setBulkBusyPath(null))
+      try {
+        await bulk({ category: sel.category, relDir: path, direction: sel.direction })
+        setBulkSelections((prev) => {
+          const next = new Map(prev)
+          next.delete(path)
+          return next
+        })
+      } catch (e) {
+        setBulkErrors((prev) => new Map(prev).set(path, e instanceof Error ? e.message : String(e)))
+      }
+    }
+    setBulkBusyPath(null)
+    setTransferring(false)
+    await load()
   }
 
   const grouped = CATEGORY_ORDER.map((category) => ({
@@ -495,6 +541,13 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
               <Button onClick={() => setAll('remote-only', 'pull')} disabled={loading}>
                 Pull all remote-only
               </Button>
+              {bulkSelections.size > 0 && (
+                <Button variant="primary" disabled={transferring} onClick={() => void transferSelected()}>
+                  {transferring
+                    ? 'Transferring…'
+                    : `Transfer ${bulkSelections.size} folder${bulkSelections.size === 1 ? '' : 's'} ▸`}
+                </Button>
+              )}
             </div>
             <Button variant="primary" disabled={loading || pendingOps.length === 0} onClick={() => setStage('review')}>
               Review {pendingOps.length > 0 ? `${pendingOps.length} change${pendingOps.length > 1 ? 's' : ''} ` : ''}▸
@@ -555,9 +608,10 @@ export function ClaudeSyncModal({ connectionName, onClose, scan, readFile, apply
                       diffs={diffs}
                       diffLoading={diffLoading}
                       diffError={diffError}
+                      bulkSelections={bulkSelections}
+                      onToggleBulkSelection={toggleFolderSelection}
                       bulkBusyPath={bulkBusyPath}
                       bulkErrors={bulkErrors}
-                      onBulk={(folder, direction) => bulkFolder(category, folder, direction)}
                     />
                   ) : (
                     <EntryRow
