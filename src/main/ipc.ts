@@ -1078,6 +1078,31 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     await rename(tmp, path)
   }
 
+  // Marketplace clones under plugins/marketplaces can carry a full `.git`
+  // object database or a populated `node_modules` — neither is config to
+  // sync, and walking into them file-by-file is the single biggest cost in a
+  // scan. Skip them everywhere, not just under plugins.
+  const SYNC_EXCLUDED_DIRS = new Set(['.git', 'node_modules'])
+
+  // Bounded-concurrency map: runs `fn` over `items` with at most `limit` in
+  // flight. SFTP over ssh2 pipelines requests fine, but an unbounded
+  // Promise.all across a wide tree (thousands of dir entries) risks
+  // overwhelming the channel window — this caps it while still getting the
+  // bulk of the parallelism win over a fully serial walk.
+  async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const results: R[] = new Array(items.length)
+    let next = 0
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = next++
+        if (i >= items.length) return
+        results[i] = await fn(items[i])
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+    return results
+  }
+
   interface LocalTreeEntry {
     relPath: string
     size: number
@@ -1093,17 +1118,18 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
       return []
     }
-    const out: LocalTreeEntry[] = []
-    for (const it of items) {
+    const results = await mapConcurrent(items, 8, async (it): Promise<LocalTreeEntry[]> => {
       const rel = relDir ? `${relDir}/${it.name}` : it.name
       if (it.isDirectory()) {
-        out.push(...(await walkLocalDir(root, rel)))
+        if (SYNC_EXCLUDED_DIRS.has(it.name)) return []
+        return walkLocalDir(root, rel)
       } else if (it.isFile()) {
         const st = await stat(join(root, rel))
-        out.push({ relPath: rel, size: st.size, executable: (st.mode & 0o111) !== 0 })
+        return [{ relPath: rel, size: st.size, executable: (st.mode & 0o111) !== 0 }]
       }
-    }
-    return out
+      return []
+    })
+    return results.flat()
   }
 
   interface RemoteTreeEntry {
@@ -1125,17 +1151,18 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if ((e as { code?: number }).code !== 2) throw e
       return []
     }
-    const out: RemoteTreeEntry[] = []
-    for (const entry of list.entries) {
-      if (entry.isSymlink) continue
+    const results = await mapConcurrent(list.entries, 8, async (entry): Promise<RemoteTreeEntry[]> => {
+      if (entry.isSymlink) return []
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name
       if (entry.type === 'directory') {
-        out.push(...(await walkRemoteDir(connectionId, absRoot, rel)))
+        if (SYNC_EXCLUDED_DIRS.has(entry.name)) return []
+        return walkRemoteDir(connectionId, absRoot, rel)
       } else if (entry.type === 'file') {
-        out.push({ relPath: rel, size: entry.size, mode: entry.mode })
+        return [{ relPath: rel, size: entry.size, mode: entry.mode }]
       }
-    }
-    return out
+      return []
+    })
+    return results.flat()
   }
 
   const remoteReadFile = async (connectionId: string, path: string): Promise<string | null> => {
@@ -1178,23 +1205,30 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       withClaudeHome(args.connectionId, args.password, async (remoteHomeRoot, remoteHome) => {
         const entries: ClaudeSyncManifest['entries'] = []
 
-        for (const relPath of [CLAUDE_MD_RELPATH, SETTINGS_RELPATH, KEYBINDINGS_RELPATH, MARKETPLACES_RELPATH]) {
-          const category: ClaudeSyncCategory =
-            relPath === CLAUDE_MD_RELPATH ? 'claudeMd' : relPath === MARKETPLACES_RELPATH ? 'plugins' : 'settings'
-          const localRaw = await localReadFile(join(localClaudeHome, relPath))
-          const remoteRaw = await remoteReadFile(args.connectionId, rjoin(remoteHome, relPath))
-          entries.push({
-            category,
-            relPath,
-            state: diffState(localRaw, remoteRaw),
-            localSize: localRaw === null ? null : Buffer.byteLength(localRaw, 'utf-8'),
-            remoteSize: remoteRaw === null ? null : Buffer.byteLength(remoteRaw, 'utf-8'),
-            executable: false
+        const wholeFileEntries = await Promise.all(
+          [CLAUDE_MD_RELPATH, SETTINGS_RELPATH, KEYBINDINGS_RELPATH, MARKETPLACES_RELPATH].map(async (relPath) => {
+            const category: ClaudeSyncCategory =
+              relPath === CLAUDE_MD_RELPATH ? 'claudeMd' : relPath === MARKETPLACES_RELPATH ? 'plugins' : 'settings'
+            const [localRaw, remoteRaw] = await Promise.all([
+              localReadFile(join(localClaudeHome, relPath)),
+              remoteReadFile(args.connectionId, rjoin(remoteHome, relPath))
+            ])
+            return {
+              category,
+              relPath,
+              state: diffState(localRaw, remoteRaw),
+              localSize: localRaw === null ? null : Buffer.byteLength(localRaw, 'utf-8'),
+              remoteSize: remoteRaw === null ? null : Buffer.byteLength(remoteRaw, 'utf-8'),
+              executable: false
+            }
           })
-        }
+        )
+        entries.push(...wholeFileEntries)
 
-        const localClaudeJson = await localReadFile(join(homedir(), '.claude.json'))
-        const remoteClaudeJson = await remoteReadFile(args.connectionId, rjoin(remoteHomeRoot, '.claude.json'))
+        const [localClaudeJson, remoteClaudeJson] = await Promise.all([
+          localReadFile(join(homedir(), '.claude.json')),
+          remoteReadFile(args.connectionId, rjoin(remoteHomeRoot, '.claude.json'))
+        ])
         const localServers = extractMcpServers(localClaudeJson)
         const remoteServers = extractMcpServers(remoteClaudeJson)
         entries.push({
@@ -1206,33 +1240,46 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           executable: false
         })
 
-        for (const { category, relDir } of SYNC_DIR_CATEGORIES) {
-          const localFiles = await walkLocalDir(join(localClaudeHome, relDir))
-          const remoteFiles = await walkRemoteDir(args.connectionId, rjoin(remoteHome, relDir))
-          const localByRel = new Map(localFiles.map((f) => [f.relPath, f]))
-          const remoteByRel = new Map(remoteFiles.map((f) => [f.relPath, f]))
-          const allRel = new Set([...localByRel.keys(), ...remoteByRel.keys()])
-          for (const rel of allRel) {
-            const l = localByRel.get(rel)
-            const r = remoteByRel.get(rel)
-            let state: ClaudeSyncManifest['entries'][number]['state']
-            if (l && r) {
-              const lc = await localReadFile(join(localClaudeHome, relDir, rel))
-              const rc = await remoteReadFile(args.connectionId, rjoin(rjoin(remoteHome, relDir), rel))
-              state = diffState(lc, rc)
-            } else {
-              state = l ? 'local-only' : 'remote-only'
-            }
-            entries.push({
-              category,
-              relPath: `${relDir}/${rel}`,
-              state,
-              localSize: l ? l.size : null,
-              remoteSize: r ? r.size : null,
-              executable: l ? l.executable : r ? isExecutableMode(r.mode) : false
+        await Promise.all(
+          SYNC_DIR_CATEGORIES.map(async ({ category, relDir }) => {
+            const [localFiles, remoteFiles] = await Promise.all([
+              walkLocalDir(join(localClaudeHome, relDir)),
+              walkRemoteDir(args.connectionId, rjoin(remoteHome, relDir))
+            ])
+            const localByRel = new Map(localFiles.map((f) => [f.relPath, f]))
+            const remoteByRel = new Map(remoteFiles.map((f) => [f.relPath, f]))
+            const allRel = [...new Set([...localByRel.keys(), ...remoteByRel.keys()])]
+            const dirEntries = await mapConcurrent(allRel, 8, async (rel) => {
+              const l = localByRel.get(rel)
+              const r = remoteByRel.get(rel)
+              let state: ClaudeSyncManifest['entries'][number]['state']
+              if (l && r) {
+                // Different sizes already prove the content differs — skip
+                // the two full-file reads and their SFTP round trips.
+                if (l.size !== r.size) {
+                  state = 'differ'
+                } else {
+                  const [lc, rc] = await Promise.all([
+                    localReadFile(join(localClaudeHome, relDir, rel)),
+                    remoteReadFile(args.connectionId, rjoin(rjoin(remoteHome, relDir), rel))
+                  ])
+                  state = diffState(lc, rc)
+                }
+              } else {
+                state = l ? 'local-only' : 'remote-only'
+              }
+              return {
+                category,
+                relPath: `${relDir}/${rel}`,
+                state,
+                localSize: l ? l.size : null,
+                remoteSize: r ? r.size : null,
+                executable: l ? l.executable : r ? isExecutableMode(r.mode) : false
+              }
             })
-          }
-        }
+            entries.push(...dirEntries)
+          })
+        )
 
         return { localHome: localClaudeHome, remoteHome, entries }
       })
