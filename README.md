@@ -43,10 +43,11 @@ main process.
   gets an amber dot; optionally a system notification (clicking it focuses that exact tab)
   and a dock badge. The dashboard installs the matching Notification hook into a host's
   `~/.claude/settings.json` for you, showing the before/after JSON before it writes.
-- **Agent Inbox** — one list of every agent you have running, across every connection:
-  which host, which directory, how long it's been idle, and whether it's asking for you,
-  with one-click attach. Underneath it, the sessions you *aren't* running — read from the
-  host's own Claude transcripts, newest first — resume in a tab with one click.
+- **Agent Inbox** — the Command Palette's (⌘K) "Running Agents" section lists every agent
+  you have running, across every connection: which host, which directory, how long it's
+  been idle, and whether it's asking for you, with one-click attach. Underneath it, the
+  sessions you *aren't* running — read from the host's own Claude transcripts, newest
+  first — resume in a tab with one click.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only
   `git status --ignored` first and shows you what would be deleted: `git worktree remove`
@@ -72,7 +73,7 @@ main process.
   fails fast on permanent errors (bad auth, missing key, rejected host key).
 - **Native macOS chrome** — hidden title bar with real traffic lights, a proper
   application menu (⌘N new connection, ⌘W closes a tab, ⇧⌘W the window, ⇧⌘[ / ⇧⌘]
-  switch tabs), a frosted sidebar and title bar (native vibrancy), the system font,
+  switch tabs), a frosted title bar (native vibrancy), the system font,
   and the window reopens at whatever size and position you last left it instead of
   always maximizing.
 
@@ -82,7 +83,7 @@ main process.
 | --- | --- | --- |
 | Main | `src/main/` | SSH sessions (`ssh2`), host-key store, connection/secret stores, IPC |
 | Preload | `src/preload/` | `contextBridge` — exposes a minimal typed `window.api` |
-| Renderer | `src/renderer/src/` | React UI: sidebar, dialogs, xterm terminal tabs |
+| Renderer | `src/renderer/src/` | React UI: tab strip, Command Palette, dialogs, xterm terminal tabs |
 | Shared | `src/shared/` | Types shared across processes |
 
 Security: the renderer runs with `contextIsolation: true`, `nodeIntegration:
