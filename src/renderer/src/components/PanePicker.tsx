@@ -1,3 +1,5 @@
+import { fmtAccel } from '../lib/platform'
+
 interface Option {
   id: string
   label: string
@@ -45,7 +47,7 @@ export function PanePicker({ options, onPick, onClose }: Props) {
           </div>
         </>
       ) : (
-        <p className="text-xs text-faint">Open another tab from the sidebar to add it here.</p>
+        <p className="text-xs text-faint">Open another tab from {fmtAccel('Ctrl+K')} to add it here.</p>
       )}
     </div>
   )

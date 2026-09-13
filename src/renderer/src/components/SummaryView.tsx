@@ -815,6 +815,10 @@ export function SummaryView({
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
 
+  // System vitals / connection details / notes are secondary to "start or resume
+  // an agent" — collapsed by default so that job stays above the fold.
+  const [hostDetailsOpen, setHostDetailsOpen] = useState(false)
+
   const [setupOpen, setSetupOpen] = useState(false)
   const [syncOpen, setSyncOpen] = useState(false)
   const [hook, setHook] = useState<ClaudeHookStatus | null>(null)
@@ -1102,82 +1106,6 @@ export function SummaryView({
           <NewAgentForm connectionId={c.id} resolvePassword={resolvePassword} onSubmit={onNewAgent} />
         </div>
 
-        {/* system vitals */}
-        <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '60ms' }}>
-          <div className="mb-4 flex items-center justify-between">
-            <span className="eyebrow">System</span>
-            <RefreshButton loading={statsLoading} onClick={() => void loadStats()} />
-          </div>
-
-          {statsError && (
-            <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-              {statsError}
-            </p>
-          )}
-
-          {!statsError && statsLoading && stats === null && (
-            <p className="py-2 font-mono text-xs text-faint">reading host vitals…</p>
-          )}
-
-          {!statsError && stats && (
-            <>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-                <Fact label="OS" value={stats.os ?? '—'} />
-                <Fact label="Kernel" value={stats.kernel ?? '—'} mono />
-                <Fact label="Arch" value={stats.arch ?? '—'} mono />
-                <Fact label="Uptime" value={stats.uptime ?? '—'} />
-                <Fact
-                  label="CPU"
-                  value={stats.cpus ? `${stats.cpus} core${stats.cpus === 1 ? '' : 's'}` : stats.cpuModel ?? '—'}
-                />
-                <Fact
-                  label="Load avg"
-                  value={stats.load ? stats.load.map((n) => n.toFixed(2)).join('  ') : '—'}
-                  mono
-                />
-              </div>
-
-              {stats.cpuModel && stats.cpus && (
-                <p className="mt-3 truncate border-t border-line-soft pt-3 font-mono text-[11px] text-faint">
-                  {stats.cpuModel}
-                </p>
-              )}
-
-              {(memPct !== null || stats.diskPct !== undefined || loadRatio !== null) && (
-                <div className="mt-4 grid gap-4 border-t border-line-soft pt-4 sm:grid-cols-3">
-                  {memPct !== null && (
-                    <Meter
-                      label="Memory"
-                      pct={memPct}
-                      detail={`${fmtKb(stats.memUsedKb!)} / ${fmtKb(stats.memTotalKb!)}`}
-                    />
-                  )}
-                  {stats.diskPct !== undefined && (
-                    <Meter
-                      label="Disk /"
-                      pct={stats.diskPct}
-                      detail={stats.diskUsed && stats.diskSize ? `${stats.diskUsed} / ${stats.diskSize}` : ''}
-                    />
-                  )}
-                  {loadRatio !== null && (
-                    <Meter
-                      label="CPU load"
-                      pct={loadRatio}
-                      detail={`${stats.load![0].toFixed(2)} · ${stats.cpus} cores`}
-                    />
-                  )}
-                </div>
-              )}
-
-              {stats.users !== undefined && (
-                <p className="mt-4 border-t border-line-soft pt-3 text-[12px] text-faint">
-                  {stats.users} user{stats.users === 1 ? '' : 's'} logged in
-                </p>
-              )}
-            </>
-          )}
-        </div>
-
         {/* tmux + live agents */}
         <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '100ms' }}>
           <div className="mb-3.5 flex items-center justify-between">
@@ -1307,22 +1235,117 @@ export function SummaryView({
           )}
         </div>
 
-        {/* details */}
+        {/* host details — vitals, connection info, notes: secondary to the agent job above */}
         <div className="panel animate-rise p-5" style={{ animationDelay: '140ms' }}>
-          <div className="eyebrow mb-1.5">Connection details</div>
-          <Row label="Host" value={c.host} />
-          <Row label="Port" value={String(c.port)} />
-          <Row label="Username" value={c.username || '—'} />
-          <Row label="Auth method" value={authLabel[c.authMethod]} />
-          {c.authMethod === 'key' && <Row label="Private key" value={c.keyPath || '—'} />}
-        </div>
+          <button
+            onClick={() => setHostDetailsOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-left"
+          >
+            <span className="text-faint">{hostDetailsOpen ? '▾' : '▸'}</span>
+            <span className="eyebrow">Host details</span>
+          </button>
 
-        {c.notes && (
-          <div className="panel animate-rise mt-4 p-5" style={{ animationDelay: '180ms' }}>
-            <div className="eyebrow mb-2">Notes</div>
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg/75">{c.notes}</p>
-          </div>
-        )}
+          {hostDetailsOpen && (
+            <div className="mt-4 space-y-4">
+              {/* system vitals */}
+              <div className="border-t border-line-soft pt-4">
+                <div className="mb-4 flex items-center justify-between">
+                  <span className="eyebrow">System</span>
+                  <RefreshButton loading={statsLoading} onClick={() => void loadStats()} />
+                </div>
+
+                {statsError && (
+                  <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+                    {statsError}
+                  </p>
+                )}
+
+                {!statsError && statsLoading && stats === null && (
+                  <p className="py-2 font-mono text-xs text-faint">reading host vitals…</p>
+                )}
+
+                {!statsError && stats && (
+                  <>
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+                      <Fact label="OS" value={stats.os ?? '—'} />
+                      <Fact label="Kernel" value={stats.kernel ?? '—'} mono />
+                      <Fact label="Arch" value={stats.arch ?? '—'} mono />
+                      <Fact label="Uptime" value={stats.uptime ?? '—'} />
+                      <Fact
+                        label="CPU"
+                        value={
+                          stats.cpus ? `${stats.cpus} core${stats.cpus === 1 ? '' : 's'}` : stats.cpuModel ?? '—'
+                        }
+                      />
+                      <Fact
+                        label="Load avg"
+                        value={stats.load ? stats.load.map((n) => n.toFixed(2)).join('  ') : '—'}
+                        mono
+                      />
+                    </div>
+
+                    {stats.cpuModel && stats.cpus && (
+                      <p className="mt-3 truncate border-t border-line-soft pt-3 font-mono text-[11px] text-faint">
+                        {stats.cpuModel}
+                      </p>
+                    )}
+
+                    {(memPct !== null || stats.diskPct !== undefined || loadRatio !== null) && (
+                      <div className="mt-4 grid gap-4 border-t border-line-soft pt-4 sm:grid-cols-3">
+                        {memPct !== null && (
+                          <Meter
+                            label="Memory"
+                            pct={memPct}
+                            detail={`${fmtKb(stats.memUsedKb!)} / ${fmtKb(stats.memTotalKb!)}`}
+                          />
+                        )}
+                        {stats.diskPct !== undefined && (
+                          <Meter
+                            label="Disk /"
+                            pct={stats.diskPct}
+                            detail={
+                              stats.diskUsed && stats.diskSize ? `${stats.diskUsed} / ${stats.diskSize}` : ''
+                            }
+                          />
+                        )}
+                        {loadRatio !== null && (
+                          <Meter
+                            label="CPU load"
+                            pct={loadRatio}
+                            detail={`${stats.load![0].toFixed(2)} · ${stats.cpus} cores`}
+                          />
+                        )}
+                      </div>
+                    )}
+
+                    {stats.users !== undefined && (
+                      <p className="mt-4 border-t border-line-soft pt-3 text-[12px] text-faint">
+                        {stats.users} user{stats.users === 1 ? '' : 's'} logged in
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* connection details */}
+              <div className="border-t border-line-soft pt-4">
+                <div className="eyebrow mb-1.5">Connection details</div>
+                <Row label="Host" value={c.host} />
+                <Row label="Port" value={String(c.port)} />
+                <Row label="Username" value={c.username || '—'} />
+                <Row label="Auth method" value={authLabel[c.authMethod]} />
+                {c.authMethod === 'key' && <Row label="Private key" value={c.keyPath || '—'} />}
+              </div>
+
+              {c.notes && (
+                <div className="border-t border-line-soft pt-4">
+                  <div className="eyebrow mb-2">Notes</div>
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg/75">{c.notes}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {setupOpen && (
