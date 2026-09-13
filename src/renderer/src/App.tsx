@@ -1342,11 +1342,6 @@ export default function App() {
     if (conn) attachTmux(conn, session)
   }
 
-  // Launch a brand-new agent from Summary's inline form, on the active connection.
-  const newAgentFromActive = (dir: string): boolean => {
-    const conn = connections.find((c) => c.id === activeConnectionId)
-    return conn ? openClaude(conn, dir) : false
-  }
 
   // Kill / rename run as one-shot commands; Summary refreshes its list after.
   const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
@@ -1769,7 +1764,6 @@ export default function App() {
               agentScanError={agentScanError}
               agentScanning={agentScanning}
               rescanAgents={rescanAgents}
-              onNewAgent={newAgentFromActive}
             />
             {paneTools(SUMMARY_TAB_ID)}
           </div>

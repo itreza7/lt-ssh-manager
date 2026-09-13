@@ -4,14 +4,7 @@ import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
-import {
-  attachTerminal,
-  sendComposed,
-  FIND_ACCEL,
-  PASTE_UPLOAD_ACCEL,
-  type ComposerHandle
-} from '../lib/xtermAttach'
-import { fmtAccel } from '../lib/platform'
+import { attachTerminal, sendComposed, type ComposerHandle } from '../lib/xtermAttach'
 import type { TerminalSearch } from '../lib/xtermSearch'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { useTerminalFind } from '../lib/useTerminalFind'
@@ -107,9 +100,6 @@ export function TerminalView({
   // composer's final height is what layout ever sees.
   const [composing, setComposing] = useState(() => settings.composerDefaultOpen)
   const [draft, setDraft] = useState(initialDraft ?? '')
-  // Discoverability hint for shortcuts that have no on-screen affordance.
-  // Dismissal is local to this tab (not persisted) — see PromptComposer sibling below.
-  const [hintDismissed, setHintDismissed] = useState(false)
 
   // Local autosave, independent of the SSH connection: survives disconnects,
   // crashes, and restarts. Cleared naturally when draft goes back to '' on
@@ -626,22 +616,6 @@ export function TerminalView({
           />
         )}
       </div>
-      {!hintDismissed && (
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line-soft bg-elevated/30 px-3 py-1 font-mono text-[10px] text-faint">
-          <span className="truncate">
-            {FIND_ACCEL} find · {PASTE_UPLOAD_ACCEL} paste image · drop file → path ·{' '}
-            {fmtAccel('Shift+Enter')} newline
-          </span>
-          <button
-            onClick={() => setHintDismissed(true)}
-            title="Dismiss"
-            aria-label="Dismiss shortcut hint"
-            className="shrink-0 text-faint transition-colors hover:text-fg"
-          >
-            ×
-          </button>
-        </div>
-      )}
       {/* Docked below the terminal, not overlaid on it — a real flex sibling, so
           opening it shrinks the scroll host's box above and the ResizeObserver
           turns that into a PTY resize (under tmux, a reflow for every attached
