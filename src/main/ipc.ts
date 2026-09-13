@@ -262,8 +262,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const ssh = new SshManager()
 
   const send = (channel: string, ...args: unknown[]): void => {
-    const wc: WebContents | undefined = getWindow()?.webContents
-    if (wc && !wc.isDestroyed()) wc.send(channel, ...args)
+    const win = getWindow()
+    // A destroyed BrowserWindow throws on property access (even `.webContents`),
+    // not just returns undefined — an SSH socket event arriving after the window
+    // closes (e.g. during quit) would otherwise crash the main process here.
+    if (!win || win.isDestroyed()) return
+    const wc: WebContents = win.webContents
+    if (!wc.isDestroyed()) wc.send(channel, ...args)
   }
 
   ssh.on('status', (sessionId, status) => send('ssh:status', sessionId, status))
