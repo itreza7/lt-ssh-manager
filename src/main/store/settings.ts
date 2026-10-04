@@ -19,7 +19,7 @@ const FILE = () => join(app.getPath('userData'), 'settings.json')
  */
 function migrate(s: AppSettings, from: number): AppSettings {
   // v1: the terminal cursor used to blink by default. That blink is the app's
-  // largest idle power draw (a full WebGL redraw plus a compositor frame, twice a
+  // largest idle power draw (a full terminal redraw plus a compositor frame, twice a
   // second, for as long as the app is open), and it was a default nobody chose,
   // so clear it. It's one toggle away in Settings for anyone who wants it back.
   if (from < 1) s = { ...s, terminal: { ...s.terminal, cursorBlink: false } }

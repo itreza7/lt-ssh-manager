@@ -2,7 +2,6 @@
 // so both render with identical options, theme, and addons.
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { resolveFontStack, type TerminalSettings } from './terminalSettings'
 import { createSearch, type TerminalSearch } from './xtermSearch'
@@ -29,8 +28,8 @@ const THEME = {
 } as const
 
 /**
- * Create + open a terminal in `container` with the app's options/theme. WebGL is
- * attempted after open (falls back to canvas/DOM if unavailable). Pass
+ * Create + open a terminal in `container` with the app's options/theme, on
+ * xterm's DOM renderer (see the character joiner below for why not WebGL). Pass
  * `{ fit: true }` to also attach a FitAddon (returned for the caller to drive).
  *
  * Search is loaded for every terminal rather than on demand: the addon indexes
@@ -74,11 +73,13 @@ export function createTerminal(
   )
   const search = createSearch(term)
   term.open(container)
-  try {
-    term.loadAddon(new WebglAddon())
-  } catch {
-    /* WebGL unavailable — falls back to canvas/DOM renderer */
-  }
+  // xterm has no BiDi or Arabic-script shaping, so Persian/Arabic/Hebrew draws
+  // one isolated letter per cell, left to right. A joined range is drawn as one
+  // string, which the browser shapes and orders right-to-left itself —
+  // render-only, the buffer (and so copy, search, cursor) stays logical. This
+  // is also why the DOM renderer: WebGL rasterizes a joined range into a 512px
+  // atlas tile, which clips any run longer than ~30 cells.
+  term.registerCharacterJoiner(rtlJoiner)
   // xterm measures its own character cell against whatever font is actually
   // available the moment term.open() runs, and only re-measures later if
   // fontFamily/fontSize change — never on its own once a pending web font
@@ -102,6 +103,21 @@ export function createTerminal(
     opts?.onFontsReady?.()
   })
   return { term, fit, search }
+}
+
+const RTL_CHAR = /[֐-ࣿיִ-﷿ﹰ-﻿]/
+// Spaces, punctuation and digits between RTL letters stay inside the run, so a
+// whole sentence is ordered as one unit rather than word by word.
+const RTL_RUN = /[֐-ࣿיִ-﷿ﹰ-﻿](?:[֐-ࣿיִ-﷿ﹰ-﻿‌‍\s\d۰-۹.,;:!?()«»\-_'"]*[֐-ࣿיִ-﷿ﹰ-﻿])?/g
+
+/** Character joiner: string ranges [start, end) covering each multi-char RTL run. */
+function rtlJoiner(text: string): [number, number][] {
+  if (!RTL_CHAR.test(text)) return []
+  const ranges: [number, number][] = []
+  for (const m of text.matchAll(RTL_RUN)) {
+    if (m[0].length > 1) ranges.push([m.index, m.index + m[0].length])
+  }
+  return ranges
 }
 
 /** Apply live setting changes (font, cursor, scrollback) to an existing terminal. */

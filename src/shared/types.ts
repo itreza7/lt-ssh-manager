@@ -549,7 +549,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: 'jetbrains',
   fontSize: 13,
   cursorStyle: 'bar',
-  // Off by default: a blinking cursor drives a full WebGL redraw + compositor
+  // Off by default: a blinking cursor drives a full terminal redraw + compositor
   // frame twice a second forever, which is the single largest source of idle
   // battery draw in the app. Turn it back on in Settings if you prefer it.
   cursorBlink: false,

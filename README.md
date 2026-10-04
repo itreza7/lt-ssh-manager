@@ -24,8 +24,8 @@ main process.
 
 ## Features
 
-- **Embedded terminals** — real interactive shells rendered with xterm.js
-  (WebGL), so `htop`, `vim`, `docker stats`, `tail -f` all work and look right.
+- **Embedded terminals** — real interactive shells rendered with xterm.js,
+  so `htop`, `vim`, `docker stats`, `tail -f` all work and look right.
 - **Multiple sessions** in tabs, each with a live connection-status indicator.
 - **tmux control mode** — optional `tmux -CC` integration renders each tmux pane as
   its own native terminal: real scrollback and copy with no mouse-mode, while tmux
