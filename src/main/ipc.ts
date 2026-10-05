@@ -15,7 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { mkdir, rm, stat, writeFile, readFile, readdir, rename, chmod } from 'node:fs/promises'
 import { existsSync, type Dirent } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type {
@@ -77,6 +77,22 @@ import {
   type ReaderChunk,
   type ReaderSession
 } from '../shared/claudeTranscript'
+import {
+  CHAT_DIR,
+  CHAT_ID_RE,
+  CHAT_ROOT,
+  chatTmuxSession,
+  type ChatCommand,
+  type ChatConfig,
+  type ChatEvent,
+  type ChatMode,
+  type ChatStartArgs,
+  type ChatState,
+  type ChatStreamData,
+  type ChatStreamEnd,
+  type ChatSummary
+} from '../shared/chatProtocol'
+import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
   MAX_BRANCHES,
@@ -1814,6 +1830,494 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       const res = await readerExec(args.connectionId, args.password, script, 65536)
       const dir = res.stdout.toString('utf-8').trim()
       return res.code === 0 && dir ? dir : null
+    }
+  )
+
+  // ---- Chat (the relay that keeps Claude Code running on the remote) ----
+  //
+  // The relay lives in a tmux session on the host and talks through files in its
+  // chat directory (see shared/chatProtocol.ts); everything here is plumbing to
+  // start it, hand it commands, and tail its events.
+
+  /** Oldest Node the relay (and the Agent SDK under it) runs on. */
+  const CHAT_NODE_MIN = 18
+  const CHAT_MODES: ChatMode[] = ['bypass', 'default', 'acceptEdits', 'plan']
+
+  const chatIdOf = (v: unknown): string => {
+    if (typeof v !== 'string' || !CHAT_ID_RE.test(v)) throw new Error('Invalid chat id')
+    return v
+  }
+  /** A chat's directory as a shell word. Only ever built from an id that passed CHAT_ID_RE. */
+  const chatDirSh = (chatId: string): string => `"$HOME"/${CHAT_DIR}/${chatId}`
+
+  const chatExec = (
+    connectionId: string,
+    password: string | undefined,
+    script: string,
+    opts?: { input?: Buffer; maxBytes?: number; deadlineMs?: number }
+  ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    return ssh.execBytes(connectionId, connection, {
+      command: shWrap(script),
+      password: passwordFor(connectionId, password),
+      timeoutMs: 15000,
+      deadlineMs: opts?.deadlineMs ?? 30000,
+      maxBytes: opts?.maxBytes ?? 1_000_000,
+      input: opts?.input
+    })
+  }
+
+  interface ChatRemote {
+    home: string
+    cwd: string
+    node: string
+    claude: string
+    relayPresent: boolean
+  }
+
+  /**
+   * The relay bundle and the name it is kept under on a host. The name is a hash
+   * of the content, not a version number: a relay edited without a bump would
+   * otherwise be skipped as "already uploaded" and the host would keep running
+   * the old one. Read once — a rebuilt relay needs an app restart, like any other
+   * main-process change.
+   */
+  let relayBundle: { src: Buffer; name: string } | undefined
+  const chatRelayBundle = async (): Promise<{ src: Buffer; name: string }> => {
+    if (relayBundle) return relayBundle
+    let src: Buffer
+    try {
+      src = await readFile(join(app.getAppPath(), 'resources', 'relay.mjs'))
+    } catch {
+      throw new Error('The chat relay is not built (resources/relay.mjs is missing). Run npm run build first.')
+    }
+    const name = `relay-${createHash('sha256').update(src).digest('hex').slice(0, 12)}.mjs`
+    return (relayBundle = { src, name })
+  }
+
+  /**
+   * What the host looks like to a relay: the absolute working directory, node, the
+   * real claude binary, and whether this version of the relay is already uploaded —
+   * all in one round trip.
+   *
+   * Node and claude come from an *interactive* bash, with the user's `claude`
+   * function and alias removed: the relay must run the binary, not the wrapper. It
+   * is `-i`, not a PS1 trick, because Debian and Ubuntu's stock ~/.bashrc returns
+   * on `case $- in *i*`, and the version-manager PATH lines sit below that. The
+   * probe prints labelled lines because an interactive rc may print anything.
+   * Anything not found there falls back to the same ladder an agent tab uses.
+   */
+  const chatResolve = async (
+    connectionId: string,
+    password: string | undefined,
+    cwd: string
+  ): Promise<ChatRemote> => {
+    const { name: relayName } = await chatRelayBundle()
+    const pin = connectionStore.get(connectionId)?.claudePath
+    const dir = cwd === '~' ? '"$HOME"' : cwd.startsWith('~/') ? `"$HOME"${shQuote(cwd.slice(1))}` : shQuote(cwd)
+    const probe =
+      'unset -f claude; unalias claude 2>/dev/null; echo "NODE=$(command -v node)"; echo "CLAUDE=$(command -v claude)"'
+    const script = [
+      `d=${dir}`,
+      'cd -- "$d" 2>/dev/null || { echo ERR=cwd; exit 0; }',
+      'echo "CWD=$(pwd -P)"',
+      'echo "HOME=$HOME"',
+      `[ -f "$HOME/${CHAT_ROOT}/${relayName}" ] && echo RELAY=1`,
+      CLAUDE_TIMEOUT,
+      `CLI=${pin ? shQuote(pin) : ''}`,
+      'B=$(command -v bash 2>/dev/null); P=',
+      '[ -n "$B" ] && P=$($TMO "$B" -ic ' + shQuote(probe) + ' </dev/null 2>/dev/null)',
+      `N=$(printf '%s\\n' "$P" | sed -n 's/^NODE=//p' | tail -n 1)`,
+      '[ -n "$N" ] || N=$(command -v node 2>/dev/null)',
+      '[ -n "$N" ] || for c in "$HOME/.local/bin/node" /usr/local/bin/node /usr/bin/node /opt/homebrew/bin/node; do [ -x "$c" ] && N=$c && break; done',
+      'case "$N" in /*) [ -x "$N" ] || N= ;; *) N= ;; esac',
+      'echo "NODE=$N"',
+      `[ -n "$N" ] && echo "NODEV=$("$N" -p process.versions.node 2>/dev/null)"`,
+      `[ -n "$CLI" ] || CLI=$(printf '%s\\n' "$P" | sed -n 's/^CLAUDE=//p' | tail -n 1)`,
+      CLAUDE_RESOLVE,
+      'echo "CLAUDE=$CLI"',
+      'exit 0'
+    ].join(SEP)
+    const res = await chatExec(connectionId, password, script, { deadlineMs: 45000 })
+    const out = new Map<string, string>()
+    for (const line of res.stdout.toString('utf-8').split('\n')) {
+      const i = line.indexOf('=')
+      if (i > 0) out.set(line.slice(0, i), line.slice(i + 1))
+      else if (line === 'RELAY=1') out.set('RELAY', '1')
+    }
+    if (out.get('ERR') === 'cwd') throw new Error(`Directory not found on the host: ${cwd}`)
+    const abs = (k: string): string => {
+      const v = out.get(k) ?? ''
+      return v.startsWith('/') ? v : ''
+    }
+    if (!abs('CWD') || !abs('HOME')) throw new Error(res.stderr.trim() || 'Could not inspect the host')
+    const node = abs('NODE')
+    if (!node) throw new Error(`Node.js ${CHAT_NODE_MIN} or newer was not found on this host. The chat relay needs it.`)
+    const major = Number.parseInt(out.get('NODEV') ?? '', 10)
+    if (!(major >= CHAT_NODE_MIN)) {
+      throw new Error(`Node.js ${out.get('NODEV') || '(unknown version)'} is too old on this host; the chat relay needs ${CHAT_NODE_MIN} or newer.`)
+    }
+    const claude = abs('CLAUDE')
+    if (!claude) {
+      throw new Error(
+        'Claude Code was not found on this host. Install it, or set its full path in Edit > Claude Code binary.'
+      )
+    }
+    return { home: abs('HOME'), cwd: abs('CWD'), node, claude, relayPresent: out.get('RELAY') === '1' }
+  }
+
+  /**
+   * Put this version of the relay on the host. The file is the Vite build of
+   * src/relay/relay.ts; in dev and packaged alike it sits under the app path
+   * (electron-builder ships resources/**). Written to a temp name and moved, so a
+   * relay that is about to start is never a half-copied file.
+   */
+  const chatUploadRelay = async (connectionId: string, password: string | undefined): Promise<void> => {
+    const { src, name } = await chatRelayBundle()
+    const script =
+      `umask 077${SEP}d="$HOME/${CHAT_ROOT}"${SEP}mkdir -p "$d" && cat > "$d/.up.$$.tmp" && ` +
+      `mv -f "$d/.up.$$.tmp" "$d/${name}"`
+    const res = await chatExec(connectionId, password, script, { input: src, deadlineMs: 120000 })
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to upload the chat relay')
+  }
+
+  /**
+   * Write config.json and start the relay in its own tmux session, which is what
+   * lets it outlive the SSH connection. `fresh` is a first start: if it does not
+   * come up, the directory it just made is removed again so a failed start leaves
+   * no dead chat in the list. A restart keeps whatever is there.
+   *
+   * The pane runs under /bin/sh with node's directory first on PATH, because a
+   * tmux server started long ago carries whatever PATH it had then, and claude
+   * may be a script that needs `node` on it. The relay's stderr goes to relay.log
+   * in the chat directory — a relay that dies on import would otherwise take its
+   * only explanation with the pane. A second after the start the session must still
+   * exist, or the start fails with the tail of that log.
+   */
+  const chatLaunch = async (
+    connectionId: string,
+    password: string | undefined,
+    config: ChatConfig,
+    remote: ChatRemote,
+    fresh: boolean
+  ): Promise<void> => {
+    const id = chatIdOf(config.chatId)
+    const dir = `${remote.home}/${CHAT_DIR}/${id}`
+    const relay = `${remote.home}/${CHAT_ROOT}/${(await chatRelayBundle()).name}`
+    const nodeDir = remote.node.slice(0, remote.node.lastIndexOf('/')) || '/'
+    const inner =
+      `PATH=${shQuote(nodeDir)}:"$PATH"${SEP}export PATH${SEP}` +
+      `exec ${shQuote(remote.node)} ${shQuote(relay)} ${shQuote(dir)} 2>>${shQuote(`${dir}/relay.log`)}`
+    const session = chatTmuxSession(id)
+    const script =
+      `command -v tmux >/dev/null 2>&1 || { echo 'tmux is not installed on this host' >&2; exit 127; }${SEP}` +
+      `umask 077${SEP}d=${chatDirSh(id)}${SEP}` +
+      `mkdir -p "$d" && cat > "$d/config.json.tmp" && mv -f "$d/config.json.tmp" "$d/config.json" && ` +
+      `tmux new -d -s ${shQuote(session)} ${shQuote(shWrap(inner))} && sleep 1 && ` +
+      `tmux has-session -t ${shQuote('=' + session)} 2>/dev/null || ` +
+      `{ tail -n 8 "$d/relay.log" >&2 2>/dev/null; echo 'The chat relay did not start' >&2; ${fresh ? 'rm -rf "$d"; ' : ''}exit 1; }`
+    const res = await chatExec(connectionId, password, script, {
+      input: Buffer.from(JSON.stringify(config), 'utf-8'),
+      deadlineMs: 45000
+    })
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to start the chat relay')
+  }
+
+  ipcMain.handle(
+    'chat:start',
+    async (_e, args: ChatStartArgs): Promise<{ chatId: string }> => {
+      if (typeof args.cwd !== 'string' || !args.cwd.trim() || args.cwd.includes('\0')) {
+        throw new Error('Choose a working directory')
+      }
+      if (!CHAT_MODES.includes(args.mode)) throw new Error('Invalid mode')
+      const remote = await chatResolve(args.connectionId, args.password, args.cwd.trim())
+      if (!remote.relayPresent) await chatUploadRelay(args.connectionId, args.password)
+      const chatId = 'c' + randomBytes(6).toString('hex')
+      const config: ChatConfig = {
+        chatId,
+        cwd: remote.cwd,
+        model: args.model || undefined,
+        mode: args.mode,
+        claudePath: remote.claude,
+        resume: args.resume || undefined,
+        title: args.title || undefined,
+        createdAt: Date.now()
+      }
+      await chatLaunch(args.connectionId, args.password, config, remote, true)
+      return { chatId }
+    }
+  )
+
+  // Commands to one chat go out one at a time: an image-sized line is several
+  // writes to the file, and two of them interleaving would corrupt both.
+  const chatSendQueue = new Map<string, Promise<unknown>>()
+
+  const chatAppend = (
+    connectionId: string,
+    password: string | undefined,
+    chatId: string,
+    cmd: ChatCommand,
+    after = ''
+  ): Promise<unknown> => {
+    const run = async (): Promise<void> => {
+      const script =
+        `d=${chatDirSh(chatId)}${SEP}[ -d "$d" ] || exit 3${SEP}cat >> "$d/inbox.jsonl" || exit 1${SEP}${after}exit 0`
+      const res = await chatExec(connectionId, password, script, {
+        input: Buffer.from(JSON.stringify(cmd) + '\n', 'utf-8'),
+        deadlineMs: 120000,
+        maxBytes: 4096
+      })
+      if (res.code === 3) throw new Error('Chat not found')
+      if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to send to the chat')
+    }
+    const prev = chatSendQueue.get(chatId) ?? Promise.resolve()
+    const next = prev.then(run, run)
+    const tail = next.catch(() => undefined)
+    chatSendQueue.set(chatId, tail)
+    void tail.then(() => {
+      if (chatSendQueue.get(chatId) === tail) chatSendQueue.delete(chatId)
+    })
+    return next
+  }
+
+  ipcMain.handle(
+    'chat:send',
+    async (_e, args: { connectionId: string; password?: string; chatId: string; cmd: ChatCommand }): Promise<void> => {
+      const chatId = chatIdOf(args.chatId)
+      const cmd = args.cmd
+      if (!cmd || typeof cmd.t !== 'string' || typeof cmd.id !== 'string') throw new Error('Invalid command')
+      await chatAppend(args.connectionId, args.password, chatId, cmd)
+    }
+  )
+
+  // ---- live streams of events.jsonl ----
+
+  const chatStreams = new Map<string, { close(): void; wc: WebContents }>()
+  const chatWatched = new WeakSet<WebContents>()
+  /** Longest event line we'll buffer while waiting for its newline. */
+  const CHAT_LINE_MAX = 32 * 1024 * 1024
+  /** Most events one batch carries, however fast they arrive. */
+  const CHAT_BATCH_MAX = 1000
+
+  ipcMain.handle(
+    'chat:stream',
+    async (
+      e,
+      args: { connectionId: string; password?: string; chatId: string; offset: number }
+    ): Promise<{ streamId: string }> => {
+      const chatId = chatIdOf(args.chatId)
+      const offset = Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset)) : 0
+      const connection = connectionStore.get(args.connectionId)
+      if (!connection) throw new Error('Connection not found')
+      const wc = e.sender
+      const streamId = 's' + randomBytes(6).toString('hex')
+      const emit = (channel: string, payload: ChatStreamData | ChatStreamEnd): void => {
+        if (!wc.isDestroyed()) wc.send(channel, payload)
+      }
+
+      // Whole lines only: `next` is the byte offset after the last one handed
+      // over, so a reconnect resumes exactly where this left off. A bad line is
+      // skipped but still counted, or the offset would stall on it forever.
+      let pending: Buffer = Buffer.alloc(0)
+      let next = offset
+      let events: ChatEvent[] = []
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const flush = (): void => {
+        if (timer) clearTimeout(timer)
+        timer = undefined
+        if (events.length === 0) return
+        const batch = events
+        events = []
+        emit('chat:data', { streamId, events: batch, next })
+      }
+      let handle: { close(): void } | undefined
+      let forced: string | undefined
+      const onData = (d: Buffer): void => {
+        pending = pending.length ? Buffer.concat([pending, d]) : d
+        const last = pending.lastIndexOf(0x0a)
+        if (last < 0) {
+          if (pending.length > CHAT_LINE_MAX) {
+            pending = Buffer.alloc(0)
+            forced = 'An event line was too large to read'
+            handle?.close()
+          }
+          return
+        }
+        const whole = pending.subarray(0, last + 1)
+        pending = Buffer.from(pending.subarray(last + 1))
+        let start = 0
+        for (let i = whole.indexOf(0x0a); i >= 0; i = whole.indexOf(0x0a, start)) {
+          const line = whole.subarray(start, i)
+          start = i + 1
+          next += line.length + 1
+          if (line.length === 0) continue
+          try {
+            const ev = JSON.parse(line.toString('utf-8')) as ChatEvent
+            if (ev && typeof ev === 'object' && typeof ev.t === 'string') events.push(ev)
+          } catch {
+            /* a torn or foreign line */
+          }
+          if (events.length >= CHAT_BATCH_MAX) flush()
+        }
+        if (events.length && !timer) timer = setTimeout(flush, 50)
+      }
+      // Waits for the file, then follows it. Reading stdin is what ties the tail's
+      // life to the channel: when we close the channel (or the link drops) stdin
+      // hits EOF and the tail is killed, instead of lingering until the next write
+      // finds its pipe broken. The loop watches both ways: a tail that dies on its
+      // own must end the channel too, or the stream goes silent and is never
+      // reopened. stdin goes through fd 3 because a background job's stdin is
+      // otherwise /dev/null. `kill -0` catches a tail that never started.
+      const d = chatDirSh(chatId)
+      const script =
+        `d=${d}${SEP}f="$d/events.jsonl"${SEP}` +
+        `while [ ! -f "$f" ]; do [ -d "$d" ] || exit 3; sleep 0.3; done${SEP}` +
+        `tail -c +${offset + 1} -F "$f" 2>/dev/null & t=$!${SEP}sleep 0.2${SEP}` +
+        `kill -0 $t 2>/dev/null || exit 4${SEP}exec 3<&0${SEP}cat <&3 >/dev/null & c=$!${SEP}` +
+        `while kill -0 $t 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 1; done${SEP}` +
+        `if kill -0 $t 2>/dev/null; then kill $t $c 2>/dev/null; exit 0; fi${SEP}kill $c 2>/dev/null${SEP}exit 5`
+      handle = await ssh.execStream(
+        args.connectionId,
+        connection,
+        { command: shWrap(script), password: passwordFor(args.connectionId, args.password), timeoutMs: 15000 },
+        onData,
+        (err) => {
+          flush()
+          chatStreams.delete(streamId)
+          const code = /\(exit (\d+)\)|status (\d+)/.exec(err?.message ?? '')
+          const missing = code && (code[1] ?? code[2]) === '3'
+          const error = forced ?? (err ? (missing ? 'Chat not found' : err.message) : undefined)
+          emit('chat:end', { streamId, ...(error ? { error } : {}) })
+        }
+      )
+      chatStreams.set(streamId, { close: () => handle?.close(), wc })
+      if (!chatWatched.has(wc)) {
+        chatWatched.add(wc)
+        const closeAll = (): void => {
+          for (const s of [...chatStreams.values()]) if (s.wc === wc) s.close()
+        }
+        wc.once('destroyed', closeAll)
+        // A reload keeps the webContents but drops every listener in the page.
+        wc.on('did-start-navigation', (d) => {
+          if (d.isMainFrame && !d.isSameDocument) closeAll()
+        })
+      }
+      return { streamId }
+    }
+  )
+
+  ipcMain.handle('chat:unstream', (_e, args: { streamId: string }): void => {
+    chatStreams.get(args.streamId)?.close()
+  })
+
+  // ---- list / stop / restart ----
+
+  const parseB64Json = <T,>(b64: string | undefined): T | null => {
+    if (!b64) return null
+    try {
+      return JSON.parse(Buffer.from(b64, 'base64').toString('utf-8')) as T
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Every chat on the host, newest first. One line per chat — `id alive size
+   * config state`, the last two base64 so no byte of JSON can break the framing.
+   */
+  ipcMain.handle(
+    'chat:list',
+    async (_e, args: { connectionId: string; password?: string }): Promise<ChatSummary[]> => {
+      const script =
+        `d="$HOME/${CHAT_DIR}"${SEP}[ -d "$d" ] || exit 0${SEP}` +
+        `for p in "$d"/c*/; do id=$(basename "$p"); case "$id" in c????????????) ;; *) continue;; esac; ` +
+        `[ -f "$p/config.json" ] || continue; ` +
+        `cfg=$(base64 < "$p/config.json" | tr -d '\\n'); st=; ` +
+        `[ -f "$p/state.json" ] && st=$(base64 < "$p/state.json" | tr -d '\\n'); ` +
+        `sz=0; [ -f "$p/events.jsonl" ] && sz=$(wc -c < "$p/events.jsonl" | tr -d ' '); ` +
+        `if tmux has-session -t "=chat-$id" 2>/dev/null; then al=1; else al=0; fi; ` +
+        `echo "$id $al $sz $cfg $st"; done${SEP}exit 0`
+      const res = await chatExec(args.connectionId, args.password, script, { maxBytes: 16 * 1024 * 1024 })
+      const out: ChatSummary[] = []
+      for (const line of res.stdout.toString('utf-8').split('\n')) {
+        const [id, alive, size, cfg, st] = line.trim().split(' ')
+        if (!id || !CHAT_ID_RE.test(id)) continue
+        const config = parseB64Json<ChatConfig>(cfg)
+        if (!config) continue
+        out.push({
+          chatId: id,
+          config,
+          state: parseB64Json<ChatState>(st),
+          alive: alive === '1',
+          size: Number(size) || 0
+        })
+      }
+      return out.sort((a, b) => (b.config.createdAt ?? 0) - (a.config.createdAt ?? 0))
+    }
+  )
+
+  /**
+   * Ask the relay to stop, and kill its tmux session if it has not gone five
+   * seconds later. The delayed kill runs on the host, so it still happens if the
+   * app is closed meanwhile.
+   */
+  ipcMain.handle(
+    'chat:stop',
+    async (_e, args: { connectionId: string; password?: string; chatId: string }): Promise<void> => {
+      const chatId = chatIdOf(args.chatId)
+      // Only the relay being stopped is killed: a Restart inside the five seconds
+      // starts a new one in a session of the same name, told apart by its pane pid.
+      const pane = shQuote('=' + chatTmuxSession(chatId) + ':')
+      const kill =
+        `p=$(tmux display -p -t ${pane} '#{pane_pid}' 2>/dev/null)${SEP}` +
+        `( sleep 5; [ -n "$p" ] && [ "$(tmux display -p -t ${pane} '#{pane_pid}' 2>/dev/null)" = "$p" ] && ` +
+        `tmux kill-session -t ${shQuote('=' + chatTmuxSession(chatId))} ) >/dev/null 2>&1 </dev/null & `
+      await chatAppend(
+        args.connectionId,
+        args.password,
+        chatId,
+        { t: 'stop', id: randomBytes(8).toString('hex') },
+        kill
+      )
+    }
+  )
+
+  /**
+   * Bring a chat whose relay is gone back, resuming the Claude session it last
+   * reported. A relay that is still running is left alone. Node and claude are
+   * resolved again — the host may have been updated since the chat began.
+   */
+  ipcMain.handle(
+    'chat:restart',
+    async (_e, args: { connectionId: string; password?: string; chatId: string }): Promise<void> => {
+      const chatId = chatIdOf(args.chatId)
+      const d = chatDirSh(chatId)
+      const script =
+        `d=${d}${SEP}[ -f "$d/config.json" ] || exit 3${SEP}` +
+        `if tmux has-session -t ${shQuote('=' + chatTmuxSession(chatId))} 2>/dev/null; then echo ALIVE=1; else echo ALIVE=0; fi${SEP}` +
+        `echo "CONFIG=$(base64 < "$d/config.json" | tr -d '\\n')"${SEP}` +
+        `st=; [ -f "$d/state.json" ] && st=$(base64 < "$d/state.json" | tr -d '\\n')${SEP}echo "STATE=$st"${SEP}exit 0`
+      const res = await chatExec(args.connectionId, args.password, script)
+      if (res.code === 3) throw new Error('Chat not found')
+      const lines = new Map<string, string>()
+      for (const line of res.stdout.toString('utf-8').split('\n')) {
+        const i = line.indexOf('=')
+        if (i > 0) lines.set(line.slice(0, i), line.slice(i + 1).trim())
+      }
+      if (lines.get('ALIVE') === '1') return
+      const config = parseB64Json<ChatConfig>(lines.get('CONFIG'))
+      if (!config) throw new Error('This chat has no readable config')
+      const state = parseB64Json<ChatState>(lines.get('STATE'))
+      const remote = await chatResolve(args.connectionId, args.password, config.cwd)
+      if (!remote.relayPresent) await chatUploadRelay(args.connectionId, args.password)
+      await chatLaunch(
+        args.connectionId,
+        args.password,
+        { ...config, chatId, claudePath: remote.claude, resume: state?.sessionId ?? config.resume },
+        remote,
+        false
+      )
     }
   )
 

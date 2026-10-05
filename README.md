@@ -48,6 +48,12 @@ main process.
   been idle, and whether it's asking for you, with one-click attach. Underneath it, the
   sessions you *aren't* running — read from the host's own Claude transcripts, newest
   first — resume in a tab with one click.
+- **Native Claude chat** — a chat tab for Claude Code on a host, like the Claude desktop
+  app: streamed answers, tool calls as cards (commands with output, edits as diffs),
+  question and plan-approval cards, and model and permission-mode pickers. A small relay
+  runs Claude through the Agent SDK inside tmux on the host, so a chat keeps working while
+  your computer sleeps or the network drops; the tab picks up where it left off. Needs
+  Node.js 18+ and Claude Code on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only
   `git status --ignored` first and shows you what would be deleted: `git worktree remove`
@@ -85,6 +91,7 @@ main process.
 | Preload | `src/preload/` | `contextBridge` — exposes a minimal typed `window.api` |
 | Renderer | `src/renderer/src/` | React UI: tab strip, Command Palette, dialogs, xterm terminal tabs |
 | Shared | `src/shared/` | Types shared across processes |
+| Relay | `src/relay/` | Runs on the host for chat tabs: drives Claude Code via the Agent SDK, bundled to `resources/relay.mjs` |
 
 Security: the renderer runs with `contextIsolation: true`, `nodeIntegration:
 false`, and a strict CSP. It never touches Node, the filesystem, or `ssh2`

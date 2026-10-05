@@ -657,6 +657,94 @@ export class SshManager extends EventEmitter {
     }
   }
 
+  /**
+   * A long-lived exec channel on the pooled connection — a `tail -F`, a relay's
+   * output — with no PTY and no deadline, delivered as it arrives.
+   *
+   * The pool ref is held until the channel is gone, so the shared connection is
+   * not idled out from under a stream that is merely quiet. `onClose` fires
+   * exactly once: with an Error when the stream ended on its own (the connection
+   * dropped, or the command exited non-zero) and without one when the command
+   * finished cleanly or `close()` ended it. Closing releases the channel and the
+   * ref, never the client — see execOnPooled.
+   *
+   * A dropped connection is told apart by the missing exit status: a command that
+   * ran to the end always reports one, a channel torn down with its client never
+   * does.
+   */
+  async execStream(
+    key: string,
+    connection: Connection,
+    opts: {
+      command: string
+      password?: string
+      passphrase?: string
+      timeoutMs?: number
+      unattended?: boolean
+    },
+    onData: (b: Buffer) => void,
+    onClose: (err?: Error) => void
+  ): Promise<{ close(): void }> {
+    await this.acquire(key, connection, opts.password, opts.passphrase, opts.timeoutMs, opts.unattended)
+    const client = this.sftpPool.get(key)?.client
+    // Releases only a ref this call took: if the client has since died and a
+    // newer one now sits under the same key, that ref was never ours to drop.
+    let released = false
+    const release = (): void => {
+      if (released) return
+      released = true
+      if (this.sftpPool.get(key)?.client === client) this.closeSftp(key)
+    }
+    if (!client) {
+      release()
+      throw new Error('Connection failed to open')
+    }
+    let channel: ClientChannel
+    try {
+      channel = await new Promise<ClientChannel>((resolve, reject) =>
+        client.exec(opts.command, (err, stream) => (err ? reject(err) : resolve(stream)))
+      )
+    } catch (e) {
+      release()
+      throw e
+    }
+    let done = false
+    let closedByUs = false
+    let errTail = ''
+    const finish = (err?: Error): void => {
+      if (done) return
+      done = true
+      release()
+      onClose(err)
+    }
+    channel.on('data', (d: Buffer) => {
+      if (!done) onData(d)
+    })
+    // Unread stderr would eventually stall the channel's window; keep a little for the message.
+    channel.stderr.on('data', (d: Buffer) => {
+      errTail = (errTail + d.toString('utf-8')).slice(-300)
+    })
+    channel.on('error', (e: unknown) => finish(e instanceof Error ? e : new Error(String(e))))
+    channel.on('close', (code: number | null) => {
+      if (closedByUs || code === 0) return finish()
+      const why = errTail.trim()
+      if (code == null) return finish(new Error('Connection lost'))
+      finish(new Error(why ? `${why} (exit ${code})` : `Remote command exited with status ${code}`))
+    })
+    return {
+      close: (): void => {
+        if (done) return
+        closedByUs = true
+        try {
+          channel.close()
+        } catch {
+          /* ignore */
+        }
+        finish()
+      }
+    }
+  }
+
   // ---- SFTP ----
 
   /** How long an idle pooled connection stays open after its last release. */

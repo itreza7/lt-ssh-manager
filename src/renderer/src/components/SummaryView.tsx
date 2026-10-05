@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import type { ChatSummary } from '../../../shared/chatProtocol'
 import type {
   AgentHostScan,
   ClaudeHookStatus,
@@ -15,6 +16,7 @@ import type {
   TmuxSession
 } from '../../../shared/types'
 import { Button, Modal } from './Modal'
+import { ago, CHAT_DOT, chatLabel, chatRowStatus } from './chat/format'
 import { ClaudeSyncModal } from './ClaudeSyncModal'
 import { isClaudeSession } from '../lib/claude'
 import { agentStatus } from '../lib/agents'
@@ -33,6 +35,10 @@ interface Props {
   fetchStats: () => Promise<ServerStats>
   onAttach: (name: string) => void
   onNewSession: (name: string) => void
+  fetchChats: () => Promise<ChatSummary[]>
+  onOpenChat: (chat: ChatSummary) => void
+  onNewChat: () => void
+  onStopChat: (chatId: string) => Promise<void>
   onKillSession: (name: string) => Promise<void>
   onRenameSession: (from: string, to: string) => Promise<void>
   /** Resolve this connection's password once, for all the reads below. */
@@ -301,6 +307,10 @@ export function SummaryView({
   fetchStats,
   onAttach,
   onNewSession,
+  fetchChats,
+  onOpenChat,
+  onNewChat,
+  onStopChat,
   onKillSession,
   onRenameSession,
   resolvePassword,
@@ -326,6 +336,10 @@ export function SummaryView({
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+
+  const [chats, setChats] = useState<ChatSummary[] | null>(null)
+  const [chatsLoading, setChatsLoading] = useState(false)
+  const [chatsError, setChatsError] = useState<string | null>(null)
 
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -363,6 +377,20 @@ export function SummaryView({
       setTmux(null)
     } finally {
       setTmuxLoading(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c?.id])
+
+  const loadChats = useCallback(async () => {
+    setChatsLoading(true)
+    setChatsError(null)
+    try {
+      setChats(await fetchChats())
+    } catch (e) {
+      setChatsError(e instanceof Error ? e.message : String(e))
+      setChats(null)
+    } finally {
+      setChatsLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c?.id])
@@ -431,6 +459,7 @@ export function SummaryView({
   useEffect(() => {
     if (!c) return
     setTmux(null)
+    setChats(null)
     setStats(null)
     setEditing(null)
     setSetupOpen(false)
@@ -445,6 +474,7 @@ export function SummaryView({
     setTmuxPassthroughError(null)
     setTmuxPassthroughAction(null)
     void loadTmux()
+    void loadChats()
     void loadStats()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c?.id])
@@ -739,6 +769,80 @@ export function SummaryView({
                         </Button>
                       </div>
                     )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* chats — native conversations with Claude Code, kept alive by a relay on the host */}
+        <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '30ms' }}>
+          <div className="mb-3.5 flex items-center justify-between">
+            <span className="eyebrow">Chats</span>
+            <div className="flex items-center gap-2">
+              <RefreshButton loading={chatsLoading} onClick={() => void loadChats()} />
+              <Button variant="primary" onClick={onNewChat}>
+                New chat ▸
+              </Button>
+            </div>
+          </div>
+
+          {chatsError && (
+            <p className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+              {chatsError}
+            </p>
+          )}
+
+          {!chatsError && chatsLoading && chats === null && (
+            <p className="py-2 font-mono text-xs text-faint">looking for chats…</p>
+          )}
+
+          {!chatsError && chats !== null && chats.length === 0 && (
+            <p className="py-2 text-sm text-faint">No chats on this host yet.</p>
+          )}
+
+          {chats && chats.length > 0 && (
+            <div className="space-y-1.5">
+              {chats.map((chat) => {
+                const status = chatRowStatus(chat)
+                return (
+                  <div
+                    key={chat.chatId}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${CHAT_DOT[status]}`} title={status} />
+                        <span dir="auto" className="truncate text-sm text-fg">
+                          {chatLabel(chat)}
+                        </span>
+                        <span className="shrink-0 text-[10px] text-faint">{status}</span>
+                      </div>
+                      <div className="mt-0.5 truncate font-mono text-[11px] text-faint">
+                        {chat.config.cwd}
+                        {chat.state && ` · ${ago(chat.state.updatedAt)}`}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {chat.alive && (
+                        <IconButton
+                          title="Stop session"
+                          danger
+                          onClick={() => {
+                            if (confirm(`Stop chat “${chatLabel(chat)}”? Its conversation is kept; it can be restarted.`))
+                              void onStopChat(chat.chatId)
+                                .then(loadChats)
+                                .catch((e) => setChatsError(e instanceof Error ? e.message : String(e)))
+                          }}
+                        >
+                          ✕
+                        </IconButton>
+                      )}
+                      <Button variant="primary" onClick={() => onOpenChat(chat)}>
+                        Open ▸
+                      </Button>
+                    </div>
                   </div>
                 )
               })}

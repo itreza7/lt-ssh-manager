@@ -10,5 +10,5 @@
     "types": ["node"],
     "outDir": "./out"
   },
-  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "electron.vite.config.ts"]
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/relay/**/*", "electron.vite.config.ts", "vite.relay.config.ts"]
 }

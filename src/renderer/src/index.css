@@ -358,35 +358,56 @@ html.mac body::before {
   border-radius: 8px;
 }
 
-/* ── Reader (remote transcript as HTML) ────────────────────────────────── */
+/* ── Reader (remote transcript as HTML) and Chat ───────────────────────── */
 /* Each block picks its own direction from its first strong character, so
    Persian/Arabic paragraphs run right-to-left beside English ones. */
 .reader .md-body p,
+.chat .md-body p,
 .reader .md-body li,
+.chat .md-body li,
 .reader .md-body h1,
+.chat .md-body h1,
 .reader .md-body h2,
+.chat .md-body h2,
 .reader .md-body h3,
+.chat .md-body h3,
 .reader .md-body h4,
+.chat .md-body h4,
 .reader .md-body h5,
+.chat .md-body h5,
 .reader .md-body h6,
+.chat .md-body h6,
 .reader .md-body blockquote,
+.chat .md-body blockquote,
 .reader .md-body td,
-.reader .md-body th {
+.chat .md-body td,
+.reader .md-body th,
+.chat .md-body th {
   unicode-bidi: plaintext;
   text-align: start;
 }
 .reader .md-body ul,
-.reader .md-body ol {
+.chat .md-body ul,
+.reader .md-body ol,
+.chat .md-body ol {
   padding-left: 0;
   padding-inline-start: 1.5em;
 }
-.reader .md-body blockquote {
+.reader .md-body blockquote,
+.chat .md-body blockquote {
   border-left: 0;
   border-inline-start: 3px solid var(--color-accent);
 }
 .reader .md-body pre,
-.reader .md-body code {
+.chat .md-body pre,
+.reader .md-body code,
+.chat .md-body code {
   direction: ltr;
   unicode-bidi: isolate;
   text-align: left;
+}
+
+/* A chat message ends where its text does; the column's gap spaces messages. */
+.chat .md-body > :last-child {
+  margin-bottom: 0;
 }

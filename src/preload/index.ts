@@ -31,6 +31,13 @@ import type {
 } from '../shared/types'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import type { ReaderChunk, ReaderSession } from '../shared/claudeTranscript'
+import type {
+  ChatCommand,
+  ChatStartArgs,
+  ChatStreamData,
+  ChatStreamEnd,
+  ChatSummary
+} from '../shared/chatProtocol'
 
 export interface ConnectArgs {
   sessionId: string
@@ -407,6 +414,67 @@ const api = {
     password?: string
     session: string
   }): Promise<string | null> => ipcRenderer.invoke('reader:tmuxDir', args),
+
+  // Chat: Claude Code driven by a relay that keeps running in tmux on the host,
+  // so a turn survives the laptop sleeping or the network dropping. Every call
+  // rejects with a readable message; `chatId` is the `c` + 12 hex id chatStart returns.
+
+  /**
+   * Upload the relay if the host lacks this version, start a chat in `cwd`
+   * (`~` allowed) and return its id. `resume` continues a Claude session id.
+   */
+  chatStart: (args: ChatStartArgs): Promise<{ chatId: string }> =>
+    ipcRenderer.invoke('chat:start', args),
+
+  /** Append one command (user message, interrupt, answer, stop…) to the chat's inbox. */
+  chatSend: (args: {
+    connectionId: string
+    password?: string
+    chatId: string
+    cmd: ChatCommand
+  }): Promise<void> => ipcRenderer.invoke('chat:send', args),
+
+  /**
+   * Follow events.jsonl from byte `offset` (0 = replay everything). Results come
+   * through onChatData / onChatEnd tagged with the returned streamId. After an
+   * end with an error, open a new stream at the last `next` seen.
+   */
+  chatStream: (args: {
+    connectionId: string
+    password?: string
+    chatId: string
+    offset: number
+  }): Promise<{ streamId: string }> => ipcRenderer.invoke('chat:stream', args),
+
+  /** Stop following. onChatEnd then fires for that stream without an error. */
+  chatUnstream: (args: { streamId: string }): Promise<void> =>
+    ipcRenderer.invoke('chat:unstream', args),
+
+  /** Every chat on the host, newest first, with whether its relay is running. */
+  chatList: (args: { connectionId: string; password?: string }): Promise<ChatSummary[]> =>
+    ipcRenderer.invoke('chat:list', args),
+
+  /** Ask the relay to stop; its tmux session is killed if it is still there 5 s later. */
+  chatStop: (args: { connectionId: string; password?: string; chatId: string }): Promise<void> =>
+    ipcRenderer.invoke('chat:stop', args),
+
+  /** Start the relay again, resuming the last Claude session. No-op while it is running. */
+  chatRestart: (args: { connectionId: string; password?: string; chatId: string }): Promise<void> =>
+    ipcRenderer.invoke('chat:restart', args),
+
+  /** Whole events from a stream, batched (at most every 50 ms); `next` is the byte offset after them. */
+  onChatData: (cb: (data: ChatStreamData) => void): (() => void) => {
+    const h = (_e: unknown, data: ChatStreamData): void => cb(data)
+    ipcRenderer.on('chat:data', h)
+    return () => ipcRenderer.removeListener('chat:data', h)
+  },
+
+  /** A stream ended: closed on request (no `error`), or dropped (connection lost, chat gone). */
+  onChatEnd: (cb: (end: ChatStreamEnd) => void): (() => void) => {
+    const h = (_e: unknown, end: ChatStreamEnd): void => cb(end)
+    ipcRenderer.on('chat:end', h)
+    return () => ipcRenderer.removeListener('chat:end', h)
+  },
 
   // Global Claude config sync (~/.claude, plus ~/.claude.json's mcpServers) between
   // this computer and a remote host

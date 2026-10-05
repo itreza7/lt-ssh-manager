@@ -632,7 +632,7 @@ export interface TunnelStatus {
  * come back.
  */
 export interface PersistedTab {
-  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees' | 'reader'
+  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees' | 'reader' | 'chat'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -644,6 +644,7 @@ export interface PersistedTab {
   initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo; reader: the project directory (absent = all projects)
   path?: string // editor: remote file path
   name?: string // editor: file name
+  chatId?: string // chat: the relay's chat id (c + 12 hex), see chatProtocol.ts
   /**
    * session/tmux: a stable id for this tab, independent of the live (regenerated
    * every launch) session id. Keys the prompt composer's persisted draft, so a
