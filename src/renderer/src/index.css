@@ -28,8 +28,11 @@
   --color-accent: #d97757;
   --color-accent-soft: color-mix(in srgb, var(--color-accent) 22%, var(--color-ink));
 
-  --font-sans: 'Hanken Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Code', Consolas, monospace;
+  /* Vazirmatn second in each stack: Latin stays in the primary font, while
+     Persian/Arabic letters (which none of the primaries carry) fall to it
+     instead of whatever system font the OS picks. */
+  --font-sans: 'Hanken Grotesk Variable', 'Vazirmatn Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'Vazirmatn Variable', ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
 
 :root {
@@ -56,7 +59,7 @@
    the theme token rather than branch every call site, since font-sans already
    resolves through this one CSS variable everywhere it's used. */
 html.mac {
-  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Vazirmatn Variable', system-ui, sans-serif;
 }
 
 /* Every interactive element gets a pointer on hover. */
@@ -353,4 +356,37 @@ html.mac body::before {
 .md-body img {
   max-width: 100%;
   border-radius: 8px;
+}
+
+/* ── Reader (remote transcript as HTML) ────────────────────────────────── */
+/* Each block picks its own direction from its first strong character, so
+   Persian/Arabic paragraphs run right-to-left beside English ones. */
+.reader .md-body p,
+.reader .md-body li,
+.reader .md-body h1,
+.reader .md-body h2,
+.reader .md-body h3,
+.reader .md-body h4,
+.reader .md-body h5,
+.reader .md-body h6,
+.reader .md-body blockquote,
+.reader .md-body td,
+.reader .md-body th {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+.reader .md-body ul,
+.reader .md-body ol {
+  padding-left: 0;
+  padding-inline-start: 1.5em;
+}
+.reader .md-body blockquote {
+  border-left: 0;
+  border-inline-start: 3px solid var(--color-accent);
+}
+.reader .md-body pre,
+.reader .md-body code {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
 }

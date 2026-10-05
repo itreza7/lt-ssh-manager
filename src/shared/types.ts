@@ -632,7 +632,7 @@ export interface TunnelStatus {
  * come back.
  */
 export interface PersistedTab {
-  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees'
+  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees' | 'reader'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -641,7 +641,7 @@ export interface PersistedTab {
    * before that carry only `command`, which parseTmuxIntent() recovers this from.
    */
   tmux?: TmuxIntent
-  initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo
+  initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo; reader: the project directory (absent = all projects)
   path?: string // editor: remote file path
   name?: string // editor: file name
   /**

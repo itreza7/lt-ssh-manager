@@ -16,6 +16,7 @@ interface Props {
   showLeaf: (id: string) => void
   attachFromInbox: (connectionId: string, session: string) => void
   openSummary: () => void
+  openReader: () => void
 }
 
 /** How many rows one section shows — a jump list, not the full inbox. */
@@ -54,7 +55,8 @@ export function CommandPalette({
   selectConnection,
   showLeaf,
   attachFromInbox,
-  openSummary
+  openSummary,
+  openReader
 }: Props) {
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -137,6 +139,23 @@ export function CommandPalette({
     }
   }, [q, openSummary])
 
+  const readerResult = useMemo<ResultItem | null>(() => {
+    const label = 'Claude reader'
+    if (!label.toLowerCase().includes(q)) return null
+    return {
+      key: 'action:reader',
+      label,
+      sub: 'Read a conversation with right-to-left text support',
+      icon: <span className="text-accent">¶</span>,
+      run: () => openReader()
+    }
+  }, [q, openReader])
+
+  const actionResults = useMemo(
+    () => [summaryResult, readerResult].filter((r): r is ResultItem => r !== null),
+    [summaryResult, readerResult]
+  )
+
   const sections = useMemo(
     () =>
       [
@@ -148,8 +167,8 @@ export function CommandPalette({
   )
 
   const flatResults = useMemo(
-    () => [...sections.flatMap((s) => s.items), ...(summaryResult ? [summaryResult] : [])],
-    [sections, summaryResult]
+    () => [...sections.flatMap((s) => s.items), ...actionResults],
+    [sections, actionResults]
   )
 
   const resultIndex = useMemo(() => {
@@ -229,7 +248,9 @@ export function CommandPalette({
             </div>
           ))}
 
-          {summaryResult && <div className="mt-1 border-t border-line/70 pt-1">{row(summaryResult)}</div>}
+          {actionResults.length > 0 && (
+            <div className="mt-1 border-t border-line/70 pt-1">{actionResults.map(row)}</div>
+          )}
 
           {flatResults.length === 0 && (
             <p className="px-3 py-8 text-center text-xs text-faint">No matches.</p>

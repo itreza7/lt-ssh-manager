@@ -32,6 +32,7 @@ import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { WorktreeView } from './components/WorktreeView'
+import { ReaderView } from './components/ReaderView'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
@@ -137,6 +138,17 @@ interface WorktreeTab {
   password?: string
 }
 
+/** A Claude conversation read from the server's transcript files, as HTML. */
+interface ReaderTab {
+  kind: 'reader'
+  id: string // `rd:${connectionId}:${dir ?? ''}`
+  connectionId: string
+  /** Show only this project directory's transcripts; without it, every project's. */
+  dir?: string
+  title: string
+  password?: string
+}
+
 // A "leaf" — one unit of content. Leaves live inside views (see below).
 export type Tab =
   | SummaryTab
@@ -147,6 +159,7 @@ export type Tab =
   | EditorTab
   | TunnelTab
   | WorktreeTab
+  | ReaderTab
 
 /**
  * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
@@ -198,6 +211,10 @@ interface PwRequest {
 
 const tunId = (connectionId: string): string => `tun:${connectionId}`
 
+const readerId = (connectionId: string, dir?: string): string => `rd:${connectionId}:${dir ?? ''}`
+const readerTitle = (host: string, dir?: string): string =>
+  `Reader · ${dir ? (dir.split('/').filter(Boolean).pop() ?? '/') : host}`
+
 // Strip a live tab down to what's safe + sufficient to recreate it later.
 // Passwords and volatile session ids/status are intentionally omitted.
 function serializeTab(t: Tab): PersistedTab {
@@ -237,6 +254,8 @@ function serializeTab(t: Tab): PersistedTab {
         title: t.title,
         initialPath: t.dir
       }
+    case 'reader':
+      return { kind: 'reader', connectionId: t.connectionId, title: t.title, initialPath: t.dir }
   }
 }
 
@@ -391,6 +410,7 @@ export default function App() {
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
     if (t.kind === 'worktrees') return <span className={c}>⑂</span>
+    if (t.kind === 'reader') return <span className={c}>¶</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
 
@@ -991,6 +1011,21 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
+      } else if (pt.kind === 'reader') {
+        const pw = await getPw(conn)
+        if (pw === null) continue
+        const id = readerId(conn.id, pt.initialPath)
+        if (!has(id))
+          built.push({
+            kind: 'reader',
+            id,
+            connectionId: conn.id,
+            dir: pt.initialPath,
+            title: pt.title ?? readerTitle(conn.name, pt.initialPath),
+            password: pw ?? undefined
+          })
+        if (makeActive) activeId = id
+        idForIndex.set(i, id)
       }
     }
 
@@ -1211,6 +1246,72 @@ export default function App() {
           ]
     )
     showLeaf(id)
+  }
+
+  /**
+   * Open the transcript reader for a connection, scoped to `dir` when given.
+   *
+   * Beside a terminal it opens in a split — the point is to read the answer next
+   * to the agent that is writing it. That means: into an empty pane of the
+   * current split if there is one, else growing the split by one (max 3). From
+   * any other leaf (Summary, files…) there is nothing to read beside, so it
+   * just gets its own tab.
+   */
+  const openReader = (connectionId: string, password: string | undefined, dir?: string): void => {
+    const id = readerId(connectionId, dir)
+    if (tabs.some((x) => x.id === id)) {
+      showLeaf(id)
+      return
+    }
+    setTabs((t) => [
+      ...t,
+      { kind: 'reader', id, connectionId, dir, title: readerTitle(nameOf(connectionId), dir), password }
+    ])
+    const v = activeView
+    const beside = activeTab?.kind === 'session' || activeTab?.kind === 'tmux'
+    if (v && beside) {
+      const empty = v.panes.indexOf(null)
+      if (empty >= 0) {
+        fillPane(v.id, empty, id)
+        return
+      }
+      if (v.panes.length < 3) {
+        applySplit(v.direction, v.panes.length + 1)
+        fillPane(v.id, v.panes.length, id)
+        return
+      }
+    }
+    showLeaf(id)
+  }
+
+  // The reader for a terminal tab: scoped to the directory its tmux session is
+  // in, if it is one. Without tmux there is no way to ask the remote where the
+  // shell is, so that reader lists every project.
+  const openReaderForTab = async (tab: SessionTab | ControlTab): Promise<void> => {
+    const dir = tab.tmux
+      ? await window.api
+          .readerTmuxDir({
+            connectionId: tab.connectionId,
+            password: tab.password,
+            session: tab.tmux.session
+          })
+          .catch(() => null)
+      : null
+    openReader(tab.connectionId, tab.password, dir ?? undefined)
+  }
+
+  // Command palette: the reader for whatever is on screen.
+  const openReaderFromActive = async (): Promise<void> => {
+    if (activeTab?.kind === 'session' || activeTab?.kind === 'tmux') {
+      await openReaderForTab(activeTab)
+      return
+    }
+    const conn = connections.find((c) => c.id === (selectedConnId ?? activeConnectionId))
+    if (!conn) return
+    const password = activeTab && 'password' in activeTab ? activeTab.password : undefined
+    const pw = password ?? (await resolvePassword(conn))
+    if (pw === null) return // user cancelled the prompt
+    openReader(conn.id, pw)
   }
 
   const fetchTmuxFor = (conn: Connection) => async () => {
@@ -1814,6 +1915,7 @@ export default function App() {
                   onAgentSignal={onAgentSignal}
                   draftKey={tab.tabKey}
                   initialDraft={drafts[tab.tabKey] ?? ''}
+                  onOpenReader={() => void openReaderForTab(tab)}
                 />
                 {paneTools(tab.id)}
               </div>
@@ -1842,6 +1944,7 @@ export default function App() {
                 onAgentSignal={onAgentSignal}
                 draftKey={tab.tabKey}
                 initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
+                onOpenReader={() => void openReaderForTab(tab)}
               />
               {paneTools(tab.id)}
             </div>
@@ -1918,6 +2021,26 @@ export default function App() {
                     // several of these at once is what this pane is for.
                     if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
                   }}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* readers stay mounted so the open conversation and scroll position
+              survive a tab switch, and polling only runs while one is on screen */}
+          {tabs
+            .filter((t): t is ReaderTab => t.kind === 'reader')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <ReaderView
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  dir={tab.dir}
+                  active={onScreen(tab.id)}
                 />
                 {paneTools(tab.id)}
               </div>
@@ -2021,6 +2144,7 @@ export default function App() {
         showLeaf={showLeaf}
         attachFromInbox={attachFromInbox}
         openSummary={openSummary}
+        openReader={() => void openReaderFromActive()}
       />
     </div>
   )

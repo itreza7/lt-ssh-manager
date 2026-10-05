@@ -52,6 +52,8 @@ interface Props {
   draftKey: string
   /** The per-pane drafts last persisted for this tab, loaded before mount so they aren't lost on restart. */
   initialDrafts?: Record<string, string>
+  /** Open the transcript reader beside this tab — offered in the composer. */
+  onOpenReader?: () => void
   /** Lets a header button toggle the focused pane's composer without owning its state. */
   ref?: Ref<ComposerHandle>
 }
@@ -93,6 +95,7 @@ export function TmuxControlView({
   onAgentSignal,
   draftKey,
   initialDrafts,
+  onOpenReader,
   ref
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
@@ -624,6 +627,7 @@ export function TmuxControlView({
         onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
         target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
         onSendKey={sendKey}
+        onOpenReader={onOpenReader}
       />
 
       {overlay && (

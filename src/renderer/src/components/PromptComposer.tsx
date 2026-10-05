@@ -95,6 +95,8 @@ interface Props {
   /** Send a raw key chord straight through, unbracketed — for quick actions
    *  like Shift+Tab that Claude Code reads as a keypress, not text. */
   onSendKey: (data: string) => void
+  /** Open the transcript reader beside this terminal; hides the button if unset. */
+  onOpenReader?: () => void
 }
 
 /** The three heights this panel occupies, ordered short to tall. */
@@ -133,7 +135,8 @@ export function PromptComposer({
   onClose,
   onDiscard,
   target,
-  onSendKey
+  onSendKey,
+  onOpenReader
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -445,6 +448,15 @@ export function PromptComposer({
             <span className="eyebrow shrink-0 text-accent">prompt composer</span>
             {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
             <div className="flex-1" />
+            {onOpenReader && (
+              <button
+                onClick={onOpenReader}
+                title="Read this conversation with right-to-left text support"
+                className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-fg"
+              >
+                Reader
+              </button>
+            )}
             <button
               onClick={() => setHistoryOpen((v) => !v)}
               title="Browse and search sent prompts"
@@ -503,6 +515,7 @@ export function PromptComposer({
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 spellCheck={false}
+                dir="auto"
                 rows={3}
                 placeholder="Write as many lines as you like — nothing reaches the remote until you send."
                 className="mx-3 mt-1.5 resize-none overflow-y-auto rounded-lg border border-line bg-ink/60 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition-colors placeholder:text-faint/70 focus:border-accent/60"

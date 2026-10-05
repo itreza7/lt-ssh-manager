@@ -30,6 +30,7 @@ import type {
   WorktreeScan
 } from '../shared/types'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
+import type { ReaderChunk, ReaderSession } from '../shared/claudeTranscript'
 
 export interface ConnectArgs {
   sessionId: string
@@ -377,6 +378,35 @@ const api = {
     path: string
     password?: string
   }): Promise<WorktreeInspect> => ipcRenderer.invoke('git:worktreeInspect', args),
+
+  /**
+   * Claude Code transcripts on the server, newest first (max 50). With `dir`,
+   * only that project's; without, every project's.
+   */
+  readerSessions: (args: {
+    connectionId: string
+    password?: string
+    dir?: string
+  }): Promise<ReaderSession[]> => ipcRenderer.invoke('reader:sessions', args),
+
+  /**
+   * Whole lines of a transcript from byte `offset`. `tail` is the first load:
+   * only the last 4 MiB. Pass the result's `next` back as the next `offset`.
+   */
+  readerRead: (args: {
+    connectionId: string
+    password?: string
+    path: string
+    offset: number
+    tail?: boolean
+  }): Promise<ReaderChunk> => ipcRenderer.invoke('reader:read', args),
+
+  /** The directory a tmux session's active pane is in, or null. */
+  readerTmuxDir: (args: {
+    connectionId: string
+    password?: string
+    session: string
+  }): Promise<string | null> => ipcRenderer.invoke('reader:tmuxDir', args),
 
   // Global Claude config sync (~/.claude, plus ~/.claude.json's mcpServers) between
   // this computer and a remote host

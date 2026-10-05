@@ -38,6 +38,8 @@ interface Props {
   draftKey: string
   /** The draft last persisted for this tab, loaded before mount so it isn't lost on restart. */
   initialDraft?: string
+  /** Open the transcript reader beside this terminal — offered in the composer. */
+  onOpenReader?: () => void
   /** Lets a header button trigger this pane's composer without owning its state. */
   ref?: Ref<ComposerHandle>
 }
@@ -56,6 +58,7 @@ export function TerminalView({
   onAgentSignal,
   draftKey,
   initialDraft,
+  onOpenReader,
   ref
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
@@ -632,6 +635,7 @@ export function TerminalView({
         onClose={closeComposer}
         onDiscard={() => setDraft('')}
         onSendKey={sendKey}
+        onOpenReader={onOpenReader}
       />
     </div>
   )

@@ -71,6 +71,12 @@ import {
 } from './claudeSync'
 import { agentScanScript, parseAgentScan } from '../shared/agents'
 import { SEP, shQuote, shWrap } from '../shared/shell'
+import {
+  PROJECT_SLUG_MAX,
+  projectSlug,
+  type ReaderChunk,
+  type ReaderSession
+} from '../shared/claudeTranscript'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
   MAX_BRANCHES,
@@ -1649,6 +1655,165 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         MAX_INSPECT * 4096 + 65536
       )
       return parseWorktreeInspect(out.toString('utf-8'))
+    }
+  )
+
+  // ---- Reader (Claude Code transcripts, read off the remote) ----
+
+  /** The most one read pulls from a transcript — also how far back a first load looks. */
+  const READER_CHUNK_MAX = 4 * 1024 * 1024
+  const READER_SESSIONS_MAX = 50
+
+  /**
+   * Run one script on the connection's pooled client, raw bytes, exit code kept.
+   *
+   * Unlike gitExec the exit code is the caller's to read: a missing transcript
+   * directory is an empty answer here, not an error.
+   */
+  const readerExec = async (
+    connectionId: string,
+    password: string | undefined,
+    script: string,
+    maxBytes: number,
+    deadlineMs = 15000
+  ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> => {
+    const connection = connectionStore.get(connectionId)
+    if (!connection) throw new Error('Connection not found')
+    return ssh.execBytes(connectionId, connection, {
+      command: shWrap(script),
+      password: passwordFor(connectionId, password),
+      timeoutMs: 15000,
+      deadlineMs,
+      maxBytes
+    })
+  }
+
+  /**
+   * Transcripts on the server, newest first.
+   *
+   * With `dir`, only that project's folder; without, every project's. Sorting and
+   * the cap happen here, not on the server: `stat` is the only portable way to
+   * get mtimes, and `ls -t` would tie the order to a locale and to filenames
+   * that are never printable.
+   */
+  ipcMain.handle(
+    'reader:sessions',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; dir?: string }
+    ): Promise<ReaderSession[]> => {
+      // `find -exec {} +` rather than a glob into `stat "$@"`: every project's
+      // transcripts at once can be more paths than ARG_MAX allows.
+      let roots = '"$HOME"/.claude/projects -mindepth 2 -maxdepth 2'
+      if (args.dir) {
+        const slug = projectSlug(args.dir)
+        // Claude Code cuts a long slug and appends a hash we can't reproduce, so
+        // such a project is matched by its prefix.
+        const folder =
+          slug.length > PROJECT_SLUG_MAX ? `${shQuote(slug.slice(0, PROJECT_SLUG_MAX))}-*` : shQuote(slug)
+        roots = `"$HOME"/.claude/projects/${folder} -mindepth 1 -maxdepth 1`
+      }
+      const find = `find ${roots} -type f -name '*.jsonl' -exec stat`
+      // GNU and BSD stat disagree on every flag; probe which one this host has.
+      const script =
+        `if stat -c %Y / >/dev/null 2>&1; then ${find} -c '%Y %s %n' {} +; ` +
+        `else ${find} -f '%m %z %N' {} +; fi 2>/dev/null${SEP}exit 0`
+      // A line is a path plus two numbers; 4 MiB is thousands of transcripts.
+      const res = await readerExec(args.connectionId, args.password, script, 4 * 1024 * 1024)
+      const out: ReaderSession[] = []
+      for (const line of res.stdout.toString('utf-8').split('\n')) {
+        const m = /^(\d+) (\d+) (\/.*\.jsonl)$/.exec(line)
+        if (m) out.push({ mtime: Number(m[1]), size: Number(m[2]), path: m[3] })
+      }
+      return out.sort((a, b) => b.mtime - a.mtime).slice(0, READER_SESSIONS_MAX)
+    }
+  )
+
+  /**
+   * Read a transcript from a byte offset, whole lines only.
+   *
+   * The script prints `<size> <start>` and a newline, then the bytes. Offsets are
+   * bytes because the file is appended to while it is read: a character offset
+   * would drift on the first multi-byte character, and Persian is all of them.
+   */
+  ipcMain.handle(
+    'reader:read',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; path: string; offset: number; tail?: boolean }
+    ): Promise<ReaderChunk> => {
+      // Only what Claude Code writes is readable: this is a transcript reader,
+      // not a way for the renderer to cat any file the SSH user can open.
+      if (
+        !args.path.startsWith('/') ||
+        !args.path.endsWith('.jsonl') ||
+        !args.path.includes('/.claude/projects/') ||
+        args.path.split('/').includes('..')
+      ) {
+        throw new Error('Not a Claude Code transcript path')
+      }
+      const offset = Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset)) : 0
+      const script =
+        `f=${shQuote(args.path)}${SEP}` +
+        // The renderer-side check above can't know the remote $HOME.
+        `case "$f" in "$HOME"/.claude/projects/*) ;; *) exit 4;; esac${SEP}` +
+        `[ -f "$f" ] || exit 3${SEP}` +
+        `sz=$(( $(wc -c < "$f") ))${SEP}` +
+        (args.tail
+          ? `o=$(( sz - ${READER_CHUNK_MAX} ))${SEP}[ "$o" -lt 0 ] && o=0${SEP}`
+          : // A file that shrank (rewritten, compacted) is read again from the top.
+            `o=${offset}${SEP}[ "$o" -gt "$sz" ] && o=0${SEP}`) +
+        `echo "$sz $o"${SEP}tail -c +$(( o + 1 )) "$f" | head -c ${READER_CHUNK_MAX}`
+      // A first load pulls up to 4 MiB, which needs longer than a list on a slow link.
+      const res = await readerExec(args.connectionId, args.password, script, READER_CHUNK_MAX + 1024, 90000)
+      const nl = res.stdout.indexOf(0x0a)
+      const header = nl < 0 ? null : /^(\d+) (\d+)$/.exec(res.stdout.subarray(0, nl).toString('latin1'))
+      if (!header) {
+        throw new Error(
+          res.code === 3
+            ? 'Transcript no longer exists'
+            : res.code === 4
+              ? 'Not a Claude Code transcript path'
+              : res.stderr.trim() || 'Failed to read transcript'
+        )
+      }
+      const size = Number(header[1])
+      let start = Number(header[2])
+      let body = res.stdout.subarray(nl + 1)
+      if (args.tail && start > 0) {
+        // Started mid-file, so the first line is most likely a fragment.
+        const cut = body.indexOf(0x0a)
+        const drop = cut < 0 ? body.length : cut + 1
+        start += drop
+        body = body.subarray(drop)
+      }
+      const last = body.lastIndexOf(0x0a)
+      if (last < 0) {
+        // No complete line. Normally a line still being written, left for the
+        // next read. But a full chunk with no newline is one line bigger than
+        // the cap — skip it, or every later read would stall on the same bytes.
+        return { size, text: '', next: body.length >= READER_CHUNK_MAX ? start + body.length : start }
+      }
+      const whole = body.subarray(0, last + 1)
+      return { size, text: whole.toString('utf-8'), next: start + whole.length }
+    }
+  )
+
+  /** The directory a tmux session's active pane is in, or null if it can't be told. */
+  ipcMain.handle(
+    'reader:tmuxDir',
+    async (
+      _e,
+      args: { connectionId: string; password?: string; session: string }
+    ): Promise<string | null> => {
+      // Names tmux would parse as more than a session can't be targeted exactly.
+      if (/[:.]/.test(args.session) || args.session.startsWith('$')) return null
+      // `=` makes the match exact (tmux otherwise takes a name prefix), and the
+      // trailing `:` makes it a session — a bare `=name` resolves to no pane.
+      const script = `tmux display -p -t ${shQuote('=' + args.session + ':')} '#{pane_current_path}'`
+      const res = await readerExec(args.connectionId, args.password, script, 65536)
+      const dir = res.stdout.toString('utf-8').trim()
+      return res.code === 0 && dir ? dir : null
     }
   )
 
