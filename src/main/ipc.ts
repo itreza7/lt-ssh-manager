@@ -80,10 +80,14 @@ import {
 import type {
   ChatAnswer,
   ChatKeysResult,
+  ChatCommandInfo,
+  ChatMode,
+  ChatScreenInfo,
   ChatSession,
   ChatStreamData,
   ChatStreamEnd,
-  ChatTarget
+  ChatTarget,
+  WorkflowAgent
 } from '../shared/chatProtocol'
 import {
   CHAT_LIST_SCRIPT,
@@ -91,7 +95,20 @@ import {
   isUuid,
   parseChatSessions
 } from '../shared/claudeSessions'
-import { INTERRUPT, KEY, MARK, inputHasDraft, parsePrompt, promptHasOption, type TuiPrompt } from '../shared/tuiKeys'
+import {
+  DIALOG_FOOTER,
+  EFFORT_LEVELS,
+  INTERRUPT,
+  KEY,
+  MARK,
+  MODE_FOOTER,
+  MODE_MAX_PRESSES,
+  inputHasDraft,
+  parseDialogText,
+  parseFooter,
+  parsePrompt,
+  promptHasOption
+} from '../shared/tuiKeys'
 import { claudeResumeSessionName, claudeScript, claudeSessionName } from '../shared/claude'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
@@ -2075,6 +2092,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if ([MARK.question, MARK.plan, MARK.permission, MARK.review].some((m) => screen.includes(m))) throw chatFail('screen')
   }
 
+  /** A command or Shift+Tab also lands in the /model picker, /usage or /status: anything with the dialog footer. */
+  const chatRefuseAnyDialog = async (t: ChatTarget, pane: string): Promise<void> => {
+    await chatRefuseDialog(t, pane)
+    if ((await chatScreen(t, pane)).includes(DIALOG_FOOTER)) throw chatFail('screen')
+  }
+
   const chatRefuseDraft = async (t: ChatTarget, pane: string): Promise<void> => {
     if (inputHasDraft(await chatScreen(t, pane, true))) throw chatFail('draft')
   }
@@ -2136,9 +2159,275 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     })
   })
 
-  ipcMain.handle('chat:prompt', (_e, args: ChatTarget & { pane: string }): Promise<TuiPrompt | null> => {
+  /** The dialog on screen and the footer under the input box, from one capture. */
+  ipcMain.handle('chat:prompt', async (_e, args: ChatTarget & { pane: string }): Promise<ChatScreenInfo> => {
     const pane = chatPaneOf(args.pane)
-    return chatScreen(args, pane).then(parsePrompt)
+    const screen = await chatScreen(args, pane)
+    return { prompt: parsePrompt(screen), footer: parseFooter(screen) }
+  })
+
+  /** Shift+Tab until the footer's mode line names `mode`. */
+  ipcMain.handle('chat:mode', (_e, args: ChatTarget & { pane: string; mode: ChatMode }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    return chatKeys(args, pane, async () => {
+      if (typeof args.mode !== 'string' || !Object.prototype.hasOwnProperty.call(MODE_FOOTER, args.mode)) {
+        throw chatFail('error', 'Invalid mode')
+      }
+      // Shift+Tab inside a dialog moves its selection; only press it on the plain screen.
+      await chatRefuseAnyDialog(args, pane)
+      let start: string | undefined
+      for (let presses = 0; ; presses++) {
+        const footer = parseFooter(await chatScreen(args, pane))
+        if (footer?.mode === args.mode) return
+        if (presses === 0) start = footer?.mode
+        // Back at the first mode after a full cycle: this Claude does not offer that one.
+        else if (footer?.mode === start) throw chatFail('error', 'This Claude does not offer that mode')
+        // No mode line to read, or the cycle has not reached it (this Claude may not allow that mode).
+        if (!footer?.mode || presses >= MODE_MAX_PRESSES) throw chatFail('screen')
+        await chatNamed(args, pane, KEY.shiftTab)
+        await chatWait(800)
+      }
+    })
+  })
+
+  // ---- slash commands ----
+
+  const COMMAND_NAME_RE = /^[A-Za-z0-9._:-]+$/
+  const COMMAND_SOURCE_CAP = 1500
+
+  /** A cwd the commands script may look under: absolute, one line, no `..`. */
+  const chatCwdOf = (v: unknown): string => {
+    if (typeof v !== 'string' || !v.startsWith('/') || /[\0\n\r]/.test(v) || v.split('/').includes('..')) throw new Error('Invalid working directory')
+    return v.replace(/\/+$/, '') || '/'
+  }
+
+  /** `description:` out of a SKILL.md / command file's frontmatter, else its first line of text. */
+  const commandDescription = (body: string): string => {
+    const lines = body.replace(/\r/g, '').split('\n')
+    let i = 0
+    let found: string | undefined
+    if (lines[0]?.trim() === '---') {
+      for (i = 1; i < lines.length && lines[i].trim() !== '---'; i++) {
+        const m = /^description\s*:\s*(.*)$/.exec(lines[i])
+        if (!m) continue
+        let v = m[1].trim()
+        // A block scalar (`>` or `|`) keeps its text on the indented lines below.
+        if (/^[>|][+-]?$/.test(v)) {
+          const parts: string[] = []
+          for (let k = i + 1; k < lines.length && /^\s+\S/.test(lines[k]); k++) parts.push(lines[k].trim())
+          v = parts.join(' ')
+        }
+        found = v.replace(/^(["'])([\s\S]*)\1$/, '$2')
+        break
+      }
+      const text = found?.replace(/\s+/g, ' ').trim()
+      if (text) return text.slice(0, 200)
+      i++ // past the closing ---
+    }
+    for (; i < lines.length; i++) {
+      const l = lines[i].trim()
+      if (l && l !== '---') return l.replace(/^#+\s*/, '').slice(0, 200)
+    }
+    return ''
+  }
+
+  const COMMAND_SOURCES: ReadonlySet<string> = new Set<ChatCommandInfo['source']>(['skill', 'command', 'project-skill', 'project-command'])
+
+  /** Skills and commands under ~/.claude and <cwd>/.claude: one exec, read in full by the host, parsed here. */
+  const chatCommandsOf = async (t: ChatTarget, cwdIn: unknown): Promise<ChatCommandInfo[]> => {
+    const cwd = chatCwdOf(cwdIn)
+    const emit =
+      `emit() { src=$1; d=$2; shift 2; for f in "$@"; do [ -f "$f" ] || continue; ` +
+      `printf '\\001%s\\002%s\\002\\n' "$src" "\${f#"$d"/}"; head -n 40 "$f" | head -c ${COMMAND_SOURCE_CAP}; printf '\\n'; done; }`
+    const script =
+      `${emit}${SEP}C=${shQuote(cwd)}${SEP}` +
+      `emit skill "$HOME/.claude/skills" "$HOME"/.claude/skills/*/SKILL.md${SEP}` +
+      `emit command "$HOME/.claude/commands" "$HOME"/.claude/commands/*.md "$HOME"/.claude/commands/*/*.md${SEP}` +
+      `emit project-skill "$C/.claude/skills" "$C"/.claude/skills/*/SKILL.md${SEP}` +
+      `emit project-command "$C/.claude/commands" "$C"/.claude/commands/*.md "$C"/.claude/commands/*/*.md${SEP}true`
+    const res = await chatExec(t, script, { maxBytes: 4 * 1024 * 1024 })
+    const out: ChatCommandInfo[] = []
+    for (const part of res.stdout.toString('utf-8').split('\x01').slice(1)) {
+      const m = /^([a-z-]+)\x02([^\x02\n]*)\x02\n([\s\S]*)$/.exec(part)
+      if (!m || !COMMAND_SOURCES.has(m[1])) continue
+      const source = m[1] as ChatCommandInfo['source']
+      const rel = m[2]
+      // A skill is its folder's name; a command is its file's name, whatever folder it is in (commands/a/b.md -> b).
+      const name = source.endsWith('skill') ? rel.split('/')[0] : rel.replace(/\.md$/, '').split('/').pop()!
+      if (!COMMAND_NAME_RE.test(name)) continue
+      out.push({ name, description: commandDescription(m[3]), source })
+    }
+    return out
+  }
+
+  ipcMain.handle('chat:commands', (_e, args: ChatTarget & { cwd: string }): Promise<ChatCommandInfo[]> => chatCommandsOf(args, args.cwd))
+
+  /**
+   * A slash command typed into the pane. Only what the chat offers: /compact (with
+   * optional instructions), /clear, /context, /usage, /effort <level>, and a skill or
+   * command the host lists for `cwd`. /usage opens a dialog: its text is read off the
+   * screen, then it is closed with Escape, and the text comes back for the chat to show.
+   */
+  ipcMain.handle(
+    'chat:command',
+    async (_e, args: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string }> => {
+      const pane = chatPaneOf(args.pane)
+      let text: string | undefined
+      const res = await chatKeys(args, pane, async () => {
+        const command = typeof args.command === 'string' ? args.command.trim() : ''
+        if (!command.startsWith('/') || command.length > 4000 || /[\0\r\n]/.test(command)) throw chatFail('error', 'Invalid command')
+        const [name, ...rest] = command.slice(1).split(/\s+/)
+        const tail = rest.join(' ')
+        let dialog = false
+        if (name === 'compact') {
+          // Trailing text is instructions for the summary.
+        } else if (name === 'clear' || name === 'context') {
+          if (tail) throw chatFail('error', 'Invalid command')
+        } else if (name === 'usage') {
+          if (tail) throw chatFail('error', 'Invalid command')
+          dialog = true
+        } else if (name === 'effort') {
+          if (!(EFFORT_LEVELS as readonly string[]).includes(tail)) throw chatFail('error', 'Invalid effort level')
+        } else {
+          if (!COMMAND_NAME_RE.test(name) || !(await chatCommandsOf(args, args.cwd)).some((c) => c.name === name)) {
+            throw chatFail('error', 'Unknown command')
+          }
+        }
+        await chatRefuseAnyDialog(args, pane)
+        await chatRefuseDraft(args, pane)
+        await chatLiteral(args, pane, `/${name}${tail ? ' ' + tail : ''}`)
+        await chatNamed(args, pane, KEY.enter)
+        if (!dialog) return
+        await chatWait(2500)
+        let body = parseDialogText(await chatScreen(args, pane))
+        if (!body) {
+          await chatWait(1500)
+          body = parseDialogText(await chatScreen(args, pane))
+        }
+        // Escape only closes a dialog that is there: on the plain screen it would interrupt a turn.
+        if (!body) {
+          // A slow render may still open it; leave nothing open for the next command to type into.
+          if ((await chatScreen(args, pane)).includes(DIALOG_FOOTER)) await chatNamed(args, pane, KEY.escape)
+          throw chatFail('screen', `${DIALOG_FOOTER} was not on screen`)
+        }
+        await chatNamed(args, pane, KEY.escape)
+        text = body
+      })
+      return res.ok && text !== undefined ? { ...res, text } : res
+    }
+  )
+
+  // ---- running workflows ----
+
+  /** The workflow directory the journal lives in: absolute, no `..`, under ~/.claude/projects, named wf_*. */
+  const WORKFLOW_DIR_RE = /\/subagents\/workflows\/wf_[A-Za-z0-9_-]+$/
+  const JOURNAL_CAP = 700_000
+  // A result line holds the agent's whole output; only the start of each line is read.
+  const JOURNAL_LINE_CAP = 1500
+  const JOURNAL_META_CAP = 2000
+  const PREVIEW_CAP = 200
+
+  const parseJournal = (raw: string): WorkflowAgent[] => {
+    const [journal, ...metas] = raw.split('\x01')
+    const agents = new Map<string, WorkflowAgent>()
+    const get = (id: string): WorkflowAgent => {
+      let a = agents.get(id)
+      if (!a) {
+        a = { agentId: id, label: id, state: 'running' }
+        agents.set(id, a)
+      }
+      return a
+    }
+    const meta = new Map<string, { agentType?: string; description?: string; phase?: string }>()
+    for (const m of metas) {
+      const hit = /^agent-([A-Za-z0-9_-]+)\.meta\.json\x02([\s\S]*)$/.exec(m)
+      if (!hit) continue
+      try {
+        const j = JSON.parse(hit[2]) as Record<string, unknown>
+        meta.set(hit[1], {
+          agentType: typeof j.agentType === 'string' ? j.agentType : undefined,
+          description: typeof j.description === 'string' ? j.description : undefined,
+          phase: typeof j.workflowPhase === 'string' || typeof j.workflowPhase === 'number' ? String(j.workflowPhase) : undefined
+        })
+      } catch {
+        /* a torn meta file */
+      }
+    }
+    const labelled = new Set<string>()
+    for (const line of journal.split('\n')) {
+      if (!line.startsWith('{')) continue
+      let j: Record<string, unknown>
+      try {
+        j = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        // The line cap cut it: read what is left of it with regexes.
+        const type = /"type"\s*:\s*"(started|result)"/.exec(line)?.[1]
+        const agentId = /"agentId"\s*:\s*"([^"]+)"/.exec(line)?.[1]
+        if (!type || !agentId) continue
+        j = { type, agentId }
+        const unq = (s: string): string => {
+          try {
+            return JSON.parse(`"${s}"`) as string
+          } catch {
+            return s
+          }
+        }
+        const label = /"label"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(line)?.[1]
+        const phase = /"phase"\s*:\s*"?([^",}]+)/.exec(line)?.[1]
+        const result = /"result"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(line)?.[1]
+        if (label) j.label = unq(label)
+        if (phase) j.phase = phase
+        if (type === 'result') j.result = result ? unq(result.replace(/\\$/, '')) : ''
+      }
+      const id = typeof j.agentId === 'string' ? j.agentId : ''
+      if (!id) continue
+      if (j.type === 'started') {
+        const a = get(id)
+        if (typeof j.label === 'string' && j.label) {
+          a.label = j.label
+          labelled.add(id)
+        }
+        if (typeof j.phase === 'string' || typeof j.phase === 'number') a.phase = String(j.phase)
+      } else if (j.type === 'result') {
+        const a = get(id)
+        a.state = 'done'
+        const r = typeof j.result === 'string' ? j.result : j.result === undefined ? '' : JSON.stringify(j.result)
+        const preview = r.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_CAP)
+        if (preview) a.preview = preview
+      }
+    }
+    for (const a of agents.values()) {
+      const m = meta.get(a.agentId)
+      if (!m) continue
+      if (m.agentType) a.agentType = m.agentType
+      if (!labelled.has(a.agentId) && m.description) a.label = m.description
+      if (!a.phase && m.phase) a.phase = m.phase
+    }
+    return [...agents.values()]
+  }
+
+  /** The agents of one workflow, from its journal.jsonl and agent-*.meta.json, read in one exec. */
+  ipcMain.handle('chat:journal', async (_e, args: ChatTarget & { dir: string }): Promise<WorkflowAgent[]> => {
+    const dir = args.dir
+    if (
+      typeof dir !== 'string' ||
+      !dir.startsWith('/') ||
+      /[\0\r\n]/.test(dir) ||
+      dir.split('/').some((seg) => seg === '..' || seg === '.') ||
+      !WORKFLOW_DIR_RE.test(dir)
+    ) {
+      throw new Error('Invalid workflow directory')
+    }
+    const script =
+      `d=${shQuote(dir)}${SEP}case "$d" in "$HOME"/.claude/projects/*) ;; *) exit 4;; esac${SEP}` +
+      `cd "$d" 2>/dev/null && [ -f journal.jsonl ] || exit 3${SEP}` +
+      `cut -c1-${JOURNAL_LINE_CAP} journal.jsonl | head -c ${JOURNAL_CAP}${SEP}printf '\\n'${SEP}` +
+      `for f in agent-*.meta.json; do [ -f "$f" ] || continue; printf '\\001%s\\002' "$f"; head -c ${JOURNAL_META_CAP} "$f"; printf '\\n'; done`
+    const res = await chatExec(args, script, { maxBytes: 1_100_000 })
+    if (res.code === 3) return []
+    if (res.code === 4) throw new Error('Invalid workflow directory')
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to read the workflow journal')
+    return parseJournal(res.stdout.toString('utf-8'))
   })
 
   ipcMain.handle('chat:answer', (_e, args: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> => {
@@ -2194,13 +2483,28 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     const run = shWrap(claudeScript(cwd, connectionStore.get(t.connectionId)?.claudePath, resume))
     const script =
       `command -v tmux >/dev/null 2>&1 || { echo 'tmux is not installed on this host' >&2; exit 127; }${SEP}` +
-      `tmux has-session -t ${shQuote('=' + session)} 2>/dev/null || tmux new -d -s ${shQuote(session)} ${shQuote(run)}`
+      // This exec is not a login or interactive shell, and a running tmux server hands a
+      // new session its own old environment, so claude (often in ~/.npm-global/bin,
+      // added by ~/.bashrc) would not be on PATH. Take PATH from an interactive bash,
+      // as an agent tab typed into a terminal would have it. Set through env, not
+      // `tmux new -e`: on the user's host the pane's shell resets a PATH given that way.
+      `P=$(bash -ic 'printf "\\n__P__%s" "$PATH"' 2>/dev/null </dev/null | sed -n 's/^__P__//p' | tail -n 1)${SEP}` +
+      `[ -n "$P" ] || P=$PATH${SEP}` +
+      `tmux has-session -t ${shQuote('=' + session)} 2>/dev/null || tmux new -d -s ${shQuote(session)} env "PATH=$P" /bin/sh -c ${shQuote(run)}`
     const res = await chatExec(t, script, { deadlineMs: 45000 })
     if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to start Claude in tmux')
     for (let i = 0; i < 30; i++) {
       await chatWait(1000)
       const hit = (await chatSessionsOf(t)).find((s) => s.tmux?.session === session)
       if (hit?.tmux) return { sessionId: hit.sessionId, pane: hit.tmux.pane, tmuxSession: session }
+      // A folder Claude has not been told to trust holds it at a prompt before it
+      // writes any status file; only the user should answer that one.
+      if (i % 3 === 2) {
+        const res = await chatExec(t, `tmux capture-pane -p -t ${shQuote('=' + session + ':')}`)
+        if (res.stdout.toString('utf-8').includes(MARK.trust)) {
+          throw new Error(`Claude asks whether you trust ${cwd}. Answer it in the terminal (tmux session ${session}), then open the chat from Summary.`)
+        }
+      }
     }
     throw new Error(`Claude did not start in tmux session ${session} within 30 s. It may be waiting in that session.`)
   }

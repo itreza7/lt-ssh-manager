@@ -21,12 +21,16 @@ export interface AssistantItem {
   blocks: UiBlock[]
 }
 
-/** A line between messages: context compaction. */
+/**
+ * A line between messages: context compaction. With a `title` it is a card of
+ * monospace output instead (a local command's, like `/context`).
+ */
 export interface NoteItem {
   kind: 'note'
   id: string
   tone: 'info' | 'error'
   text: string
+  title?: string
 }
 
 export type ChatItem = UserItem | AssistantItem | NoteItem
@@ -46,6 +50,25 @@ export interface ChatRequest {
   input: unknown
 }
 
+/** A background Workflow or Agent: running until its task-notification arrives. */
+export interface TaskState {
+  /** The tool_use id that launched it: the key. */
+  toolUseId: string
+  taskId?: string
+  kind: 'workflow' | 'agent'
+  name: string
+  phases: string[]
+  /** Workflow only: where its journal.jsonl lives on the host. */
+  dir?: string
+  state: 'running' | 'done'
+  /** completed, failed, killed… as the notification says. */
+  status?: string
+  summary?: string
+  startedAt: number
+  /** Finished, and a user message came after: the panel no longer lists it. */
+  hidden?: boolean
+}
+
 export interface ChatUiState {
   /** The main thread, in order. Subagent messages are not in here. */
   items: ChatItem[]
@@ -63,6 +86,8 @@ export interface ChatUiState {
   turn: boolean
   mode: ChatMode | null
   model: string | null
+  /** Background tasks by tool_use id, in launch order. */
+  tasks: Record<string, TaskState>
   /** Prompt size of the last assistant message: what fills the context window. */
   context: { inputTokens: number } | null
   // Internal bookkeeping below.
@@ -80,6 +105,7 @@ export const initialChatState: ChatUiState = {
   turn: false,
   mode: null,
   model: null,
+  tasks: {},
   context: null,
   where: {}
 }
@@ -92,6 +118,7 @@ export function reduceEvents(prev: ChatUiState, events: ChatEvent[]): ChatUiStat
     items: prev.items.slice(),
     children: { ...prev.children },
     results: { ...prev.results },
+    tasks: { ...prev.tasks },
     where: { ...prev.where }
   }
   // Child lists copied already in this batch, so each is copied once, not per event.
@@ -127,6 +154,10 @@ function apply(s: ChatUiState, e: ChatEvent, copied: Set<string>): void {
       s.items.push({ kind: 'user', id: e.id, text: e.text, images: e.images })
       // A slash command is a local command: it writes no turn_duration, so it must not start a turn.
       if (!e.text.startsWith('/')) s.turn = true
+      // The next thing the user says is the end of a finished task's panel line.
+      for (const id in s.tasks) {
+        if (s.tasks[id].state === 'done' && !s.tasks[id].hidden) s.tasks[id] = { ...s.tasks[id], hidden: true }
+      }
       return
     case 'assistant':
       putMsg(s, e.parentToolUseId, { kind: 'assistant', msgId: e.msgId, blocks: e.blocks }, copied)
@@ -163,6 +194,33 @@ function apply(s: ChatUiState, e: ChatEvent, copied: Set<string>): void {
       // A finished turn has nothing left to ask.
       s.turn = false
       s.requests = []
+      return
+    case 'task': {
+      // Emitted twice (the launch, then its result with the task id and journal dir): merge.
+      const old = s.tasks[e.toolUseId]
+      s.tasks[e.toolUseId] = {
+        toolUseId: e.toolUseId,
+        taskId: e.taskId ?? old?.taskId,
+        kind: e.kind,
+        name: e.name || old?.name || (e.kind === 'workflow' ? 'Workflow' : 'Agent'),
+        phases: e.phases.length ? e.phases : (old?.phases ?? []),
+        dir: e.dir ?? old?.dir,
+        state: old?.state ?? 'running',
+        status: old?.status,
+        summary: old?.summary,
+        startedAt: old?.startedAt ?? Date.now()
+      }
+      return
+    }
+    case 'task_done': {
+      const id = Object.keys(s.tasks).find(
+        (k) => (e.toolUseId && k === e.toolUseId) || (e.taskId && s.tasks[k].taskId === e.taskId)
+      )
+      if (id) s.tasks[id] = { ...s.tasks[id], state: 'done', status: e.status, summary: e.summary }
+      return
+    }
+    case 'note':
+      s.items.push({ kind: 'note', id: e.id, tone: 'info', text: e.text, title: e.title })
       return
     case 'compact':
       s.items.push({

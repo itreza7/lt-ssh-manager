@@ -349,7 +349,34 @@ export function QueuedMessage({ text }: { text: string }) {
   )
 }
 
+/** A command's output as a collapsed monospace card: `/context`, `/usage`. */
+export function OutputCard({ title, text, onDismiss }: { title: string; text: string; onDismiss?: () => void }) {
+  const [open, setOpen] = useState(!!onDismiss)
+  return (
+    <div className="rounded-lg border border-line bg-surface/40">
+      <div className="flex items-center gap-2.5 px-3 py-1.5">
+        <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
+          <span className="w-4 shrink-0 text-center font-mono text-[12px] text-accent">$</span>
+          <span className="truncate font-mono text-[12px] text-fg/90">{title}</span>
+          <span className="ml-auto shrink-0 text-[10px] text-faint">{open ? '▾' : '▸'}</span>
+        </button>
+        {onDismiss && (
+          <button onClick={onDismiss} title="Dismiss" className="shrink-0 rounded-md px-1.5 text-base leading-none text-faint transition-colors hover:text-fg">
+            ×
+          </button>
+        )}
+      </div>
+      {open && (
+        <pre dir="ltr" className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-line-soft px-3 py-2.5 font-mono text-[12px] leading-relaxed text-fg/85">
+          {text || '(no output)'}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 export function NoteLine({ item }: { item: NoteItem }) {
+  if (item.title) return <OutputCard title={item.title} text={item.text} />
   return item.tone === 'error' ? (
     <div dir="auto" className="rounded-lg border border-danger/40 bg-danger/10 px-3.5 py-2 text-sm text-danger">
       {item.text}

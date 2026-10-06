@@ -22,6 +22,69 @@ const REQUEST_KIND: Record<string, 'question' | 'plan'> = { AskUserQuestion: 'qu
 // set claudeTranscript.ts skips).
 const SYNTHETIC_USER = /^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification)>/
 
+/** What a background Workflow or Agent call said it was, kept to merge into its tool_result. */
+interface TaskInfo {
+  kind: 'workflow' | 'agent'
+  name: string
+  phases: string[]
+}
+const MAX_TASKS = 200
+const NOTE_CAP = 20_000
+
+// ANSI: CSI sequences and OSC strings.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+
+/** The quoted JS string literal starting at `src[at]`: its value and the index after it, or null. */
+function jsString(src: string, at: number): { value: string; end: number } | null {
+  const q = src[at]
+  if (q !== '"' && q !== "'" && q !== '`') return null
+  let value = ''
+  for (let i = at + 1; i < src.length; i++) {
+    const c = src[i]
+    if (c === '\\') value += src[++i] ?? ''
+    else if (c === q) return { value, end: i + 1 }
+    else value += c
+  }
+  return null
+}
+
+/**
+ * Name and phase titles out of a workflow script's `export const meta = { name: '…',
+ * phases: [{ title: '…' }, …] }`. The script is JavaScript, not JSON, so this scans
+ * for the keys; anything it cannot find is left out.
+ */
+export function workflowMeta(script: string): { name?: string; phases: string[] } {
+  const at = script.search(/\bmeta\s*=\s*\{/)
+  const src = script.slice(Math.max(at, 0), Math.max(at, 0) + 20_000)
+  const nameAt = /\bname\s*:\s*(?=["'`])/.exec(src)
+  const name = nameAt ? jsString(src, nameAt.index + nameAt[0].length)?.value : undefined
+  const phases: string[] = []
+  const ph = /\bphases\s*:\s*\[/.exec(src)
+  if (ph) {
+    // Walk the array to its closing bracket, stepping over strings.
+    let depth = 1
+    const start = ph.index + ph[0].length
+    let end = src.length
+    for (let i = start; i < src.length && depth > 0; ) {
+      const str = jsString(src, i)
+      if (str) i = str.end
+      else {
+        if (src[i] === '[') depth++
+        else if (src[i] === ']' && --depth === 0) end = i
+        i++
+      }
+    }
+    const body = src.slice(start, end)
+    const re = /\btitle\s*:\s*(?=["'`])/g
+    for (let m = re.exec(body); m; m = re.exec(body)) {
+      const t = jsString(body, m.index + m[0].length)?.value
+      if (t) phases.push(t)
+    }
+  }
+  return { name: name || undefined, phases }
+}
+
 /** The text Claude Code writes as a user record when a turn is interrupted. */
 const INTERRUPTED = /^\s*\[Request interrupted by user/
 
@@ -54,6 +117,11 @@ function toBlock(b: Loose): ChatBlock | null {
 const sameBlock = (a: ChatBlock, b: ChatBlock): boolean =>
   a.type === 'tool_use' ? b.type === 'tool_use' && a.id === b.id : a.type === b.type && a.text === (b as { text: string }).text
 
+const tag = (text: string, name: string): string | undefined => {
+  const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text)
+  return m?.[1].trim() || undefined
+}
+
 export interface TranscriptMapper {
   /** Map a batch of whole records, in file order, to events. */
   push(records: unknown[]): ChatEvent[]
@@ -64,6 +132,8 @@ export function createTranscriptMapper(): TranscriptMapper {
   const messages = new Map<string, ChatBlock[]>()
   /** Question/plan requests seen: tool_use id -> true once its tool_result arrived. */
   const requests = new Map<string, boolean>()
+  /** Workflow / background agent calls seen, by tool_use id. */
+  const tasks = new Map<string, TaskInfo>()
   let model = ''
   let usage = 0
   let anon = 0
@@ -107,7 +177,52 @@ export function createTranscriptMapper(): TranscriptMapper {
         requests.set(b.id, false)
         out.push({ t: 'request', reqId: b.id, kind, toolName: b.name, input: b.input })
       }
+      if (b.type === 'tool_use' && !tasks.has(b.id)) task(b, out)
     }
+  }
+
+  /** A Workflow call, or an Agent/Task call run in the background. */
+  function task(b: Extract<ChatBlock, { type: 'tool_use' }>, out: ChatEvent[]): void {
+    const input = (b.input ?? {}) as Loose
+    let info: TaskInfo | null = null
+    if (b.name === 'Workflow') {
+      const meta = typeof input.script === 'string' ? workflowMeta(input.script) : { phases: [] as string[] }
+      const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : meta.name
+      info = { kind: 'workflow', name: name || 'Workflow', phases: meta.phases }
+    } else if ((b.name === 'Agent' || b.name === 'Task') && input.run_in_background === true) {
+      const name = [input.description, input.subagent_type].find((x) => typeof x === 'string' && x.trim()) as string | undefined
+      info = { kind: 'agent', name: name?.trim() || 'Agent', phases: [] }
+    }
+    if (!info) return
+    tasks.set(b.id, info)
+    if (tasks.size > MAX_TASKS) tasks.delete(tasks.keys().next().value as string)
+    out.push({ t: 'task', toolUseId: b.id, ...info })
+  }
+
+  /** The tool_result of a task call: the id and transcript directory it launched with. */
+  function taskResult(id: string, text: string, out: ChatEvent[]): void {
+    let info = tasks.get(id)
+    const launched = /^\s*Workflow launched in background/.test(text)
+    // A load that starts mid-file never saw the tool_use; the result alone still says what ran.
+    if (!info && launched) {
+      info = { kind: 'workflow', name: /^Summary:\s*(.+)$/m.exec(text)?.[1].trim() || 'Workflow', phases: [] }
+      tasks.set(id, info)
+    }
+    if (!info) return
+    const taskId = (info.kind === 'workflow' ? /Task ID:\s*(\S+)/ : /(?:Task ID|agentId|agent_id)\W+([A-Za-z0-9_-]+)/i).exec(text)?.[1]
+    const dir = info.kind === 'workflow' ? /^Transcript dir:\s*(.+?)\s*$/m.exec(text)?.[1] : undefined
+    if (!taskId && !dir) return
+    out.push({ t: 'task', toolUseId: id, ...info, ...(taskId ? { taskId } : {}), ...(dir ? { dir } : {}) })
+  }
+
+  /** A finished background task, from the user record Claude Code writes for it. Never shown as a message. */
+  function notification(text: string, out: ChatEvent[]): void {
+    const status = tag(text, 'status')
+    const toolUseId = tag(text, 'tool-use-id')
+    const taskId = tag(text, 'task-id')
+    if (!status || !(toolUseId || taskId)) return
+    const summary = tag(text, 'summary')
+    out.push({ t: 'task_done', ...(toolUseId ? { toolUseId } : {}), ...(taskId ? { taskId } : {}), status, ...(summary ? { summary } : {}) })
   }
 
   function user(r: Loose, out: ChatEvent[]): void {
@@ -124,13 +239,15 @@ export function createTranscriptMapper(): TranscriptMapper {
         const truncated = text.length > TOOL_RESULT_CAP
         if (truncated) text = text.slice(0, TOOL_RESULT_CAP)
         out.push({ t: 'tool_result', toolUseId: id, content: text, isError: b.is_error === true, parentToolUseId: parent, truncated: truncated || undefined })
+        if (b.is_error !== true) taskResult(id, text, out)
         if (requests.get(id) === false) {
           requests.set(id, true)
           out.push({ t: 'request_done', reqId: id })
         }
       } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
         const cmd = slashCommand(b.text)
-        if (cmd) texts.push(cmd)
+        if (/^\s*<task-notification>/.test(b.text)) notification(b.text, out)
+        else if (cmd) texts.push(cmd)
         // An interrupted turn writes no turn_duration; this marker is what ends it.
         else if (INTERRUPTED.test(b.text)) interrupted = true
         else if (!SYNTHETIC_USER.test(b.text)) texts.push(b.text)
@@ -163,6 +280,21 @@ export function createTranscriptMapper(): TranscriptMapper {
     } else if (r.subtype === 'compact_boundary') {
       const m = (r.compactMetadata ?? r.compact_metadata ?? {}) as Loose
       out.push({ t: 'compact', trigger: m.trigger === 'manual' ? 'manual' : 'auto', preTokens: typeof m.preTokens === 'number' ? m.preTokens : undefined })
+    } else if (r.subtype === 'local_command' && typeof r.content === 'string') {
+      // A command's own output (/context, say), not in any message. A command with
+      // none (/clear) writes an empty one.
+      const m = /<local-command-(?:stdout|stderr)>([\s\S]*?)<\/local-command-(?:stdout|stderr)>/.exec(r.content)
+      const text = (m?.[1] ?? '').replace(ANSI_RE, '').replace(/\s+$/, '').replace(/^\s*\n+/, '')
+      if (!text.trim()) return
+      const run = (r.commandRun ?? {}) as Loose
+      const command = typeof run.command === 'string' ? run.command.replace(/^\//, '') : ''
+      const args = typeof run.args === 'string' ? run.args.trim() : ''
+      out.push({
+        t: 'note',
+        id: String(r.uuid ?? `n${++anon}`),
+        title: command ? `/${command}${args ? ' ' + args : ''}` : 'Command output',
+        text: text.length > NOTE_CAP ? text.slice(0, NOTE_CAP) : text
+      })
     }
   }
 
@@ -181,7 +313,11 @@ export function createTranscriptMapper(): TranscriptMapper {
           if (r.isSidechain === true) continue
           if (r.type === 'assistant') assistant(r, out)
           else if (r.type === 'user') {
-            if (!r.isMeta && !r.isCompactSummary) user(r, out)
+            // A notification may be written as a meta record; it still ends the task.
+            const c = r.message?.content
+            const first = typeof c === 'string' ? c : Array.isArray(c) && typeof c[0]?.text === 'string' ? c[0].text : ''
+            if (r.isMeta && /^\s*<task-notification>/.test(first)) notification(first, out)
+            else if (!r.isMeta && !r.isCompactSummary) user(r, out)
           } else if (r.type === 'attachment') queued(r, out)
           else if (r.type === 'system') system(r, out)
         } catch {

@@ -53,6 +53,9 @@ main process.
   output, edits as diffs), and question, plan and permission prompts you answer by click.
   Every Claude live in tmux on the host appears, however it was started. The terminal tab
   and the chat tab show the same session, so use either; "Open in terminal" switches over.
+  The header shows Claude's live status line (model, context, limits, mode), running
+  workflows and background agents show their phases and agents as they go, and an actions
+  menu runs compact, clear, effort, context, usage and your skills and commands.
   Needs Claude Code and tmux on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only

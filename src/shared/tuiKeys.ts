@@ -6,6 +6,7 @@
 // marker that must be visible (tmux capture-pane) before its keys are sent —
 // the status file's `waiting` is also set by hooks (e.g. an approval gate), so
 // it is never enough on its own to press a key.
+import type { ChatMode, TuiFooter } from './chatProtocol'
 
 /** tmux key names, as `tmux send-keys` takes them. */
 export const KEY = {
@@ -67,6 +68,8 @@ export const MARK = {
   planFeedback: 'Tell Claude what to change',
   /** A tool permission prompt ("Do you want to create a.txt?"). Option 1 is "Yes". */
   permission: 'Do you want to',
+  /** Claude's first start in a folder it was not told to trust. */
+  trust: 'Yes, I trust this folder',
   /** `/model x` asks this when the conversation is cached; digit 1 confirms. */
   modelConfirm: 'Switch model?'
 } as const
@@ -87,7 +90,62 @@ export const MODE_FOOTER = {
   default: 'manual mode on'
 } as const
 export type TuiMode = keyof typeof MODE_FOOTER
-export const MODE_MAX_PRESSES = 5
+/** Per-line key hints in the mode line that are not state. */
+const FOOTER_HINT_RE = /shift\+tab|for agents/i
+
+/**
+ * The footer under the input box on a plain `capture-pane -p` screen, or null when
+ * there is no input box (a dialog is open) or nothing under it. The input box is the
+ * bottom-most line starting with PROMPT_CHAR; the footer is the next two non-empty
+ * lines after the rule that closes it. Line 1 is the user's own statusLine (absent if
+ * they have none), line 2 the mode line. Shown as read: nothing assumes where a
+ * statusLine segment sits, except that the first one is the model.
+ */
+export function parseFooter(screen: string): TuiFooter | null {
+  const lines = screen.split('\n').map((l) => l.trimEnd())
+  let input = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const at = lines[i].indexOf(PROMPT_CHAR)
+    if (at >= 0 && lines[i].slice(0, at).trim() === '') {
+      input = i
+      break
+    }
+  }
+  if (input < 0) return null
+  let rule = -1
+  for (let i = input + 1; i < lines.length; i++) {
+    if (SOLID_RULE_RE.test(lines[i])) {
+      rule = i
+      break
+    }
+  }
+  if (rule < 0) return null
+  const under = lines
+    .slice(rule + 1)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+  // A dialog's own footer ("Esc to cancel", "Enter to select") is not a status line.
+  if (!under.length || under.some((l) => /Esc to cancel|Enter to select/i.test(l))) return null
+
+  const modeAt = under.findIndex((l) => Object.values(MODE_FOOTER).some((m) => l.includes(m)))
+  const statusLine = modeAt === 0 ? undefined : under[0]
+  const modeLine = modeAt >= 0 ? under[modeAt] : under[1]
+  const split = (l: string): string[] => l.split(' · ').map((x) => x.trim()).filter(Boolean)
+
+  const segments = statusLine ? split(statusLine) : []
+  let mode: ChatMode | undefined
+  let modeExtras: string[] = []
+  if (modeAt >= 0) {
+    mode = (Object.keys(MODE_FOOTER) as TuiMode[]).find((k) => modeLine.includes(MODE_FOOTER[k]))
+    modeExtras = split(modeLine)
+      .slice(1)
+      .map((x) => x.replace(/\(shift\+tab[^)]*\)/i, '').trim())
+      .filter((x) => x && !FOOTER_HINT_RE.test(x))
+  }
+  return { segments, ...(segments[0] ? { model: segments[0] } : {}), ...(mode ? { mode } : {}), modeExtras }
+}
+export const MODE_MAX_PRESSES = 4
 
 /** One numbered option of a dialog, as read off the screen. */
 export interface TuiPromptOption {
@@ -197,6 +255,49 @@ export function parsePrompt(screen: string): TuiPrompt | null {
   const body = above.slice(-BODY_CAP[kind]).join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
   const tabHeader = above.some((l) => l.includes('←') && l.includes('→'))
   return { kind, body, options, multi, canTab: multi || tabHeader }
+}
+
+/** The effort levels `/effort <level>` takes silently (plain `/effort` opens a slider dialog). */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** The marker every dialog command (/usage, /status) shows in its footer. */
+export const DIALOG_FOOTER = 'Esc to cancel'
+const DIALOG_TEXT_CAP = 60
+
+/**
+ * The body of a command dialog on a plain `capture-pane -p` screen: the lines between
+ * the last solid rule above the "Esc to cancel" line and that line. Null when no such
+ * dialog is on screen.
+ */
+export function parseDialogText(screen: string): string | null {
+  const lines = screen.split('\n').map((l) => l.trimEnd())
+  let end = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(DIALOG_FOOTER)) {
+      end = i
+      break
+    }
+  }
+  if (end < 0) return null
+  // A dialog's top edge is a row of ▔. Without one, the nearest solid rule above.
+  let start = 0
+  for (let i = end - 1; i >= 0; i--) {
+    if (/^\s*▔{5,}\s*$/.test(lines[i])) {
+      start = i + 1
+      break
+    }
+  }
+  if (!start) {
+    for (let i = end - 1; i >= 0; i--) {
+      if (SOLID_RULE_RE.test(lines[i])) {
+        start = i + 1
+        break
+      }
+    }
+  }
+  const body = lines.slice(Math.max(start, end - DIALOG_TEXT_CAP), end)
+  const text = body.join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
+  return text || null
 }
 
 /** True if the option with `digit` is on the screen with exactly `label` (a card may be stale). */

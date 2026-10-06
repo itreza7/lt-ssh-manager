@@ -33,12 +33,15 @@ import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import type { ReaderChunk, ReaderSession } from '../shared/claudeTranscript'
 import type {
   ChatAnswer,
+  ChatCommandInfo,
   ChatKeysResult,
+  ChatMode,
+  ChatScreenInfo,
   ChatSession,
   ChatStreamData,
   ChatStreamEnd,
   ChatTarget,
-  TuiPrompt
+  WorkflowAgent
 } from '../shared/chatProtocol'
 
 export interface ConnectArgs {
@@ -447,9 +450,30 @@ const api = {
     ipcRenderer.invoke('chat:send', t),
 
   /** Answer the question, plan or permission prompt on screen. */
-  /** The dialog Claude Code has open on screen, or null. */
-  chatPrompt: (t: ChatTarget & { pane: string }): Promise<TuiPrompt | null> =>
+  /** One screen capture: the dialog Claude Code has open (or null) and the footer under its input box (or null). */
+  chatPrompt: (t: ChatTarget & { pane: string }): Promise<ChatScreenInfo> =>
     ipcRenderer.invoke('chat:prompt', t),
+
+  /** Shift+Tab until the footer shows `mode`. `screen` when the mode line is unreadable or the cycle never reaches it. */
+  chatMode: (t: ChatTarget & { pane: string; mode: ChatMode }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:mode', t),
+
+  /**
+   * Type a slash command: /compact [instructions], /clear, /context, /usage,
+   * /effort <level>, or /<name> of a skill or command chatCommands lists for `cwd`.
+   * Refused (`draft`, `screen`) like chatSend. /usage answers with `text`, the dialog's
+   * content (the dialog is closed again).
+   */
+  chatCommand: (t: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string }> =>
+    ipcRenderer.invoke('chat:command', t),
+
+  /** Skills and custom commands on the host (~/.claude and `cwd`/.claude). */
+  chatCommands: (t: ChatTarget & { cwd: string }): Promise<ChatCommandInfo[]> =>
+    ipcRenderer.invoke('chat:commands', t),
+
+  /** The agents of one workflow, from its journal. `dir` is the `task` event's `dir`. [] while there is no journal yet. */
+  chatJournal: (t: ChatTarget & { dir: string }): Promise<WorkflowAgent[]> =>
+    ipcRenderer.invoke('chat:journal', t),
 
   chatAnswer: (t: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> =>
     ipcRenderer.invoke('chat:answer', t),

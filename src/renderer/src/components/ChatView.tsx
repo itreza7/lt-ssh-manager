@@ -3,19 +3,23 @@ import type {
   ChatAnswer,
   ChatEvent,
   ChatKeysResult,
+  ChatMode,
   ChatSession,
   ChatStreamData,
   ChatStreamEnd,
+  TuiFooter,
   TuiPrompt
 } from '../../../shared/chatProtocol'
 import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/transcriptEvents'
 import { initialChatState, reduceEvents, type ChatUiState } from '../lib/chatState'
 import { ChatComposer } from './ChatComposer'
-import { Button } from './Modal'
+import { Button, Modal } from './Modal'
 import { Select } from './Select'
-import { AssistantBlocks, NoteLine, QueuedMessage, UserMessage } from './chat/Blocks'
-import { CHAT_DOT, MODE_LABEL, chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, UserMessage } from './chat/Blocks'
+import { CHAT_DOT, chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { ActionsMenu, BUILTIN_COMMANDS, ModeMenu, type CommandInfo } from './chat/Menus'
 import { PromptCard } from './chat/Requests'
+import { TasksPanel } from './chat/Tasks'
 
 interface Props {
   connectionId: string
@@ -38,6 +42,8 @@ interface Props {
 const NEAR_BOTTOM_PX = 80
 // Wait before each stream reconnect attempt (seconds), then stay at the last.
 const BACKOFF_S = [1, 2, 4, 8, 10]
+// How often the screen is read for the open dialog and the footer chips: each read is an ssh exec.
+const SCREEN_MS = 2000
 // How often Claude's status file is read while the tab exists: each read is an ssh exec.
 const STATUS_MS = 2000
 const STATUS_HIDDEN_MS = 10_000
@@ -57,6 +63,11 @@ type Link = 'connecting' | 'live' | 'reconnecting'
 
 /** What is said above the composer after typing into the pane did not go through. */
 type Notice = { kind: 'draft' } | { kind: 'screen' } | { kind: 'text'; text: string }
+
+// Typed from the composer, these run through chatCommand (the first four, and /effort with a level, for sure).
+const BUILTIN_NAMES = new Set(BUILTIN_COMMANDS.map((c) => c.name))
+const EFFORT_ARG = /^\s*(low|medium|high|xhigh|max)\s*$/
+const SLASH = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -78,6 +89,18 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const [partial, setPartial] = useState(false)
   // The dialog on the TUI's screen. Claude Code writes none of them to the transcript until answered.
   const [prompt, setPrompt] = useState<TuiPrompt | null>(null)
+  // The TUI's footer under the input box: the statusLine segments and the mode line.
+  const [footer, setFooter] = useState<TuiFooter | null>(null)
+  // Skills and commands on the host, loaded the first time the Actions menu or a "/" asks.
+  const [commands, setCommands] = useState<CommandInfo[] | null>(null)
+  const commandsAsked = useRef(false)
+  // Text a dialog command (/usage) read off the screen, shown until dismissed.
+  const [snapshot, setSnapshot] = useState<{ title: string; text: string } | null>(null)
+  const [insert, setInsert] = useState<{ id: number; text: string } | null>(null)
+  const [confirmClear, setConfirmClear] = useState(false)
+  // A command or mode change is typing into the pane: the screen poll waits, so it does not read a half-finished screen.
+  const cmdBusy = useRef(false)
+  const [cmdRunning, setCmdRunning] = useState(false)
 
   // Byte offset after the last whole record applied — where a reconnect resumes.
   const offset = useRef(-1)
@@ -237,29 +260,34 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const busy = state.status === 'busy' || (state.turn && state.status === 'idle' && Date.now() - sentAt.current < SEND_GRACE_MS)
   const waiting = state.status === 'waiting'
 
-  // Read the open dialog off the screen while Claude waits: once at once, then every 1.5 s.
-  const canPoll = active && drivable && waiting
+  // Read the screen while the tab is on screen: the open dialog (shown as a card
+  // only while Claude waits) and the footer chips. Once at once, then every 2 s.
+  const polling = active && drivable
   useEffect(() => {
-    if (!canPoll || !pane) {
+    if (!polling || !pane) {
       setPrompt(null)
       return
     }
     let off = false
     const ask = async (): Promise<void> => {
+      if (cmdBusy.current) return
       try {
-        const p = await window.api.chatPrompt({ connectionId, password, pane })
-        if (!off) setPrompt((prev) => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p))
+        const r = await window.api.chatPrompt({ connectionId, password, pane })
+        if (off) return
+        setPrompt((prev) => (JSON.stringify(prev) === JSON.stringify(r.prompt) ? prev : r.prompt))
+        // A screen with no footer (a dialog is open) says nothing about the footer: keep the last.
+        if (r.footer) setFooter((prev) => (JSON.stringify(prev) === JSON.stringify(r.footer) ? prev : r.footer))
       } catch {
         /* keep what we knew */
       }
     }
     void ask()
-    const t = setInterval(() => void ask(), 1500)
+    const t = setInterval(() => void ask(), SCREEN_MS)
     return () => {
       off = true
       clearInterval(t)
     }
-  }, [canPoll, pane, connectionId, password])
+  }, [polling, pane, connectionId, password])
 
   // Types into the pane; says why when it did not go through.
   const keys = async (send: (pane: string) => Promise<ChatKeysResult>): Promise<boolean> => {
@@ -286,7 +314,62 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
     return false
   }
 
+  const loadCommands = (): void => {
+    if (commandsAsked.current) return
+    commandsAsked.current = true
+    window.api.chatCommands({ ...target, cwd }).then(
+      (list) => setCommands([...BUILTIN_COMMANDS, ...list.filter((c) => !BUILTIN_NAMES.has(c.name))]),
+      () => {
+        // Allow another try; the built-ins still work meanwhile.
+        commandsAsked.current = false
+        setCommands((c) => c ?? BUILTIN_COMMANDS)
+      }
+    )
+  }
+
+  // One command or mode change at a time: they type into the same pane.
+  const exclusive = async (fn: () => Promise<boolean>): Promise<boolean> => {
+    if (cmdBusy.current) return false
+    cmdBusy.current = true
+    setCmdRunning(true)
+    try {
+      return await fn()
+    } finally {
+      cmdBusy.current = false
+      setCmdRunning(false)
+    }
+  }
+
+  // A slash command: typed for us, and when it opens a dialog (/usage), its text comes back.
+  const runCommand = (command: string): Promise<boolean> =>
+    exclusive(async () => {
+      const out: { r?: ChatKeysResult & { text?: string } } = {}
+      const ok = await keys(async (p) => (out.r = await window.api.chatCommand({ ...target, pane: p, command, cwd })))
+      if (ok && out.r?.ok && out.r.text) setSnapshot({ title: command, text: out.r.text })
+      return ok
+    })
+
   const sendText = async (text: string): Promise<boolean> => {
+    const m = SLASH.exec(text)
+    if (m) {
+      const [, name, arg] = m
+      const known =
+        !/[\r\n]/.test(text) &&
+        (name === 'effort' ? EFFORT_ARG.test(arg ?? '') : BUILTIN_NAMES.has(name) || !!commands?.some((c) => c.name === name))
+      if (known) {
+        // A skill starts a turn; the built-ins do not.
+        if (!BUILTIN_NAMES.has(name)) {
+          sentAt.current = Date.now()
+          setTimeout(() => setTick((n) => n + 1), SEND_GRACE_MS + 100)
+        }
+        return runCommand(text)
+      }
+      // A bare /effort would open the TUI's slider, which the chat cannot close.
+      if (name === 'effort') {
+        setNotice({ kind: 'text', text: 'Pick a level: /effort low|medium|high|xhigh|max' })
+        return false
+      }
+    }
     sentAt.current = Date.now()
     // Re-render once the grace is over, or an idle status would keep showing "Working…".
     setTimeout(() => setTick((n) => n + 1), SEND_GRACE_MS + 100)
@@ -299,8 +382,9 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const pollPrompt = async (): Promise<void> => {
     if (!pane) return
     try {
-      const p = await window.api.chatPrompt({ ...target, pane })
-      setPrompt((prev) => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p))
+      const r = await window.api.chatPrompt({ ...target, pane })
+      setPrompt((prev) => (JSON.stringify(prev) === JSON.stringify(r.prompt) ? prev : r.prompt))
+      if (r.footer) setFooter(r.footer)
     } catch {
       /* a dropped link says nothing about the prompt; keep what we knew */
     }
@@ -318,7 +402,20 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   }
 
   const interrupt = (): void => void keys((p) => window.api.chatInterrupt({ ...target, pane: p }))
-  const setModel = (m: string): void => void keys((p) => window.api.chatModel({ ...target, pane: p, model: m }))
+  // The transcript names the new model only with Claude's next reply; show it now.
+  const setModel = async (m: string): Promise<void> => {
+    if (await keys((p) => window.api.chatModel({ ...target, pane: p, model: m })))
+      setState((prev) => reduceEvents(prev, [{ t: 'model', model: m }]))
+  }
+  const setMode = (m: ChatMode): Promise<boolean> =>
+    exclusive(async () => {
+      const ok = await keys((p) => window.api.chatMode({ ...target, pane: p, mode: m }))
+      if (ok) {
+        setFooter((f) => (f ? { ...f, mode: m } : f))
+        setState((prev) => reduceEvents(prev, [{ t: 'mode', mode: m }]))
+      }
+      return ok
+    })
   const openTerminal = tmuxSession ? () => onOpenTerminal(tmuxSession) : undefined
 
   const resume = async (): Promise<void> => {
@@ -356,7 +453,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   useLayoutEffect(() => {
     const el = scroller.current
     if (el && nearBottom.current) el.scrollTop = el.scrollHeight
-  }, [state.items, state.children, prompt, state.status, queued.length, notice])
+  }, [state.items, state.children, prompt, state.status, queued.length, notice, snapshot])
 
   // A tab that was hidden may have lost its scroll position.
   useEffect(() => {
@@ -381,8 +478,16 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const shown: ChatStatus = ended ? 'ended' : busy ? 'busy' : state.status
   const label = session === undefined && starting ? 'Starting…' : statusLabel(shown, state.waitingFor ?? undefined)
 
-  const model = modelValue(state.model)
+  const model = modelValue(state.model ?? footer?.model?.toLowerCase() ?? null)
   const modelOptions = MODELS.some((m) => m.value === model) ? MODELS : [{ value: model, label: model }, ...MODELS]
+  // Footer chips: the model first, then the user's other statusLine segments. The one that
+  // only repeats the tab's own name says nothing here.
+  const norm = (x: string | undefined): string => (x ?? '').trim().toLowerCase()
+  const own = new Set([norm(tmuxSession), norm(session?.name), norm(leaf(cwd))].filter(Boolean))
+  const segs = footer?.segments ?? []
+  const chipModel = footer ? (footer.model ?? segs[0]) : undefined
+  const chips = segs.filter((x) => x !== chipModel && !own.has(norm(x)))
+  const footerMode = footer?.mode ?? null
   const ctxK = state.context ? Math.round(state.context.inputTokens / 1000) : null
 
   const lastAssistant = (() => {
@@ -401,24 +506,41 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   return (
     <div className="chat flex h-full flex-col overflow-hidden border-t border-line bg-ink">
-      <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-2.5">
         <span className={`h-2 w-2 shrink-0 rounded-full ${CHAT_DOT[shown]}`} title={label} />
         <div className="min-w-0 leading-tight">
           <div className="truncate text-sm font-medium text-fg" title={cwd}>
             {session ? chatLabel(session) : leaf(cwd)}
           </div>
-          <div className={`truncate text-[11px] ${shown === 'waiting' ? 'text-amber' : 'text-faint'}`}>{label}</div>
+          <div className={`truncate text-[11px] ${shown === 'waiting' ? 'text-amber' : 'text-faint'}`}>{cmdRunning ? 'Typing into the terminal…' : label}</div>
         </div>
         {link === 'reconnecting' && (
           <span className="animate-glow shrink-0 rounded-full bg-sky-400/15 px-2.5 py-0.5 text-[11px] text-sky-400">Reconnecting…</span>
         )}
-        <div className="ml-auto flex items-center gap-2.5">
-          {ctxK !== null && (
-            <span className="shrink-0 font-mono text-[12px] text-muted" title="Context in use (tokens)">
-              {ctxK}k
-            </span>
-          )}
-          {state.mode && <span className="shrink-0 text-[12px] text-muted" title="Permission mode">{MODE_LABEL[state.mode]}</span>}
+        {!ended && (
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            {chipModel && <span className="shrink-0 rounded-full border border-line bg-elevated/60 px-2.5 py-0.5 text-[12px] font-medium text-fg" title="Model">{chipModel}</span>}
+            {chips.map((c, i) => (
+              <span key={`${i}-${c}`} className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 text-[11px] text-muted">
+                {c}
+              </span>
+            ))}
+            {!segs.some((x) => /^ctx\b/i.test(x)) && ctxK !== null && (
+              <span className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 font-mono text-[11px] text-muted" title="Context in use (tokens)">
+                ctx {ctxK}k
+              </span>
+            )}
+            {(footerMode ?? state.mode) && (
+              <ModeMenu mode={footerMode ?? state.mode} disabled={!drivable || cmdRunning} onPick={(m) => void setMode(m)} />
+            )}
+            {footer?.modeExtras.map((x, i) => (
+              <span key={`${i}-${x}`} className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 text-[11px] text-muted">
+                {x}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-2">
           {drivable && <Select value={model} options={modelOptions} onChange={setModel} width={120} />}
           {drivable && busy && (
             <button
@@ -429,11 +551,18 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
               Interrupt
             </button>
           )}
-          {openTerminal && (
-            <Button onClick={openTerminal} title="Show this session in a terminal tab">
-              Open in terminal
-            </Button>
-          )}
+          <ActionsMenu
+            disabled={!drivable || cmdRunning}
+            commands={commands}
+            onNeedCommands={loadCommands}
+            onCompact={() => void runCommand('/compact')}
+            onClear={() => setConfirmClear(true)}
+            onEffort={(l) => void runCommand(`/effort ${l}`)}
+            onContext={() => void runCommand('/context')}
+            onUsage={() => void runCommand('/usage')}
+            onPick={(name) => setInsert({ id: Date.now(), text: `/${name} ` })}
+            onOpenTerminal={openTerminal}
+          />
         </div>
       </div>
 
@@ -478,10 +607,15 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           {queued.map((p) => (
             <QueuedMessage key={p.id} text={p.text} />
           ))}
-          {canPoll && prompt && <PromptCard key={`${prompt.kind}\0${prompt.body}`} prompt={prompt} onAnswer={answer} onTerminal={openTerminal} />}
+          {snapshot && <OutputCard title={snapshot.title} text={snapshot.text} onDismiss={() => setSnapshot(null)} />}
+          {waiting && polling && prompt && <PromptCard key={`${prompt.kind}\0${prompt.body}`} prompt={prompt} onAnswer={answer} onTerminal={openTerminal} />}
           {busy && !waiting && <div className="animate-glow text-sm text-faint">Working…</div>}
         </div>
       </div>
+
+      {!ended && (
+        <TasksPanel tasks={Object.values(state.tasks).filter((t) => !t.hidden)} target={target} active={active} />
+      )}
 
       {notice && (
         <div className="flex shrink-0 items-center gap-3 border-t border-line bg-elevated/60 px-4 py-1.5 text-[12px] text-amber">
@@ -508,7 +642,33 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         busy={busy}
         onSend={sendText}
         onInterrupt={interrupt}
+        commands={commands ?? BUILTIN_COMMANDS}
+        onNeedCommands={loadCommands}
+        insert={insert}
       />
+
+      {confirmClear && (
+        <Modal
+          title="Clear conversation"
+          onClose={() => setConfirmClear(false)}
+          footer={
+            <>
+              <Button onClick={() => setConfirmClear(false)}>Cancel</Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setConfirmClear(false)
+                  void runCommand('/clear')
+                }}
+              >
+                Clear
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-fg/85">Clear the conversation? Claude starts a fresh session in the same terminal.</p>
+        </Modal>
+      )}
     </div>
   )
 }

@@ -9,6 +9,8 @@
 // How keys are sent to the TUI is in tuiKeys.ts; how transcript records become
 // ChatEvents is in transcriptEvents.ts.
 
+import type { TuiPrompt } from './tuiKeys'
+
 /** Permission mode as Claude Code records it (`permission-mode` records). */
 export type ChatMode = 'bypassPermissions' | 'default' | 'acceptEdits' | 'plan'
 
@@ -72,6 +74,20 @@ export type ChatEvent =
   | { t: 'compact'; trigger: 'manual' | 'auto'; preTokens?: number }
   /** Usage of the last assistant message, for the context meter. */
   | { t: 'usage'; inputTokens: number }
+  /**
+   * A Workflow, or an Agent/Task run in the background. Emitted on the tool_use
+   * (`taskId` and `dir` not known yet) and again on its tool_result with them; the
+   * reducer merges by `toolUseId`. `dir` is the workflow's transcript directory on
+   * the host (for chat:journal). `phases` are the titles from the script's meta.
+   */
+  | { t: 'task'; taskId?: string; toolUseId: string; kind: 'workflow' | 'agent'; name: string; phases: string[]; dir?: string }
+  /**
+   * A task finished (a `<task-notification>` user record). Match by `toolUseId`, or
+   * `taskId`. May arrive without its `task` when a load starts mid-file.
+   */
+  | { t: 'task_done'; toolUseId?: string; taskId?: string; status: string; summary?: string }
+  /** Output of a local command such as /context (`local-command-stdout`), ANSI stripped. */
+  | { t: 'note'; id: string; title: string; text: string }
 
 // ---- IPC: renderer <-> main (window.api.chat*) ----
 
@@ -94,6 +110,43 @@ export interface ChatStreamEnd {
 }
 
 export type { TuiPrompt, TuiPromptOption } from './tuiKeys'
+
+/**
+ * The two lines under Claude Code's input box, read off the screen. `segments` are
+ * the user's own statusLine, split at " · " and shown as they are (`model` is the
+ * first one). `mode` and `modeExtras` come from the mode line below it ("1 shell"
+ * and the like, without the key hints).
+ */
+export interface TuiFooter {
+  segments: string[]
+  model?: string
+  mode?: ChatMode
+  modeExtras: string[]
+}
+
+/** What chat:prompt answers with, from one screen capture. */
+export interface ChatScreenInfo {
+  prompt: TuiPrompt | null
+  footer: TuiFooter | null
+}
+
+/** One agent of a running workflow, from its journal.jsonl (chat:journal). */
+export interface WorkflowAgent {
+  agentId: string
+  label: string
+  phase?: string
+  state: 'running' | 'done'
+  /** First 200 characters of its result, once done. */
+  preview?: string
+  agentType?: string
+}
+
+/** A skill or custom command the host offers (chat:commands). */
+export interface ChatCommandInfo {
+  name: string
+  description: string
+  source: 'skill' | 'command' | 'project-skill' | 'project-command'
+}
 
 /**
  * An answer typed into the TUI, read off the prompt card. `digit` and `label`
