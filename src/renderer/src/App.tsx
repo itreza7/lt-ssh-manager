@@ -36,7 +36,7 @@ import { WorktreeView } from './components/WorktreeView'
 import { ReaderView } from './components/ReaderView'
 import { ChatView } from './components/ChatView'
 import { NewChatModal } from './components/chat/NewChatModal'
-import { chatTabTitle, leaf } from './components/chat/format'
+import { chatTabTitle, leaf, sortChats } from './components/chat/format'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
@@ -1434,7 +1434,7 @@ export default function App() {
   const fetchChatsFor = (conn: Connection) => async (): Promise<ChatSession[]> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required to list chats.')
-    return window.api.chatList({ connectionId: conn.id, password: password ?? undefined })
+    return sortChats(await window.api.chatList({ connectionId: conn.id, password: password ?? undefined }))
   }
 
   // Where a new chat starts: the folder of the terminal on screen when it is a
@@ -1476,7 +1476,7 @@ export default function App() {
       password = tabs.map((t) => ('password' in t && t.connectionId === conn.id ? t.password : undefined)).find(Boolean)
       if (!password) return []
     }
-    return window.api.chatList({ connectionId: conn.id, password })
+    return sortChats(await window.api.chatList({ connectionId: conn.id, password }))
   }
 
   const fetchTmuxFor = (conn: Connection) => async () => {

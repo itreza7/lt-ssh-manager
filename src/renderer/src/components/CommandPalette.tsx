@@ -147,7 +147,7 @@ export function CommandPalette({
   }, [agentHosts, q, attachFromInbox])
 
   const chatResults = useMemo<ResultItem[]>(() => {
-    const list = chats.filter((c) => `${chatLabel(c)} ${c.cwd}`.toLowerCase().includes(q))
+    const list = chats.filter((c) => `${chatLabel(c)} ${c.name ?? ''} ${c.cwd}`.toLowerCase().includes(q))
     return list.slice(0, MAX_RESULTS).map((c) => ({
       key: `chat:${c.sessionId}`,
       label: chatLabel(c),

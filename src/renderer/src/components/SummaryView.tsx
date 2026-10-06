@@ -818,8 +818,9 @@ export function SummaryView({
                         <span className="shrink-0 text-[10px] text-faint">{statusLabel(status, chat.waitingFor)}</span>
                         {!chat.drivable && <span className="shrink-0 text-[10px] text-faint">— {chat.tmux ? 'not a TUI, read only' : 'not in tmux'}</span>}
                       </div>
-                      <div className="mt-0.5 truncate font-mono text-[11px] text-faint">
-                        {chat.cwd} · {ago(chat.updatedAt)}
+                      <div dir="auto" className="mt-0.5 truncate text-[11px] text-faint" title={chat.cwd}>
+                        {chat.name ? `${chat.name} · ` : ''}
+                        {ago(chat.updatedAt)}
                       </div>
                     </div>
                     <Button variant="primary" onClick={() => onOpenChat(chat)}>

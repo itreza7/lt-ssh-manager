@@ -11,11 +11,26 @@ export function ago(ms: number): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
-/** What a session is called in lists: Claude Code's own title, else the folder. */
-export const chatLabel = (c: Pick<ChatSession, 'name' | 'cwd'>): string => c.name || leaf(c.cwd)
+/**
+ * What a session is called in lists: its folder, plus the worktree when it runs in
+ * one (`<repo>/.claude/worktrees/<name>` → "repo · name"). Claude Code's own title
+ * changes with the conversation; the folder says where the work is.
+ */
+export function chatLabel(c: Pick<ChatSession, 'cwd'>): string {
+  const wt = /^(.*)\/\.claude\/worktrees\/([^/]+)/.exec(c.cwd)
+  return wt ? `${leaf(wt[1])} · ${wt[2]}` : leaf(c.cwd)
+}
+
+/** Lists show chats by label, A to Z; two in the same folder by Claude's title. */
+export const sortChats = <T extends Pick<ChatSession, 'cwd' | 'name'>>(list: T[]): T[] =>
+  [...list].sort(
+    (a, b) =>
+      chatLabel(a).localeCompare(chatLabel(b), undefined, { numeric: true, sensitivity: 'base' }) ||
+      (a.name ?? '').localeCompare(b.name ?? '', undefined, { numeric: true, sensitivity: 'base' })
+  )
 
 /** Tab title for a chat. */
-export const chatTabTitle = (c: Pick<ChatSession, 'name' | 'cwd'>): string => `Chat · ${chatLabel(c).slice(0, 32)}`
+export const chatTabTitle = (c: Pick<ChatSession, 'cwd'>): string => `Chat · ${chatLabel(c).slice(0, 32)}`
 
 /** What a chat is doing, as the header and lists show it. `shell` and unknown values read as idle. */
 export type ChatStatus = 'idle' | 'busy' | 'waiting' | 'ended'
