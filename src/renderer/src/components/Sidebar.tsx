@@ -446,7 +446,10 @@ export function Sidebar({
       !(r.tmuxSession && liveTmux.has(r.tmuxSession)) &&
       hit(r.label)
   )
-  const shownTmux = tmux.filter((s) => hit(s.name))
+  // A tmux session running a Claude is that chat's row (with its Chat / Terminal
+  // switch), so the tmux list keeps only the plain ones.
+  const claudeTmux = new Set(chats.flatMap((c) => (c.tmux ? [c.tmux.session] : [])))
+  const shownTmux = tmux.filter((s) => !claudeTmux.has(s.name) && hit(s.name))
   const nothingFound = searching && groups.length === 0 && shownOpenRows.length === 0 && shownTmux.length === 0
 
   // This host's slice of the live-agent sweep, keyed by session name — the same
@@ -661,7 +664,9 @@ export function Sidebar({
                       key={chat.sessionId}
                       onClick={() => onOpenChat(chat)}
                       title={`${chat.cwd}\n${statusLabel(st, chat.waitingFor)}`}
-                      className={rowCls(chat.sessionId === activeChatSessionId)}
+                      className={rowCls(
+                        chat.sessionId === activeChatSessionId || (!!chat.tmux && chat.tmux.session === activeTmuxName)
+                      )}
                     >
                       <Slot>
                         <ChatDot status={st} />
@@ -677,7 +682,7 @@ export function Sidebar({
         })}
 
         {/* tmux — this server's sessions, with the agent status the Summary shows */}
-        {(shownTmux.length > 0 || (!searching && activeConnection)) && (
+        {(shownTmux.length > 0 || (!searching && activeConnection && tmux.length === 0)) && (
           <div className="mt-[7px]">
             <GroupHeader
               title="tmux"

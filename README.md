@@ -27,8 +27,9 @@ main process.
 - **Embedded terminals** — real interactive shells rendered with xterm.js,
   so `htop`, `vim`, `docker stats`, `tail -f` all work and look right.
 - **Sidebar** — like the Claude desktop app: your open tabs, every live Claude chat on the
-  host grouped by folder (worktrees under their repo), and the host's tmux sessions, each
-  with a live status dot. ⌘B (Ctrl+Shift+B elsewhere) folds it to a thin rail.
+  host grouped by folder (worktrees under their repo), and the host's other tmux sessions,
+  each with a live status dot. A Claude's row opens it as chat or terminal, whichever you
+  last switched it to. ⌘B (Ctrl+Shift+B elsewhere) folds it to a thin rail.
 - **tmux control mode** — optional `tmux -CC` integration renders each tmux pane as
   its own native terminal: real scrollback and copy with no mouse-mode, while tmux
   keeps your sessions alive across drops.
@@ -54,7 +55,8 @@ main process.
   a host, like the Claude desktop app: answers, tool calls as cards (commands with
   output, edits as diffs), and question, plan and permission prompts you answer by click.
   Every Claude live in tmux on the host appears, however it was started. The terminal tab
-  and the chat tab show the same session, so use either; "Open in terminal" switches over.
+  and the chat show the same session: the Chat / Terminal switch at the top right flips
+  between them in the same pane.
   Runs of tool calls fold into one line ("Ran 3 commands"). The composer bar holds the
   mode, model and effort pickers, a + for your skills and commands, a context ring, and
   the folder and git branch; running workflows and background agents show their phases

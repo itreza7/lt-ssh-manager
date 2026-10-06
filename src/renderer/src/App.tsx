@@ -42,6 +42,7 @@ import { chatTabTitle, leaf, sortChats } from './components/chat/format'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
+import { ModeSwitch } from './components/ModeSwitch'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
@@ -194,6 +195,27 @@ interface View {
   panes: (string | null)[]
   sizes: number[] // fractions, same length as panes, summing to 1
   focused: number
+}
+
+// Last mode the user picked per Claude session, keyed by connection and tmux session
+// name (which a /clear keeps). Read on a sidebar click to open the same side again.
+type SessionMode = 'chat' | 'terminal'
+const MODE_KEY = 'session.mode'
+const modeKey = (connectionId: string, tmuxName: string): string => `${connectionId}\0${tmuxName}`
+function readModes(): Record<string, SessionMode> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(MODE_KEY) ?? '{}')
+    return v && typeof v === 'object' ? (v as Record<string, SessionMode>) : {}
+  } catch {
+    return {}
+  }
+}
+function rememberMode(connectionId: string, tmuxName: string, mode: SessionMode): void {
+  try {
+    localStorage.setItem(MODE_KEY, JSON.stringify({ ...readModes(), [modeKey(connectionId, tmuxName)]: mode }))
+  } catch {
+    /* a blocked store only loses the memory */
+  }
 }
 
 const makeView = (
@@ -408,6 +430,8 @@ export default function App() {
   }
   const viewsRef = useRef(views)
   viewsRef.current = views
+  // Live Claudes by tmux session name, per connection, from the sidebar's chat poll.
+  const [claudeTmux, setClaudeTmux] = useState<Record<string, Record<string, ChatSession>>>({})
 
   const refresh = async (): Promise<void> => setConnections(await window.api.listConnections())
   const nameOf = (id: string): string => connections.find((c) => c.id === id)?.name ?? 'Connection'
@@ -458,6 +482,33 @@ export default function App() {
     const nv = makeView([id])
     setViews((vs) => [...vs, nv])
     setActiveViewId(nv.id)
+  }
+
+  // Show `id` in the pane that holds `replaceId` (the Chat / Terminal switch): the
+  // split keeps its layout, and `replaceId` stays mounted in a background view of
+  // its own. Without such a pane it is a plain showLeaf.
+  const showLeafIn = (id: string, replaceId: string): void => {
+    const target = viewsRef.current.find((x) => x.panes.includes(replaceId))
+    if (!target || id === replaceId) return showLeaf(id)
+    const idx = target.panes.indexOf(replaceId)
+    setViews((vs) => {
+      const out: View[] = []
+      for (const v of vs) {
+        if (v.id === target.id) {
+          const panes = v.panes.slice()
+          panes[idx] = id
+          out.push({ ...v, panes, focused: idx })
+        } else if (v.panes.includes(id)) {
+          const sv = shrinkView(v, v.panes.indexOf(id))
+          if (sv) out.push(sv)
+        } else {
+          out.push(v)
+        }
+      }
+      out.push(makeView([replaceId]))
+      return out
+    })
+    setActiveViewId(target.id)
   }
 
   // Click a pane to focus it.
@@ -636,6 +687,17 @@ export default function App() {
   })
 
   // In-pane move / detach / close controls, only for a leaf shown in a split.
+  // The Chat / Terminal switch over a terminal whose tmux session runs a Claude.
+  // In a split it sits below the pane tools, which take the top-right corner on hover.
+  const terminalSwitch = (tab: SessionTab | ControlTab): ReactNode =>
+    tab.tmux && claudeTmux[tab.connectionId]?.[tab.tmux.session] ? (
+      <ModeSwitch
+        mode="terminal"
+        onChat={() => void openChatForTab(tab)}
+        className={`absolute right-3 z-10 shadow-lg ${isSplit ? 'top-10' : 'top-2'}`}
+      />
+    ) : null
+
   const paneTools = (id: string): ReactNode => {
     if (!isSplit || !activeView || !onScreen(id)) return null
     const i = activeView.panes.indexOf(id)
@@ -1139,7 +1201,7 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { session?: string; title?: string; agent?: { dir: string } }
+    opts?: { session?: string; title?: string; agent?: { dir: string }; into?: string }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
@@ -1183,7 +1245,8 @@ export default function App() {
     }
     const tab: Tab = control ? { kind: 'tmux', ...base } : { kind: 'session', ...base }
     setTabs((t) => [...t, tab])
-    showLeaf(sessionId)
+    if (opts?.into) showLeafIn(sessionId, opts.into)
+    else showLeaf(sessionId)
   }
 
   // Open a remote file manager (SFTP) as a NEW tab.
@@ -1366,24 +1429,33 @@ export default function App() {
     sessionId: string,
     cwd: string,
     title: string,
-    starting?: boolean
+    starting?: boolean,
+    into?: string
   ): void => {
+    const show = (id: string): void => (into ? showLeafIn(id, into) : showLeaf(id))
     const open = tabs.find((x) => x.kind === 'chat' && x.sessionId === sessionId)
     if (open) {
-      showLeaf(open.id)
+      show(open.id)
       return
     }
     // A resumed tab keeps its old id, so the old session id can map to a taken one.
     const base = chatTabId(sessionId)
     const id = tabs.some((x) => x.id === base) ? `${base}:${Date.now()}` : base
     setTabs((t) => [...t, { kind: 'chat', id, connectionId, sessionId, cwd, title, password, starting }])
-    showLeaf(id)
+    show(id)
   }
 
   const openChatFor = async (conn: Connection, chat: ChatSession): Promise<void> => {
     const pw = await resolvePassword(conn)
     if (pw === null) return // user cancelled the prompt
     openChat(conn.id, pw ?? undefined, chat.sessionId, chat.cwd, chatTabTitle(chat))
+  }
+
+  // A session's sidebar row: the side the user last switched it to.
+  const openSessionRow = (conn: Connection, chat: ChatSession): void => {
+    const name = chat.tmux?.session
+    if (name && readModes()[modeKey(conn.id, name)] === 'terminal') showTmuxSession(conn.id, name)
+    else void openChatFor(conn, chat)
   }
 
   // A resume can start Claude under a new session id: the tab follows it.
@@ -1400,30 +1472,44 @@ export default function App() {
     )
 
   // The terminal tab on a tmux session: the one already open, else a new one.
-  const showTmuxSession = (connectionId: string, name: string): void => {
+  const showTmuxSession = (connectionId: string, name: string, into?: string): void => {
     const open = tabs.find(
       (t) => (t.kind === 'session' || t.kind === 'tmux') && t.connectionId === connectionId && t.tmux?.session === name
     )
     if (open) {
-      showLeaf(open.id)
+      if (into) showLeafIn(open.id, into)
+      else showLeaf(open.id)
       return
     }
     const conn = connections.find((c) => c.id === connectionId)
-    if (conn) attachTmux(conn, name)
+    if (conn) attachTmux(conn, name, into)
   }
 
-  // The chat for a terminal tab: the live Claude whose tmux session is the tab's.
+  // The Chat / Terminal switch: the other side of the same Claude, in the same pane.
+  const switchToTerminal = (tab: ChatTab, name: string): void => {
+    rememberMode(tab.connectionId, name, 'terminal')
+    showTmuxSession(tab.connectionId, name, tab.id)
+  }
+
+  // The chat for a terminal tab: the live Claude whose tmux session is the tab's,
+  // shown in the terminal's pane.
   const openChatForTab = async (tab: SessionTab | ControlTab): Promise<void> => {
     if (!tab.tmux) return
-    const list = await window.api
-      .chatList({ connectionId: tab.connectionId, password: tab.password })
-      .catch(() => [] as ChatSession[])
-    const chat = list.find((c) => c.tmux?.session === tab.tmux?.session)
+    const name = tab.tmux.session
+    const known = claudeTmux[tab.connectionId]?.[name]
+    const chat =
+      known ??
+      (
+        await window.api
+          .chatList({ connectionId: tab.connectionId, password: tab.password })
+          .catch(() => [] as ChatSession[])
+      ).find((c) => c.tmux?.session === name)
     if (!chat) {
       alert('No Claude is running in this tmux session.')
       return
     }
-    openChat(tab.connectionId, tab.password, chat.sessionId, chat.cwd, chatTabTitle(chat))
+    rememberMode(tab.connectionId, name, 'chat')
+    openChat(tab.connectionId, tab.password, chat.sessionId, chat.cwd, chatTabTitle(chat), false, tab.id)
   }
 
   // The chat list for a connection. Summary reads it like it reads tmux (a
@@ -1500,7 +1586,12 @@ export default function App() {
     if (!conn) return []
     const { ok, password } = await quietPassword(conn)
     if (!ok) return []
-    return sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+    const list = sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+    // Which tmux sessions run a Claude: their terminal tabs get the Chat / Terminal switch.
+    const byName: Record<string, ChatSession> = {}
+    for (const c of list) if (c.tmux) byName[c.tmux.session] = c
+    setClaudeTmux((m) => ({ ...m, [conn.id]: byName }))
+    return list
   }
 
   const fetchTmuxSidebar = async (): Promise<TmuxSession[]> => {
@@ -1627,8 +1718,8 @@ export default function App() {
   // `name` comes from the server's own session list (or the user's new-session
   // field) and is passed through verbatim: sanitizing it here would attach to the
   // wrong name for any session tmux itself allows but tmuxSessionName() rewrites.
-  const attachTmux = (conn: Connection, name: string): void => {
-    void openSession(conn, { session: name, title: `${conn.name} · ${name}` })
+  const attachTmux = (conn: Connection, name: string, into?: string): void => {
+    void openSession(conn, { session: name, title: `${conn.name} · ${name}`, into })
   }
 
   // --- agent actions ----------------------------------------------------------
@@ -1851,7 +1942,7 @@ export default function App() {
             ? (activeTab.tmux?.session ?? null)
             : null
         }
-        onOpenChat={(chat) => activeConnection && void openChatFor(activeConnection, chat)}
+        onOpenChat={(chat) => activeConnection && openSessionRow(activeConnection, chat)}
         onOpenTmux={(name) => activeConnection && showTmuxSession(activeConnection.id, name)}
         agentHosts={agentHosts}
         onOpenSettings={openSettings}
@@ -2055,6 +2146,7 @@ export default function App() {
                   onOpenReader={() => void openReaderForTab(tab)}
                   onOpenChat={tab.tmux ? () => void openChatForTab(tab) : undefined}
                 />
+                {terminalSwitch(tab)}
                 {paneTools(tab.id)}
               </div>
             )
@@ -2085,6 +2177,7 @@ export default function App() {
                 onOpenReader={() => void openReaderForTab(tab)}
                 onOpenChat={tab.tmux ? () => void openChatForTab(tab) : undefined}
               />
+              {terminalSwitch(tab)}
               {paneTools(tab.id)}
             </div>
           ))}
@@ -2203,7 +2296,7 @@ export default function App() {
                   cwd={tab.cwd}
                   active={onScreen(tab.id)}
                   starting={tab.starting}
-                  onOpenTerminal={(name) => showTmuxSession(tab.connectionId, name)}
+                  onOpenTerminal={(name) => switchToTerminal(tab, name)}
                   onResumed={(sid) => moveChat(tab.id, sid)}
                   onStarted={() => chatStarted(tab.id)}
                   titleBar={chatOnly && tab.id === activeTabId}

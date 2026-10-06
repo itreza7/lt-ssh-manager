@@ -14,6 +14,7 @@ import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/t
 import { EFFORT_LEVELS } from '../../../shared/tuiKeys'
 import { initialChatState, prependState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
 import { ChatComposer } from './ChatComposer'
+import { ModeSwitch } from './ModeSwitch'
 import { Button, Modal } from './Modal'
 import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, ToolGroup, UserMessage } from './chat/Blocks'
 import { chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
@@ -32,7 +33,7 @@ interface Props {
   starting?: boolean
   /** Claude's status file has shown up: `starting` is over. */
   onStarted?: () => void
-  /** Show the terminal tab on this tmux session (opening one if needed). */
+  /** Show the terminal on this tmux session in this pane (opening one if needed): the Chat / Terminal switch. */
   onOpenTerminal: (tmuxSession: string) => void
   /** Resume started a different session id: the tab should follow it. */
   onResumed: (sessionId: string) => void
@@ -737,7 +738,6 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         ? 'Not a TUI — read only'
         : 'Not in tmux — read only'
 
-  const ghost = 'no-drag grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-title'
   const actions = (variant: 'chevron' | 'dots') => (
     <ActionsMenu
       variant={variant}
@@ -784,14 +784,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
               Interrupt
             </button>
           )}
-          {openTerminal && (
-            <button onClick={openTerminal} title="Open in terminal" className={ghost}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m4 17 6-6-6-6" />
-                <path d="M12 19h8" />
-              </svg>
-            </button>
-          )}
+          {openTerminal && <ModeSwitch mode="chat" onTerminal={openTerminal} className="mr-1" />}
           {actions('dots')}
         </div>
       </div>
