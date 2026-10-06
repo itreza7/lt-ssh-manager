@@ -644,7 +644,8 @@ export interface PersistedTab {
   initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo; reader: the project directory (absent = all projects)
   path?: string // editor: remote file path
   name?: string // editor: file name
-  chatId?: string // chat: the relay's chat id (c + 12 hex), see chatProtocol.ts
+  sessionId?: string // chat: the Claude session the tab follows (a tab saved by 0.43.0 has `chatId` instead and is dropped on restore)
+  cwd?: string // chat: the session's directory, needed to resume it once it has ended
   /**
    * session/tmux: a stable id for this tab, independent of the live (regenerated
    * every launch) session id. Keys the prompt composer's persisted draft, so a

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { ChatSummary } from '../../../shared/chatProtocol'
+import type { ChatSession } from '../../../shared/chatProtocol'
 import type {
   AgentHostScan,
   ClaudeHookStatus,
@@ -16,7 +16,7 @@ import type {
   TmuxSession
 } from '../../../shared/types'
 import { Button, Modal } from './Modal'
-import { ago, CHAT_DOT, chatLabel, chatRowStatus } from './chat/format'
+import { ago, CHAT_DOT, chatLabel, chatStatusOf, statusLabel } from './chat/format'
 import { ClaudeSyncModal } from './ClaudeSyncModal'
 import { isClaudeSession } from '../lib/claude'
 import { agentStatus } from '../lib/agents'
@@ -35,10 +35,9 @@ interface Props {
   fetchStats: () => Promise<ServerStats>
   onAttach: (name: string) => void
   onNewSession: (name: string) => void
-  fetchChats: () => Promise<ChatSummary[]>
-  onOpenChat: (chat: ChatSummary) => void
+  fetchChats: () => Promise<ChatSession[]>
+  onOpenChat: (chat: ChatSession) => void
   onNewChat: () => void
-  onStopChat: (chatId: string) => Promise<void>
   onKillSession: (name: string) => Promise<void>
   onRenameSession: (from: string, to: string) => Promise<void>
   /** Resolve this connection's password once, for all the reads below. */
@@ -310,7 +309,6 @@ export function SummaryView({
   fetchChats,
   onOpenChat,
   onNewChat,
-  onStopChat,
   onKillSession,
   onRenameSession,
   resolvePassword,
@@ -337,7 +335,7 @@ export function SummaryView({
   const [editing, setEditing] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
-  const [chats, setChats] = useState<ChatSummary[] | null>(null)
+  const [chats, setChats] = useState<ChatSession[] | null>(null)
   const [chatsLoading, setChatsLoading] = useState(false)
   const [chatsError, setChatsError] = useState<string | null>(null)
 
@@ -776,7 +774,7 @@ export function SummaryView({
           )}
         </div>
 
-        {/* chats — native conversations with Claude Code, kept alive by a relay on the host */}
+        {/* chats — every live Claude Code on the host, as a chat view of its tmux session */}
         <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '30ms' }}>
           <div className="mb-3.5 flex items-center justify-between">
             <span className="eyebrow">Chats</span>
@@ -799,16 +797,16 @@ export function SummaryView({
           )}
 
           {!chatsError && chats !== null && chats.length === 0 && (
-            <p className="py-2 text-sm text-faint">No chats on this host yet.</p>
+            <p className="py-2 text-sm text-faint">No Claude is running on this host.</p>
           )}
 
           {chats && chats.length > 0 && (
             <div className="space-y-1.5">
               {chats.map((chat) => {
-                const status = chatRowStatus(chat)
+                const status = chatStatusOf(chat)
                 return (
                   <div
-                    key={chat.chatId}
+                    key={chat.sessionId}
                     className="flex items-center justify-between gap-2 rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
                   >
                     <div className="min-w-0 flex-1">
@@ -817,32 +815,16 @@ export function SummaryView({
                         <span dir="auto" className="truncate text-sm text-fg">
                           {chatLabel(chat)}
                         </span>
-                        <span className="shrink-0 text-[10px] text-faint">{status}</span>
+                        <span className="shrink-0 text-[10px] text-faint">{statusLabel(status, chat.waitingFor)}</span>
+                        {!chat.drivable && <span className="shrink-0 text-[10px] text-faint">— {chat.tmux ? 'not a TUI, read only' : 'not in tmux'}</span>}
                       </div>
                       <div className="mt-0.5 truncate font-mono text-[11px] text-faint">
-                        {chat.config.cwd}
-                        {chat.state && ` · ${ago(chat.state.updatedAt)}`}
+                        {chat.cwd} · {ago(chat.updatedAt)}
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {chat.alive && (
-                        <IconButton
-                          title="Stop session"
-                          danger
-                          onClick={() => {
-                            if (confirm(`Stop chat “${chatLabel(chat)}”? Its conversation is kept; it can be restarted.`))
-                              void onStopChat(chat.chatId)
-                                .then(loadChats)
-                                .catch((e) => setChatsError(e instanceof Error ? e.message : String(e)))
-                          }}
-                        >
-                          ✕
-                        </IconButton>
-                      )}
-                      <Button variant="primary" onClick={() => onOpenChat(chat)}>
-                        Open ▸
-                      </Button>
-                    </div>
+                    <Button variant="primary" onClick={() => onOpenChat(chat)}>
+                      Open ▸
+                    </Button>
                   </div>
                 )
               })}

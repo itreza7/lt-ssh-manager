@@ -97,6 +97,8 @@ interface Props {
   onSendKey: (data: string) => void
   /** Open the transcript reader beside this terminal; hides the button if unset. */
   onOpenReader?: () => void
+  /** Open the chat view of this terminal's Claude; hides the button if unset. */
+  onOpenChat?: () => void
 }
 
 /** The three heights this panel occupies, ordered short to tall. */
@@ -136,7 +138,8 @@ export function PromptComposer({
   onDiscard,
   target,
   onSendKey,
-  onOpenReader
+  onOpenReader,
+  onOpenChat
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -448,6 +451,15 @@ export function PromptComposer({
             <span className="eyebrow shrink-0 text-accent">prompt composer</span>
             {target && <span className="truncate font-mono text-[11px] text-faint">→ {target}</span>}
             <div className="flex-1" />
+            {onOpenChat && (
+              <button
+                onClick={onOpenChat}
+                title="Follow this Claude session in a chat tab"
+                className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-fg"
+              >
+                Open in chat
+              </button>
+            )}
             {onOpenReader && (
               <button
                 onClick={onOpenReader}

@@ -1,4 +1,4 @@
-import type { ChatSummary } from '../../../../shared/chatProtocol'
+import type { ChatMode, ChatSession } from '../../../../shared/chatProtocol'
 
 /** Last path segment: the folder name that identifies the work. */
 export const leaf = (p: string): string => p.split('/').filter(Boolean).pop() ?? p
@@ -11,21 +11,41 @@ export function ago(ms: number): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
-/** What a chat is called in lists: the relay's label, else the folder. */
-export const chatLabel = (c: ChatSummary): string => c.state?.title || c.config.title || leaf(c.config.cwd)
+/** What a session is called in lists: Claude Code's own title, else the folder. */
+export const chatLabel = (c: Pick<ChatSession, 'name' | 'cwd'>): string => c.name || leaf(c.cwd)
 
 /** Tab title for a chat. */
-export const chatTabTitle = (c: ChatSummary): string => `Chat · ${chatLabel(c).slice(0, 32)}`
+export const chatTabTitle = (c: Pick<ChatSession, 'name' | 'cwd'>): string => `Chat · ${chatLabel(c).slice(0, 32)}`
 
-/** The state a list row shows: the relay's own, or stopped when its tmux session is gone. */
-export function chatRowStatus(c: ChatSummary): 'idle' | 'running' | 'waiting' | 'stopped' {
-  if (!c.alive || !c.state || c.state.status === 'exited') return 'stopped'
-  return c.state.status === 'running' || c.state.status === 'waiting' ? c.state.status : 'idle'
+/** What a chat is doing, as the header and lists show it. `shell` and unknown values read as idle. */
+export type ChatStatus = 'idle' | 'busy' | 'waiting' | 'ended'
+
+export const chatStatusOf = (c: Pick<ChatSession, 'status'> | null): ChatStatus =>
+  c === null ? 'ended' : c.status === 'busy' || c.status === 'waiting' ? c.status : 'idle'
+
+export function statusLabel(status: ChatStatus, waitingFor?: string): string {
+  switch (status) {
+    case 'busy':
+      return 'Working…'
+    case 'waiting':
+      return waitingFor ? `Waiting: ${waitingFor}` : 'Waiting'
+    case 'ended':
+      return 'Ended'
+    default:
+      return 'Idle'
+  }
 }
 
-export const CHAT_DOT: Record<ReturnType<typeof chatRowStatus>, string> = {
+export const CHAT_DOT: Record<ChatStatus, string> = {
   idle: 'bg-faint',
-  running: 'bg-signal dot-glow animate-pulse',
+  busy: 'bg-signal dot-glow animate-pulse',
   waiting: 'bg-amber dot-glow',
-  stopped: 'bg-danger/50'
+  ended: 'bg-danger/50'
+}
+
+export const MODE_LABEL: Record<ChatMode, string> = {
+  bypassPermissions: "Don't ask",
+  default: 'Ask first',
+  acceptEdits: 'Auto-accept edits',
+  plan: 'Plan'
 }

@@ -658,8 +658,8 @@ export class SshManager extends EventEmitter {
   }
 
   /**
-   * A long-lived exec channel on the pooled connection — a `tail -F`, a relay's
-   * output — with no PTY and no deadline, delivered as it arrives.
+   * A long-lived exec channel on the pooled connection — a `tail -F` of a
+   * transcript — with no PTY and no deadline, delivered as it arrives.
    *
    * The pool ref is held until the channel is gone, so the shared connection is
    * not idled out from under a stream that is merely quiet. `onClose` fires

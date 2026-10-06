@@ -15,7 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { mkdir, rm, stat, writeFile, readFile, readdir, rename, chmod } from 'node:fs/promises'
 import { existsSync, type Dirent } from 'node:fs'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type {
@@ -77,22 +77,22 @@ import {
   type ReaderChunk,
   type ReaderSession
 } from '../shared/claudeTranscript'
-import {
-  CHAT_DIR,
-  CHAT_ID_RE,
-  CHAT_ROOT,
-  chatTmuxSession,
-  type ChatCommand,
-  type ChatConfig,
-  type ChatEvent,
-  type ChatMode,
-  type ChatStartArgs,
-  type ChatState,
-  type ChatStreamData,
-  type ChatStreamEnd,
-  type ChatSummary
+import type {
+  ChatAnswer,
+  ChatKeysResult,
+  ChatSession,
+  ChatStreamData,
+  ChatStreamEnd,
+  ChatTarget
 } from '../shared/chatProtocol'
-import { CLAUDE_RESOLVE, CLAUDE_TIMEOUT } from '../shared/claude'
+import {
+  CHAT_LIST_SCRIPT,
+  PANE_RE,
+  isUuid,
+  parseChatSessions
+} from '../shared/claudeSessions'
+import { INTERRUPT, KEY, MARK, inputHasDraft, parsePrompt, promptHasOption, type TuiPrompt } from '../shared/tuiKeys'
+import { claudeResumeSessionName, claudeScript, claudeSessionName } from '../shared/claude'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
   MAX_BRANCHES,
@@ -1833,34 +1833,23 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     }
   )
 
-  // ---- Chat (the relay that keeps Claude Code running on the remote) ----
+  // ---- Chat (a second view of the Claude Code TUI running in tmux on the host) ----
   //
-  // The relay lives in a tmux session on the host and talks through files in its
-  // chat directory (see shared/chatProtocol.ts); everything here is plumbing to
-  // start it, hand it commands, and tail its events.
-
-  /** Oldest Node the relay (and the Agent SDK under it) runs on. */
-  const CHAT_NODE_MIN = 18
-  const CHAT_MODES: ChatMode[] = ['bypass', 'default', 'acceptEdits', 'plan']
-
-  const chatIdOf = (v: unknown): string => {
-    if (typeof v !== 'string' || !CHAT_ID_RE.test(v)) throw new Error('Invalid chat id')
-    return v
-  }
-  /** A chat's directory as a shell word. Only ever built from an id that passed CHAT_ID_RE. */
-  const chatDirSh = (chatId: string): string => `"$HOME"/${CHAT_DIR}/${chatId}`
+  // Nothing here runs Claude for the chat. It reads what Claude Code itself writes
+  // (the status files in ~/.claude/sessions and the session transcript) and types
+  // into the tmux pane the Claude is in. See shared/chatProtocol.ts, shared/tuiKeys.ts
+  // and shared/claudeSessions.ts.
 
   const chatExec = (
-    connectionId: string,
-    password: string | undefined,
+    t: ChatTarget,
     script: string,
     opts?: { input?: Buffer; maxBytes?: number; deadlineMs?: number }
   ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> => {
-    const connection = connectionStore.get(connectionId)
+    const connection = connectionStore.get(t.connectionId)
     if (!connection) throw new Error('Connection not found')
-    return ssh.execBytes(connectionId, connection, {
+    return ssh.execBytes(t.connectionId, connection, {
       command: shWrap(script),
-      password: passwordFor(connectionId, password),
+      password: passwordFor(t.connectionId, t.password),
       timeoutMs: 15000,
       deadlineMs: opts?.deadlineMs ?? 30000,
       maxBytes: opts?.maxBytes ?? 1_000_000,
@@ -1868,248 +1857,62 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     })
   }
 
-  interface ChatRemote {
-    home: string
-    cwd: string
-    node: string
-    claude: string
-    relayPresent: boolean
+  const chatWait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+  /** Longest first load of a transcript — the same 4 MiB the Reader looks back. */
+  const CHAT_TAIL_MAX = 4 * 1024 * 1024
+
+  const chatSessionsOf = async (t: ChatTarget): Promise<ChatSession[]> => {
+    const res = await chatExec(t, CHAT_LIST_SCRIPT, { maxBytes: 8 * 1024 * 1024 })
+    return parseChatSessions(res.stdout.toString('utf-8'))
   }
 
-  /**
-   * The relay bundle and the name it is kept under on a host. The name is a hash
-   * of the content, not a version number: a relay edited without a bump would
-   * otherwise be skipped as "already uploaded" and the host would keep running
-   * the old one. Read once — a rebuilt relay needs an app restart, like any other
-   * main-process change.
-   */
-  let relayBundle: { src: Buffer; name: string } | undefined
-  const chatRelayBundle = async (): Promise<{ src: Buffer; name: string }> => {
-    if (relayBundle) return relayBundle
-    let src: Buffer
-    try {
-      src = await readFile(join(app.getAppPath(), 'resources', 'relay.mjs'))
-    } catch {
-      throw new Error('The chat relay is not built (resources/relay.mjs is missing). Run npm run build first.')
-    }
-    const name = `relay-${createHash('sha256').update(src).digest('hex').slice(0, 12)}.mjs`
-    return (relayBundle = { src, name })
-  }
+  /** Every live Claude on the host, newest first. */
+  ipcMain.handle('chat:list', (_e, t: ChatTarget): Promise<ChatSession[]> => chatSessionsOf(t))
 
-  /**
-   * What the host looks like to a relay: the absolute working directory, node, the
-   * real claude binary, and whether this version of the relay is already uploaded —
-   * all in one round trip.
-   *
-   * Node and claude come from an *interactive* bash, with the user's `claude`
-   * function and alias removed: the relay must run the binary, not the wrapper. It
-   * is `-i`, not a PS1 trick, because Debian and Ubuntu's stock ~/.bashrc returns
-   * on `case $- in *i*`, and the version-manager PATH lines sit below that. The
-   * probe prints labelled lines because an interactive rc may print anything.
-   * Anything not found there falls back to the same ladder an agent tab uses.
-   */
-  const chatResolve = async (
-    connectionId: string,
-    password: string | undefined,
-    cwd: string
-  ): Promise<ChatRemote> => {
-    const { name: relayName } = await chatRelayBundle()
-    const pin = connectionStore.get(connectionId)?.claudePath
-    const dir = cwd === '~' ? '"$HOME"' : cwd.startsWith('~/') ? `"$HOME"${shQuote(cwd.slice(1))}` : shQuote(cwd)
-    const probe =
-      'unset -f claude; unalias claude 2>/dev/null; echo "NODE=$(command -v node)"; echo "CLAUDE=$(command -v claude)"'
-    const script = [
-      `d=${dir}`,
-      'cd -- "$d" 2>/dev/null || { echo ERR=cwd; exit 0; }',
-      'echo "CWD=$(pwd -P)"',
-      'echo "HOME=$HOME"',
-      `[ -f "$HOME/${CHAT_ROOT}/${relayName}" ] && echo RELAY=1`,
-      CLAUDE_TIMEOUT,
-      `CLI=${pin ? shQuote(pin) : ''}`,
-      'B=$(command -v bash 2>/dev/null); P=',
-      '[ -n "$B" ] && P=$($TMO "$B" -ic ' + shQuote(probe) + ' </dev/null 2>/dev/null)',
-      `N=$(printf '%s\\n' "$P" | sed -n 's/^NODE=//p' | tail -n 1)`,
-      '[ -n "$N" ] || N=$(command -v node 2>/dev/null)',
-      '[ -n "$N" ] || for c in "$HOME/.local/bin/node" /usr/local/bin/node /usr/bin/node /opt/homebrew/bin/node; do [ -x "$c" ] && N=$c && break; done',
-      'case "$N" in /*) [ -x "$N" ] || N= ;; *) N= ;; esac',
-      'echo "NODE=$N"',
-      `[ -n "$N" ] && echo "NODEV=$("$N" -p process.versions.node 2>/dev/null)"`,
-      `[ -n "$CLI" ] || CLI=$(printf '%s\\n' "$P" | sed -n 's/^CLAUDE=//p' | tail -n 1)`,
-      CLAUDE_RESOLVE,
-      'echo "CLAUDE=$CLI"',
-      'exit 0'
-    ].join(SEP)
-    const res = await chatExec(connectionId, password, script, { deadlineMs: 45000 })
-    const out = new Map<string, string>()
-    for (const line of res.stdout.toString('utf-8').split('\n')) {
-      const i = line.indexOf('=')
-      if (i > 0) out.set(line.slice(0, i), line.slice(i + 1))
-      else if (line === 'RELAY=1') out.set('RELAY', '1')
-    }
-    if (out.get('ERR') === 'cwd') throw new Error(`Directory not found on the host: ${cwd}`)
-    const abs = (k: string): string => {
-      const v = out.get(k) ?? ''
-      return v.startsWith('/') ? v : ''
-    }
-    if (!abs('CWD') || !abs('HOME')) throw new Error(res.stderr.trim() || 'Could not inspect the host')
-    const node = abs('NODE')
-    if (!node) throw new Error(`Node.js ${CHAT_NODE_MIN} or newer was not found on this host. The chat relay needs it.`)
-    const major = Number.parseInt(out.get('NODEV') ?? '', 10)
-    if (!(major >= CHAT_NODE_MIN)) {
-      throw new Error(`Node.js ${out.get('NODEV') || '(unknown version)'} is too old on this host; the chat relay needs ${CHAT_NODE_MIN} or newer.`)
-    }
-    const claude = abs('CLAUDE')
-    if (!claude) {
-      throw new Error(
-        'Claude Code was not found on this host. Install it, or set its full path in Edit > Claude Code binary.'
-      )
-    }
-    return { home: abs('HOME'), cwd: abs('CWD'), node, claude, relayPresent: out.get('RELAY') === '1' }
-  }
+  /** One session, or null when no live Claude has that id (it ended). */
+  ipcMain.handle('chat:status', async (_e, args: ChatTarget & { sessionId: string }): Promise<ChatSession | null> => {
+    if (!isUuid(args.sessionId)) throw new Error('Invalid session id')
+    return (await chatSessionsOf(args)).find((s) => s.sessionId === args.sessionId) ?? null
+  })
 
-  /**
-   * Put this version of the relay on the host. The file is the Vite build of
-   * src/relay/relay.ts; in dev and packaged alike it sits under the app path
-   * (electron-builder ships resources/**). Written to a temp name and moved, so a
-   * relay that is about to start is never a half-copied file.
-   */
-  const chatUploadRelay = async (connectionId: string, password: string | undefined): Promise<void> => {
-    const { src, name } = await chatRelayBundle()
-    const script =
-      `umask 077${SEP}d="$HOME/${CHAT_ROOT}"${SEP}mkdir -p "$d" && cat > "$d/.up.$$.tmp" && ` +
-      `mv -f "$d/.up.$$.tmp" "$d/${name}"`
-    const res = await chatExec(connectionId, password, script, { input: src, deadlineMs: 120000 })
-    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to upload the chat relay')
-  }
-
-  /**
-   * Write config.json and start the relay in its own tmux session, which is what
-   * lets it outlive the SSH connection. `fresh` is a first start: if it does not
-   * come up, the directory it just made is removed again so a failed start leaves
-   * no dead chat in the list. A restart keeps whatever is there.
-   *
-   * The pane runs under /bin/sh with node's directory first on PATH, because a
-   * tmux server started long ago carries whatever PATH it had then, and claude
-   * may be a script that needs `node` on it. The relay's stderr goes to relay.log
-   * in the chat directory — a relay that dies on import would otherwise take its
-   * only explanation with the pane. A second after the start the session must still
-   * exist, or the start fails with the tail of that log.
-   */
-  const chatLaunch = async (
-    connectionId: string,
-    password: string | undefined,
-    config: ChatConfig,
-    remote: ChatRemote,
-    fresh: boolean
-  ): Promise<void> => {
-    const id = chatIdOf(config.chatId)
-    const dir = `${remote.home}/${CHAT_DIR}/${id}`
-    const relay = `${remote.home}/${CHAT_ROOT}/${(await chatRelayBundle()).name}`
-    const nodeDir = remote.node.slice(0, remote.node.lastIndexOf('/')) || '/'
-    const inner =
-      `PATH=${shQuote(nodeDir)}:"$PATH"${SEP}export PATH${SEP}` +
-      `exec ${shQuote(remote.node)} ${shQuote(relay)} ${shQuote(dir)} 2>>${shQuote(`${dir}/relay.log`)}`
-    const session = chatTmuxSession(id)
-    const script =
-      `command -v tmux >/dev/null 2>&1 || { echo 'tmux is not installed on this host' >&2; exit 127; }${SEP}` +
-      `umask 077${SEP}d=${chatDirSh(id)}${SEP}` +
-      `mkdir -p "$d" && cat > "$d/config.json.tmp" && mv -f "$d/config.json.tmp" "$d/config.json" && ` +
-      `tmux new -d -s ${shQuote(session)} ${shQuote(shWrap(inner))} && sleep 1 && ` +
-      `tmux has-session -t ${shQuote('=' + session)} 2>/dev/null || ` +
-      `{ tail -n 8 "$d/relay.log" >&2 2>/dev/null; echo 'The chat relay did not start' >&2; ${fresh ? 'rm -rf "$d"; ' : ''}exit 1; }`
-    const res = await chatExec(connectionId, password, script, {
-      input: Buffer.from(JSON.stringify(config), 'utf-8'),
-      deadlineMs: 45000
-    })
-    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to start the chat relay')
-  }
-
-  ipcMain.handle(
-    'chat:start',
-    async (_e, args: ChatStartArgs): Promise<{ chatId: string }> => {
-      if (typeof args.cwd !== 'string' || !args.cwd.trim() || args.cwd.includes('\0')) {
-        throw new Error('Choose a working directory')
-      }
-      if (!CHAT_MODES.includes(args.mode)) throw new Error('Invalid mode')
-      const remote = await chatResolve(args.connectionId, args.password, args.cwd.trim())
-      if (!remote.relayPresent) await chatUploadRelay(args.connectionId, args.password)
-      const chatId = 'c' + randomBytes(6).toString('hex')
-      const config: ChatConfig = {
-        chatId,
-        cwd: remote.cwd,
-        model: args.model || undefined,
-        mode: args.mode,
-        claudePath: remote.claude,
-        resume: args.resume || undefined,
-        title: args.title || undefined,
-        createdAt: Date.now()
-      }
-      await chatLaunch(args.connectionId, args.password, config, remote, true)
-      return { chatId }
-    }
-  )
-
-  // Commands to one chat go out one at a time: an image-sized line is several
-  // writes to the file, and two of them interleaving would corrupt both.
-  const chatSendQueue = new Map<string, Promise<unknown>>()
-
-  const chatAppend = (
-    connectionId: string,
-    password: string | undefined,
-    chatId: string,
-    cmd: ChatCommand,
-    after = ''
-  ): Promise<unknown> => {
-    const run = async (): Promise<void> => {
-      const script =
-        `d=${chatDirSh(chatId)}${SEP}[ -d "$d" ] || exit 3${SEP}cat >> "$d/inbox.jsonl" || exit 1${SEP}${after}exit 0`
-      const res = await chatExec(connectionId, password, script, {
-        input: Buffer.from(JSON.stringify(cmd) + '\n', 'utf-8'),
-        deadlineMs: 120000,
-        maxBytes: 4096
-      })
-      if (res.code === 3) throw new Error('Chat not found')
-      if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to send to the chat')
-    }
-    const prev = chatSendQueue.get(chatId) ?? Promise.resolve()
-    const next = prev.then(run, run)
-    const tail = next.catch(() => undefined)
-    chatSendQueue.set(chatId, tail)
-    void tail.then(() => {
-      if (chatSendQueue.get(chatId) === tail) chatSendQueue.delete(chatId)
-    })
-    return next
-  }
-
-  ipcMain.handle(
-    'chat:send',
-    async (_e, args: { connectionId: string; password?: string; chatId: string; cmd: ChatCommand }): Promise<void> => {
-      const chatId = chatIdOf(args.chatId)
-      const cmd = args.cmd
-      if (!cmd || typeof cmd.t !== 'string' || typeof cmd.id !== 'string') throw new Error('Invalid command')
-      await chatAppend(args.connectionId, args.password, chatId, cmd)
-    }
-  )
-
-  // ---- live streams of events.jsonl ----
+  // ---- live streams of a transcript ----
 
   const chatStreams = new Map<string, { close(): void; wc: WebContents }>()
   const chatWatched = new WeakSet<WebContents>()
-  /** Longest event line we'll buffer while waiting for its newline. */
+  /** Longest transcript line we'll buffer while waiting for its newline. */
   const CHAT_LINE_MAX = 32 * 1024 * 1024
-  /** Most events one batch carries, however fast they arrive. */
+  /** Most records one batch carries, however fast they arrive. */
   const CHAT_BATCH_MAX = 1000
 
   ipcMain.handle(
     'chat:stream',
     async (
       e,
-      args: { connectionId: string; password?: string; chatId: string; offset: number }
-    ): Promise<{ streamId: string }> => {
-      const chatId = chatIdOf(args.chatId)
-      const offset = Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset)) : 0
+      args: ChatTarget & { sessionId: string; offset: number }
+    ): Promise<{ streamId: string; start: number }> => {
+      if (!isUuid(args.sessionId)) throw new Error('Invalid session id')
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
+      const offset = Number.isFinite(args.offset) ? Math.min(Math.floor(args.offset), Number.MAX_SAFE_INTEGER) : -1
+
+      // Find the file, and where to start in it: the offset asked for, or — on a
+      // first open (negative), or one past the end of a file that shrank — the
+      // last 4 MiB from the next whole line, like reader:read.
+      const locate =
+        `f=$(ls -t "$HOME"/.claude/projects/*/${args.sessionId}.jsonl 2>/dev/null | head -n 1)${SEP}` +
+        `[ -n "$f" ] || exit 3${SEP}sz=$(wc -c < "$f" | tr -d ' ')${SEP}o=${offset}${SEP}` +
+        `if [ "$o" -lt 0 ] || [ "$o" -gt "$sz" ]; then o=$(( sz - ${CHAT_TAIL_MAX} )); [ "$o" -lt 0 ] && o=0; ` +
+        `if [ "$o" -gt 0 ]; then l=$(tail -c +"$o" "$f" | head -n 1 | wc -c | tr -d ' '); o=$(( o - 1 + l )); fi; fi${SEP}` +
+        `echo "$o"${SEP}echo "$f"`
+      const found = await chatExec(args, locate)
+      if (found.code === 3) throw new Error('Transcript not found')
+      const [startLine, path] = found.stdout.toString('utf-8').split('\n')
+      const start = /^\d+$/.test(startLine ?? '') ? Number(startLine) : NaN
+      if (!Number.isFinite(start) || !path?.startsWith('/') || !path.endsWith(`/${args.sessionId}.jsonl`)) {
+        throw new Error(found.stderr.trim() || 'Transcript not found')
+      }
+
       const wc = e.sender
       const streamId = 's' + randomBytes(6).toString('hex')
       const emit = (channel: string, payload: ChatStreamData | ChatStreamEnd): void => {
@@ -2120,60 +1923,59 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       // over, so a reconnect resumes exactly where this left off. A bad line is
       // skipped but still counted, or the offset would stall on it forever.
       let pending: Buffer = Buffer.alloc(0)
-      let next = offset
-      let events: ChatEvent[] = []
+      let next = start
+      let records: unknown[] = []
       let timer: ReturnType<typeof setTimeout> | undefined
       const flush = (): void => {
         if (timer) clearTimeout(timer)
         timer = undefined
-        if (events.length === 0) return
-        const batch = events
-        events = []
-        emit('chat:data', { streamId, events: batch, next })
+        if (records.length === 0) return
+        const batch = records
+        records = []
+        emit('chat:data', { streamId, records: batch, next })
       }
       let handle: { close(): void } | undefined
       let forced: string | undefined
+      let ended = false
       const onData = (d: Buffer): void => {
         pending = pending.length ? Buffer.concat([pending, d]) : d
         const last = pending.lastIndexOf(0x0a)
         if (last < 0) {
           if (pending.length > CHAT_LINE_MAX) {
             pending = Buffer.alloc(0)
-            forced = 'An event line was too large to read'
+            forced = 'A transcript line was too large to read'
             handle?.close()
           }
           return
         }
         const whole = pending.subarray(0, last + 1)
         pending = Buffer.from(pending.subarray(last + 1))
-        let start = 0
-        for (let i = whole.indexOf(0x0a); i >= 0; i = whole.indexOf(0x0a, start)) {
-          const line = whole.subarray(start, i)
-          start = i + 1
+        let from = 0
+        for (let i = whole.indexOf(0x0a); i >= 0; i = whole.indexOf(0x0a, from)) {
+          const line = whole.subarray(from, i)
+          from = i + 1
           next += line.length + 1
           if (line.length === 0) continue
           try {
-            const ev = JSON.parse(line.toString('utf-8')) as ChatEvent
-            if (ev && typeof ev === 'object' && typeof ev.t === 'string') events.push(ev)
+            const rec: unknown = JSON.parse(line.toString('utf-8'))
+            if (rec && typeof rec === 'object') records.push(rec)
           } catch {
             /* a torn or foreign line */
           }
-          if (events.length >= CHAT_BATCH_MAX) flush()
+          if (records.length >= CHAT_BATCH_MAX) flush()
         }
-        if (events.length && !timer) timer = setTimeout(flush, 50)
+        if (records.length && !timer) timer = setTimeout(flush, 50)
       }
-      // Waits for the file, then follows it. Reading stdin is what ties the tail's
-      // life to the channel: when we close the channel (or the link drops) stdin
-      // hits EOF and the tail is killed, instead of lingering until the next write
-      // finds its pipe broken. The loop watches both ways: a tail that dies on its
-      // own must end the channel too, or the stream goes silent and is never
-      // reopened. stdin goes through fd 3 because a background job's stdin is
-      // otherwise /dev/null. `kill -0` catches a tail that never started.
-      const d = chatDirSh(chatId)
+      // Follows the file. Reading stdin is what ties the tail's life to the
+      // channel: when we close the channel (or the link drops) stdin hits EOF and
+      // the tail is killed, instead of lingering until the next write finds its
+      // pipe broken. The loop watches both ways: a tail that dies on its own must
+      // end the channel too, or the stream goes silent and is never reopened.
+      // stdin goes through fd 3 because a background job's stdin is otherwise
+      // /dev/null. `kill -0` catches a tail that never started.
       const script =
-        `d=${d}${SEP}f="$d/events.jsonl"${SEP}` +
-        `while [ ! -f "$f" ]; do [ -d "$d" ] || exit 3; sleep 0.3; done${SEP}` +
-        `tail -c +${offset + 1} -F "$f" 2>/dev/null & t=$!${SEP}sleep 0.2${SEP}` +
+        `f=${shQuote(path)}${SEP}` +
+        `tail -c +${start + 1} -F "$f" 2>/dev/null & t=$!${SEP}sleep 0.2${SEP}` +
         `kill -0 $t 2>/dev/null || exit 4${SEP}exec 3<&0${SEP}cat <&3 >/dev/null & c=$!${SEP}` +
         `while kill -0 $t 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 1; done${SEP}` +
         `if kill -0 $t 2>/dev/null; then kill $t $c 2>/dev/null; exit 0; fi${SEP}kill $c 2>/dev/null${SEP}exit 5`
@@ -2183,14 +1985,18 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         { command: shWrap(script), password: passwordFor(args.connectionId, args.password), timeoutMs: 15000 },
         onData,
         (err) => {
+          ended = true
           flush()
           chatStreams.delete(streamId)
-          const code = /\(exit (\d+)\)|status (\d+)/.exec(err?.message ?? '')
-          const missing = code && (code[1] ?? code[2]) === '3'
-          const error = forced ?? (err ? (missing ? 'Chat not found' : err.message) : undefined)
+          const error = forced ?? err?.message
           emit('chat:end', { streamId, ...(error ? { error } : {}) })
         }
       )
+      // The stream may have ended, or the window gone, while the channel was opening.
+      if (ended || wc.isDestroyed()) {
+        handle.close()
+        throw new Error('Closed')
+      }
       chatStreams.set(streamId, { close: () => handle?.close(), wc })
       if (!chatWatched.has(wc)) {
         chatWatched.add(wc)
@@ -2203,7 +2009,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           if (d.isMainFrame && !d.isSameDocument) closeAll()
         })
       }
-      return { streamId }
+      return { streamId, start }
     }
   )
 
@@ -2211,115 +2017,200 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     chatStreams.get(args.streamId)?.close()
   })
 
-  // ---- list / stop / restart ----
+  // ---- typing into the pane ----
 
-  const parseB64Json = <T,>(b64: string | undefined): T | null => {
-    if (!b64) return null
-    try {
-      return JSON.parse(Buffer.from(b64, 'base64').toString('utf-8')) as T
-    } catch {
-      return null
+  /** A failure of one step, carrying what the handler answers with. */
+  class ChatKeysError extends Error {
+    constructor(readonly result: Extract<ChatKeysResult, { ok: false }>) {
+      super(result.message ?? result.reason)
     }
   }
+  const chatFail = (reason: 'draft' | 'screen' | 'no-pane' | 'error', message?: string): ChatKeysError =>
+    new ChatKeysError({ ok: false, reason, ...(message ? { message } : {}) })
 
-  /**
-   * Every chat on the host, newest first. One line per chat — `id alive size
-   * config state`, the last two base64 so no byte of JSON can break the framing.
-   */
-  ipcMain.handle(
-    'chat:list',
-    async (_e, args: { connectionId: string; password?: string }): Promise<ChatSummary[]> => {
-      const script =
-        `d="$HOME/${CHAT_DIR}"${SEP}[ -d "$d" ] || exit 0${SEP}` +
-        `for p in "$d"/c*/; do id=$(basename "$p"); case "$id" in c????????????) ;; *) continue;; esac; ` +
-        `[ -f "$p/config.json" ] || continue; ` +
-        `cfg=$(base64 < "$p/config.json" | tr -d '\\n'); st=; ` +
-        `[ -f "$p/state.json" ] && st=$(base64 < "$p/state.json" | tr -d '\\n'); ` +
-        `sz=0; [ -f "$p/events.jsonl" ] && sz=$(wc -c < "$p/events.jsonl" | tr -d ' '); ` +
-        `if tmux has-session -t "=chat-$id" 2>/dev/null; then al=1; else al=0; fi; ` +
-        `echo "$id $al $sz $cfg $st"; done${SEP}exit 0`
-      const res = await chatExec(args.connectionId, args.password, script, { maxBytes: 16 * 1024 * 1024 })
-      const out: ChatSummary[] = []
-      for (const line of res.stdout.toString('utf-8').split('\n')) {
-        const [id, alive, size, cfg, st] = line.trim().split(' ')
-        if (!id || !CHAT_ID_RE.test(id)) continue
-        const config = parseB64Json<ChatConfig>(cfg)
-        if (!config) continue
-        out.push({
-          chatId: id,
-          config,
-          state: parseB64Json<ChatState>(st),
-          alive: alive === '1',
-          size: Number(size) || 0
-        })
+  const chatPaneOf = (v: unknown): string => {
+    if (typeof v !== 'string' || !PANE_RE.test(v)) throw new Error('Invalid pane')
+    return v
+  }
+
+  // Key actions on one pane go out one at a time: two clicks interleaving their
+  // keys would answer one prompt with half of another's.
+  const chatKeyQueue = new Map<string, Promise<unknown>>()
+  const chatKeys = (t: ChatTarget, pane: string, run: () => Promise<void>): Promise<ChatKeysResult> => {
+    const key = `${t.connectionId}\0${pane}`
+    const go = async (): Promise<ChatKeysResult> => {
+      try {
+        await run()
+        return { ok: true }
+      } catch (err) {
+        if (err instanceof ChatKeysError) return err.result
+        return { ok: false, reason: 'error', message: err instanceof Error ? err.message : String(err) }
       }
-      return out.sort((a, b) => (b.config.createdAt ?? 0) - (a.config.createdAt ?? 0))
     }
-  )
+    const next = (chatKeyQueue.get(key) ?? Promise.resolve()).then(go)
+    chatKeyQueue.set(key, next)
+    void next.then(() => {
+      if (chatKeyQueue.get(key) === next) chatKeyQueue.delete(key)
+    })
+    return next
+  }
+
+  /** One tmux script on the host; a pane or server that is gone is `no-pane`. */
+  const chatTmux = async (t: ChatTarget, script: string, input?: Buffer): Promise<string> => {
+    const res = await chatExec(t, script, { input, maxBytes: 1024 * 1024 })
+    if (res.code !== 0) {
+      const why = res.stderr.trim()
+      if (/can't find|no server running|error connecting|no current/i.test(why)) throw chatFail('no-pane', why)
+      throw chatFail('error', why || 'tmux failed')
+    }
+    return res.stdout.toString('utf-8')
+  }
+
+  const chatScreen = (t: ChatTarget, pane: string, escapes = false): Promise<string> =>
+    chatTmux(t, `tmux capture-pane ${escapes ? '-e ' : ''}-p -t ${pane}`)
+
+  /** Typing a prompt or command while a dialog is up would answer it: Enter picks the highlighted option. */
+  const chatRefuseDialog = async (t: ChatTarget, pane: string): Promise<void> => {
+    const screen = await chatScreen(t, pane)
+    if ([MARK.question, MARK.plan, MARK.permission, MARK.review].some((m) => screen.includes(m))) throw chatFail('screen')
+  }
+
+  const chatRefuseDraft = async (t: ChatTarget, pane: string): Promise<void> => {
+    if (inputHasDraft(await chatScreen(t, pane, true))) throw chatFail('draft')
+  }
+
+  /** Literal characters (a digit, or the text of a command) typed into the pane. */
+  const chatLiteral = (t: ChatTarget, pane: string, ...texts: string[]): Promise<string> =>
+    chatTmux(t, texts.map((s) => `tmux send-keys -t ${pane} -l ${shQuote(s)}`).join(SEP))
+
+  /** Named keys (Enter, Escape, Tab). */
+  const chatNamed = (t: ChatTarget, pane: string, ...keys: string[]): Promise<string> =>
+    chatTmux(t, `tmux send-keys -t ${pane} ${keys.join(' ')}`)
 
   /**
-   * Ask the relay to stop, and kill its tmux session if it has not gone five
-   * seconds later. The delayed kill runs on the host, so it still happens if the
-   * app is closed meanwhile.
+   * Text into the pane through a tmux buffer, read from stdin so it is never part
+   * of a shell command. Bracketed (`-p`) when it is a prompt, so newlines do not
+   * submit; plain for a free-text answer. Enter follows after the settle.
    */
-  ipcMain.handle(
-    'chat:stop',
-    async (_e, args: { connectionId: string; password?: string; chatId: string }): Promise<void> => {
-      const chatId = chatIdOf(args.chatId)
-      // Only the relay being stopped is killed: a Restart inside the five seconds
-      // starts a new one in a session of the same name, told apart by its pane pid.
-      const pane = shQuote('=' + chatTmuxSession(chatId) + ':')
-      const kill =
-        `p=$(tmux display -p -t ${pane} '#{pane_pid}' 2>/dev/null)${SEP}` +
-        `( sleep 5; [ -n "$p" ] && [ "$(tmux display -p -t ${pane} '#{pane_pid}' 2>/dev/null)" = "$p" ] && ` +
-        `tmux kill-session -t ${shQuote('=' + chatTmuxSession(chatId))} ) >/dev/null 2>&1 </dev/null & `
-      await chatAppend(
-        args.connectionId,
-        args.password,
-        chatId,
-        { t: 'stop', id: randomBytes(8).toString('hex') },
-        kill
-      )
-    }
-  )
+  const chatPaste = (t: ChatTarget, pane: string, text: string, bracketed: boolean, enter: boolean): Promise<string> => {
+    if (!text.trim()) throw chatFail('error', 'Nothing to send')
+    if (text.includes('\0')) throw chatFail('error', 'The text holds a null character')
+    const buf = 'csm' + randomBytes(6).toString('hex')
+    const script =
+      `tmux load-buffer -b ${buf} - || exit 1${SEP}` +
+      `tmux paste-buffer ${bracketed ? '-p ' : ''}-d -b ${buf} -t ${pane} || { tmux delete-buffer -b ${buf} 2>/dev/null; exit 1; }` +
+      (enter ? `${SEP}sleep 0.3 2>/dev/null || sleep 1${SEP}tmux send-keys -t ${pane} ${KEY.enter}` : '')
+    return chatTmux(t, script, Buffer.from(text, 'utf-8'))
+  }
 
-  /**
-   * Bring a chat whose relay is gone back, resuming the Claude session it last
-   * reported. A relay that is still running is left alone. Node and claude are
-   * resolved again — the host may have been updated since the chat began.
-   */
-  ipcMain.handle(
-    'chat:restart',
-    async (_e, args: { connectionId: string; password?: string; chatId: string }): Promise<void> => {
-      const chatId = chatIdOf(args.chatId)
-      const d = chatDirSh(chatId)
-      const script =
-        `d=${d}${SEP}[ -f "$d/config.json" ] || exit 3${SEP}` +
-        `if tmux has-session -t ${shQuote('=' + chatTmuxSession(chatId))} 2>/dev/null; then echo ALIVE=1; else echo ALIVE=0; fi${SEP}` +
-        `echo "CONFIG=$(base64 < "$d/config.json" | tr -d '\\n')"${SEP}` +
-        `st=; [ -f "$d/state.json" ] && st=$(base64 < "$d/state.json" | tr -d '\\n')${SEP}echo "STATE=$st"${SEP}exit 0`
-      const res = await chatExec(args.connectionId, args.password, script)
-      if (res.code === 3) throw new Error('Chat not found')
-      const lines = new Map<string, string>()
-      for (const line of res.stdout.toString('utf-8').split('\n')) {
-        const i = line.indexOf('=')
-        if (i > 0) lines.set(line.slice(0, i), line.slice(i + 1).trim())
+  ipcMain.handle('chat:send', (_e, args: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    return chatKeys(args, pane, async () => {
+      if (typeof args.text !== 'string') throw chatFail('error', 'Nothing to send')
+      await chatRefuseDialog(args, pane)
+      await chatRefuseDraft(args, pane)
+      await chatPaste(args, pane, args.text, true, true)
+    })
+  })
+
+  ipcMain.handle('chat:interrupt', (_e, args: ChatTarget & { pane: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    return chatKeys(args, pane, async () => {
+      await chatNamed(args, pane, INTERRUPT)
+    })
+  })
+
+  ipcMain.handle('chat:model', (_e, args: ChatTarget & { pane: string; model: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    return chatKeys(args, pane, async () => {
+      if (typeof args.model !== 'string' || !/^[A-Za-z0-9._\-\[\]]+$/.test(args.model)) {
+        throw chatFail('error', 'Invalid model')
       }
-      if (lines.get('ALIVE') === '1') return
-      const config = parseB64Json<ChatConfig>(lines.get('CONFIG'))
-      if (!config) throw new Error('This chat has no readable config')
-      const state = parseB64Json<ChatState>(lines.get('STATE'))
-      const remote = await chatResolve(args.connectionId, args.password, config.cwd)
-      if (!remote.relayPresent) await chatUploadRelay(args.connectionId, args.password)
-      await chatLaunch(
-        args.connectionId,
-        args.password,
-        { ...config, chatId, claudePath: remote.claude, resume: state?.sessionId ?? config.resume },
-        remote,
-        false
-      )
+      await chatRefuseDialog(args, pane)
+      await chatRefuseDraft(args, pane)
+      await chatLiteral(args, pane, `/model ${args.model}`)
+      await chatNamed(args, pane, KEY.enter)
+      await chatWait(1000)
+      // A cached conversation asks first; the answer is the first option.
+      if ((await chatScreen(args, pane)).includes(MARK.modelConfirm)) await chatLiteral(args, pane, '1')
+    })
+  })
+
+  ipcMain.handle('chat:prompt', (_e, args: ChatTarget & { pane: string }): Promise<TuiPrompt | null> => {
+    const pane = chatPaneOf(args.pane)
+    return chatScreen(args, pane).then(parsePrompt)
+  })
+
+  ipcMain.handle('chat:answer', (_e, args: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    const answer = args.answer
+    return chatKeys(args, pane, async () => {
+      const prompt = parsePrompt(await chatScreen(args, pane))
+      if (answer?.kind === 'option') {
+        if (typeof answer.digit !== 'string' || typeof answer.label !== 'string') throw chatFail('error', 'Invalid answer')
+        // The card may be out of date: the option on screen must be the one it showed.
+        if (!prompt || !promptHasOption(prompt, answer.digit, answer.label)) throw chatFail('screen')
+        const text = typeof answer.text === 'string' ? answer.text : ''
+        const opt = prompt.options.find((o) => o.digit === answer.digit)
+        if (opt?.freeText && !text.trim()) throw chatFail('error', 'Nothing to send')
+        await chatLiteral(args, pane, answer.digit)
+        if (text.trim()) {
+          await chatWait(300)
+          await chatPaste(args, pane, text, false, true)
+        }
+      } else if (answer?.kind === 'tab') {
+        if (!prompt?.canTab) throw chatFail('screen')
+        await chatNamed(args, pane, KEY.tab)
+      } else {
+        throw chatFail('error', 'Invalid answer')
+      }
+    })
+  })
+
+  // ---- starting Claude ----
+
+  /**
+   * Start the user's real Claude in a new, detached tmux session and wait for its
+   * status file. The script is claudeScript() — the one an agent tab runs, so the
+   * binary, the user's own `claude` wrapper and `--resume` behave the same — in a
+   * session named like an agent tab's. Not `new -A -d`: with a session already
+   * there, `-A -d` attaches and detaches the user's own terminal. A session that
+   * exists is left alone instead, and the Claude in it is what gets found.
+   */
+  const chatLaunch = async (
+    t: ChatTarget,
+    cwdIn: unknown,
+    resume?: string
+  ): Promise<{ sessionId: string; pane: string; tmuxSession: string }> => {
+    let cwd = typeof cwdIn === 'string' ? cwdIn.trim() : ''
+    if (!cwd || /[\0\n]/.test(cwd)) throw new Error('Choose a working directory')
+    if (cwd === '~' || cwd.startsWith('~/')) {
+      const home = (await chatExec(t, 'printf %s "$HOME"')).stdout.toString('utf-8')
+      if (!home.startsWith('/')) throw new Error('Could not find the home directory on the host')
+      cwd = home.replace(/\/+$/, '') + cwd.slice(1)
     }
-  )
+    if (!cwd.startsWith('/')) throw new Error('The working directory must be an absolute path')
+    const session = resume ? claudeResumeSessionName(resume, cwd) : claudeSessionName(cwd)
+    const run = shWrap(claudeScript(cwd, connectionStore.get(t.connectionId)?.claudePath, resume))
+    const script =
+      `command -v tmux >/dev/null 2>&1 || { echo 'tmux is not installed on this host' >&2; exit 127; }${SEP}` +
+      `tmux has-session -t ${shQuote('=' + session)} 2>/dev/null || tmux new -d -s ${shQuote(session)} ${shQuote(run)}`
+    const res = await chatExec(t, script, { deadlineMs: 45000 })
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to start Claude in tmux')
+    for (let i = 0; i < 30; i++) {
+      await chatWait(1000)
+      const hit = (await chatSessionsOf(t)).find((s) => s.tmux?.session === session)
+      if (hit?.tmux) return { sessionId: hit.sessionId, pane: hit.tmux.pane, tmuxSession: session }
+    }
+    throw new Error(`Claude did not start in tmux session ${session} within 30 s. It may be waiting in that session.`)
+  }
+
+  ipcMain.handle('chat:new', (_e, args: ChatTarget & { cwd: string }) => chatLaunch(args, args.cwd))
+
+  ipcMain.handle('chat:resume', (_e, args: ChatTarget & { sessionId: string; cwd: string }) => {
+    if (!isUuid(args.sessionId)) throw new Error('Invalid session id')
+    return chatLaunch(args, args.cwd, args.sessionId)
+  })
 
   // ---- misc ----
   // Only ever open http(s) links externally — never arbitrary schemes.

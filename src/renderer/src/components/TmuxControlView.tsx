@@ -54,6 +54,8 @@ interface Props {
   initialDrafts?: Record<string, string>
   /** Open the transcript reader beside this tab — offered in the composer. */
   onOpenReader?: () => void
+  /** Open the chat view of the Claude running in this tmux session — offered in the composer. */
+  onOpenChat?: () => void
   /** Lets a header button toggle the focused pane's composer without owning its state. */
   ref?: Ref<ComposerHandle>
 }
@@ -96,6 +98,7 @@ export function TmuxControlView({
   draftKey,
   initialDrafts,
   onOpenReader,
+  onOpenChat,
   ref
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
@@ -628,6 +631,7 @@ export function TmuxControlView({
         target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
         onSendKey={sendKey}
         onOpenReader={onOpenReader}
+        onOpenChat={onOpenChat}
       />
 
       {overlay && (

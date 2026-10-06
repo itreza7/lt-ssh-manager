@@ -178,15 +178,12 @@ interface CardProps {
 function ToolCard({ block, result, pending, subs, results, groups }: CardProps) {
   const [open, setOpen] = useState(false)
   const input = (block.input && typeof block.input === 'object' ? block.input : {}) as Input
-  if (block.name === 'TodoWrite' && block.final) return <TodoList input={input} />
+  if (block.name === 'TodoWrite') return <TodoList input={input} />
 
   const sum = summarize(block.name, input)
   const stepCount = subs?.reduce((n, m) => n + m.blocks.filter((b) => b.type === 'tool_use').length, 0) ?? 0
   const isTask = block.name === 'Task' || block.name === 'Agent'
   const isEdit = block.name === 'Edit' || block.name === 'MultiEdit'
-  // Streaming placeholder: the name is known, the input is not yet.
-  const arriving = !block.final
-
   const body = (): ReactNode => {
     if (isEdit) return <Diff edits={editsOf(block.name, input)} />
     if (block.name === 'Write') return <Out result={{ content: str(input.content).slice(0, 20000), isError: false }} />
@@ -233,7 +230,7 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
   }
 
   const failed = result?.isError
-  const expandable = !arriving && (isEdit || isTask || !!result || block.name === 'Bash' || block.name === 'Write' || block.input !== undefined)
+  const expandable = (isEdit || isTask || !!result || block.name === 'Bash' || block.name === 'Write' || block.input !== undefined)
   return (
     <div className={`rounded-lg border ${failed ? 'border-danger/40' : 'border-line'} bg-surface/40`}>
       <button
@@ -247,7 +244,7 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
         </span>
         {isTask && stepCount > 0 && <span className="shrink-0 text-[11px] text-faint">{stepCount} step{stepCount === 1 ? '' : 's'}</span>}
         {sum.stat}
-        {(pending || arriving) && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-signal" />}
+        {pending && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-signal" />}
         {failed && <span className="shrink-0 text-[11px] text-danger">failed</span>}
         {expandable && <span className="shrink-0 text-[10px] text-faint">{open ? '▾' : '▸'}</span>}
       </button>
@@ -287,8 +284,6 @@ function AssistantBlocksImpl({ item, live, results, groups, compact }: Assistant
           )
         }
         if (b.type === 'thinking') {
-          // This build streams no thinking text; the block only marks activity.
-          if (!b.final) return live ? <div key={k} className="animate-glow text-sm text-faint">Thinking…</div> : null
           return b.text ? (
             <details key={k} className="text-sm text-faint">
               <summary className="cursor-pointer select-none">Thinking</summary>

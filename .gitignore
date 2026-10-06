@@ -12,6 +12,3 @@ Thumbs.db
 
 # Local-only project guidance for Claude Code (kept on disk, not tracked)
 CLAUDE.md
-
-# Built by npm run build:relay (src/relay/relay.ts), uploaded to remote hosts
-resources/relay.mjs

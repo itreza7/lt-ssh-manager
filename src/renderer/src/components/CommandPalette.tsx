@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { ChatSummary } from '../../../shared/chatProtocol'
+import type { ChatSession } from '../../../shared/chatProtocol'
 import type { AgentHostScan, AgentSession, Connection } from '../../../shared/types'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import type { Tab } from '../App'
-import { CHAT_DOT, chatLabel, chatRowStatus } from './chat/format'
+import { CHAT_DOT, chatLabel, chatStatusOf } from './chat/format'
 
 interface Props {
   open: boolean
@@ -19,9 +19,9 @@ interface Props {
   attachFromInbox: (connectionId: string, session: string) => void
   openSummary: () => void
   openReader: () => void
-  /** The active host's chats; must not prompt for anything. */
-  fetchChats: () => Promise<ChatSummary[]>
-  openChat: (chat: ChatSummary) => void
+  /** The active host's live Claudes; must not prompt for anything. */
+  fetchChats: () => Promise<ChatSession[]>
+  openChat: (chat: ChatSession) => void
   newChat: () => void
 }
 
@@ -69,7 +69,7 @@ export function CommandPalette({
 }: Props) {
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
-  const [chats, setChats] = useState<ChatSummary[]>([])
+  const [chats, setChats] = useState<ChatSession[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const q = query.trim().toLowerCase()
@@ -147,12 +147,12 @@ export function CommandPalette({
   }, [agentHosts, q, attachFromInbox])
 
   const chatResults = useMemo<ResultItem[]>(() => {
-    const list = chats.filter((c) => `${chatLabel(c)} ${c.config.cwd}`.toLowerCase().includes(q))
+    const list = chats.filter((c) => `${chatLabel(c)} ${c.cwd}`.toLowerCase().includes(q))
     return list.slice(0, MAX_RESULTS).map((c) => ({
-      key: `chat:${c.chatId}`,
+      key: `chat:${c.sessionId}`,
       label: chatLabel(c),
-      sub: shortPath(c.config.cwd),
-      icon: <span className={`h-2 w-2 rounded-full ${CHAT_DOT[chatRowStatus(c)]}`} />,
+      sub: shortPath(c.cwd),
+      icon: <span className={`h-2 w-2 rounded-full ${CHAT_DOT[chatStatusOf(c)]}`} />,
       run: () => openChat(c)
     }))
   }, [chats, q, openChat])

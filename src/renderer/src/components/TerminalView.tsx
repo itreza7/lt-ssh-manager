@@ -40,6 +40,8 @@ interface Props {
   initialDraft?: string
   /** Open the transcript reader beside this terminal — offered in the composer. */
   onOpenReader?: () => void
+  /** Open the chat view of the Claude running in this tmux session — offered in the composer. */
+  onOpenChat?: () => void
   /** Lets a header button trigger this pane's composer without owning its state. */
   ref?: Ref<ComposerHandle>
 }
@@ -59,6 +61,7 @@ export function TerminalView({
   draftKey,
   initialDraft,
   onOpenReader,
+  onOpenChat,
   ref
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
@@ -636,6 +639,7 @@ export function TerminalView({
         onDiscard={() => setDraft('')}
         onSendKey={sendKey}
         onOpenReader={onOpenReader}
+        onOpenChat={onOpenChat}
       />
     </div>
   )

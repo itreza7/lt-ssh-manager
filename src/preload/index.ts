@@ -32,11 +32,13 @@ import type {
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import type { ReaderChunk, ReaderSession } from '../shared/claudeTranscript'
 import type {
-  ChatCommand,
-  ChatStartArgs,
+  ChatAnswer,
+  ChatKeysResult,
+  ChatSession,
   ChatStreamData,
   ChatStreamEnd,
-  ChatSummary
+  ChatTarget,
+  TuiPrompt
 } from '../shared/chatProtocol'
 
 export interface ConnectArgs {
@@ -415,61 +417,69 @@ const api = {
     session: string
   }): Promise<string | null> => ipcRenderer.invoke('reader:tmuxDir', args),
 
-  // Chat: Claude Code driven by a relay that keeps running in tmux on the host,
-  // so a turn survives the laptop sleeping or the network dropping. Every call
-  // rejects with a readable message; `chatId` is the `c` + 12 hex id chatStart returns.
+  // Chat: a second view of the real Claude Code TUI running in tmux on the host.
+  // It reads the status files and the transcript Claude Code writes, and types into
+  // the tmux pane. `pane` is a tmux pane id like "%31" (ChatSession.tmux.pane).
+  // Every call rejects with a readable message; key calls answer with a ChatKeysResult.
+
+  /** Every live Claude on the host, newest first. */
+  chatList: (t: ChatTarget): Promise<ChatSession[]> => ipcRenderer.invoke('chat:list', t),
+
+  /** One session by id, or null when no live Claude has it (it ended). */
+  chatStatus: (t: ChatTarget & { sessionId: string }): Promise<ChatSession | null> =>
+    ipcRenderer.invoke('chat:status', t),
 
   /**
-   * Upload the relay if the host lacks this version, start a chat in `cwd`
-   * (`~` allowed) and return its id. `resume` continues a Claude session id.
-   */
-  chatStart: (args: ChatStartArgs): Promise<{ chatId: string }> =>
-    ipcRenderer.invoke('chat:start', args),
-
-  /** Append one command (user message, interrupt, answer, stop…) to the chat's inbox. */
-  chatSend: (args: {
-    connectionId: string
-    password?: string
-    chatId: string
-    cmd: ChatCommand
-  }): Promise<void> => ipcRenderer.invoke('chat:send', args),
-
-  /**
-   * Follow events.jsonl from byte `offset` (0 = replay everything). Results come
-   * through onChatData / onChatEnd tagged with the returned streamId. After an
+   * Follow a session's transcript from byte `offset`; a negative offset starts at
+   * the last 4 MiB, from a whole line. `start` is the offset actually used. Results
+   * come through onChatData / onChatEnd tagged with the returned streamId. After an
    * end with an error, open a new stream at the last `next` seen.
    */
-  chatStream: (args: {
-    connectionId: string
-    password?: string
-    chatId: string
-    offset: number
-  }): Promise<{ streamId: string }> => ipcRenderer.invoke('chat:stream', args),
+  chatStream: (t: ChatTarget & { sessionId: string; offset: number }): Promise<{ streamId: string; start: number }> =>
+    ipcRenderer.invoke('chat:stream', t),
 
   /** Stop following. onChatEnd then fires for that stream without an error. */
   chatUnstream: (args: { streamId: string }): Promise<void> =>
     ipcRenderer.invoke('chat:unstream', args),
 
-  /** Every chat on the host, newest first, with whether its relay is running. */
-  chatList: (args: { connectionId: string; password?: string }): Promise<ChatSummary[]> =>
-    ipcRenderer.invoke('chat:list', args),
+  /** Type a message into the pane's input. Refused (`draft`) if the input holds unsent text. */
+  chatSend: (t: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:send', t),
 
-  /** Ask the relay to stop; its tmux session is killed if it is still there 5 s later. */
-  chatStop: (args: { connectionId: string; password?: string; chatId: string }): Promise<void> =>
-    ipcRenderer.invoke('chat:stop', args),
+  /** Answer the question, plan or permission prompt on screen. */
+  /** The dialog Claude Code has open on screen, or null. */
+  chatPrompt: (t: ChatTarget & { pane: string }): Promise<TuiPrompt | null> =>
+    ipcRenderer.invoke('chat:prompt', t),
 
-  /** Start the relay again, resuming the last Claude session. No-op while it is running. */
-  chatRestart: (args: { connectionId: string; password?: string; chatId: string }): Promise<void> =>
-    ipcRenderer.invoke('chat:restart', args),
+  chatAnswer: (t: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:answer', t),
 
-  /** Whole events from a stream, batched (at most every 50 ms); `next` is the byte offset after them. */
+  /** Escape: interrupt the running turn. */
+  chatInterrupt: (t: ChatTarget & { pane: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:interrupt', t),
+
+  /** Run `/model <model>` in the pane. Refused (`draft`) if the input holds unsent text. */
+  chatModel: (t: ChatTarget & { pane: string; model: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:model', t),
+
+  /** Start Claude in a new detached tmux session in `cwd` (`~` allowed) and wait for it to come up. */
+  chatNew: (t: ChatTarget & { cwd: string }): Promise<{ sessionId: string; pane: string; tmuxSession: string }> =>
+    ipcRenderer.invoke('chat:new', t),
+
+  /** As chatNew, resuming `sessionId` (run from `cwd`, where Claude Code looks it up). */
+  chatResume: (
+    t: ChatTarget & { sessionId: string; cwd: string }
+  ): Promise<{ sessionId: string; pane: string; tmuxSession: string }> =>
+    ipcRenderer.invoke('chat:resume', t),
+
+  /** Whole transcript records from a stream, batched (at most every 50 ms); `next` is the byte offset after them. */
   onChatData: (cb: (data: ChatStreamData) => void): (() => void) => {
     const h = (_e: unknown, data: ChatStreamData): void => cb(data)
     ipcRenderer.on('chat:data', h)
     return () => ipcRenderer.removeListener('chat:data', h)
   },
 
-  /** A stream ended: closed on request (no `error`), or dropped (connection lost, chat gone). */
+  /** A stream ended: closed on request (no `error`), or dropped (connection lost, transcript gone). */
   onChatEnd: (cb: (end: ChatStreamEnd) => void): (() => void) => {
     const h = (_e: unknown, end: ChatStreamEnd): void => cb(end)
     ipcRenderer.on('chat:end', h)
