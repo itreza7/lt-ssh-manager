@@ -59,8 +59,10 @@ main process.
   between them in the same pane.
   Runs of tool calls fold into one line ("Ran 3 commands"). The composer bar holds the
   mode, model and effort pickers, a + for your skills and commands, a context ring, and
-  the folder and git branch; running workflows and background agents show their phases
-  and agents live in a Background tasks panel on the right, and an actions menu runs
+  the folder and git branch. Click the ring for the context window (with a Compact button)
+  and the account's plan usage limits, read from `/usage`. Running workflows and
+  background agents show their phases and agents live in a Background tasks panel on the
+  right; once hidden, a Tasks button in the header brings it back. An actions menu runs
   compact, clear, effort, context and usage.
   Needs Claude Code and tmux on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so

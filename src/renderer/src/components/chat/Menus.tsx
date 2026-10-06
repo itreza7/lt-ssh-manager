@@ -29,7 +29,7 @@ export const MODE_ITEMS: { value: ChatMode; label: string }[] = [
 export const modeLabel = (m: ChatMode): string => MODE_ITEMS.find((x) => x.value === m)?.label ?? m
 
 /** Closes on a click outside or Escape. */
-function usePopover(): { open: boolean; setOpen: (o: boolean) => void; ref: React.RefObject<HTMLDivElement | null> } {
+export function usePopover(): { open: boolean; setOpen: (o: boolean) => void; ref: React.RefObject<HTMLDivElement | null> } {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -50,7 +50,7 @@ function usePopover(): { open: boolean; setOpen: (o: boolean) => void; ref: Reac
   return { open, setOpen, ref }
 }
 
-const box = 'animate-rise absolute z-20 rounded-[10px] border border-sel bg-elevated p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]'
+export const box = 'animate-rise absolute z-20 rounded-[10px] border border-sel bg-elevated p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]'
 const pop = `${box} right-0 top-[calc(100%+4px)] w-60`
 const popLeft = `${box} left-0 top-[calc(100%+4px)] w-60`
 // The composer's row sits at the bottom of the window: its menus open upward.

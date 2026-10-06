@@ -195,15 +195,23 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
       const meta = typeof input.script === 'string' ? workflowMeta(input.script) : { phases: [] as string[] }
       const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : meta.name
       info = { kind: 'workflow', name: name || 'Workflow', phases: meta.phases }
-    } else if ((b.name === 'Agent' || b.name === 'Task') && input.run_in_background === true) {
-      const name = [input.description, input.subagent_type].find((x) => typeof x === 'string' && x.trim()) as string | undefined
-      info = { kind: 'agent', name: name?.trim() || 'Agent', phases: [] }
+    } else if (b.name === 'Agent' || b.name === 'Task') {
+      const name = ([input.description, input.subagent_type].find((x) => typeof x === 'string' && x.trim()) as string | undefined)?.trim() || 'Agent'
+      if (input.run_in_background === true) info = { kind: 'agent', name, phases: [] }
+      // Claude Code may background the call on its own; its result says so.
+      else {
+        agentNames.set(b.id, name)
+        if (agentNames.size > MAX_TASKS) agentNames.delete(agentNames.keys().next().value as string)
+      }
     }
     if (!info) return
     tasks.set(b.id, info)
     if (tasks.size > MAX_TASKS) tasks.delete(tasks.keys().next().value as string)
     out.push({ t: 'task', toolUseId: b.id, ...info })
   }
+
+  // Agent calls not marked run_in_background, by tool_use id: named if the result says it went to the background.
+  const agentNames = new Map<string, string>()
 
   /** The tool_result of a task call: the id and transcript directory it launched with. */
   function taskResult(id: string, text: string, out: ChatEvent[]): void {
@@ -213,6 +221,10 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
     if (!info && launched) {
       info = { kind: 'workflow', name: /^Summary:\s*(.+)$/m.exec(text)?.[1].trim() || 'Workflow', phases: [] }
       tasks.set(id, info)
+    } else if (!info && /^\s*Async agent launched/.test(text)) {
+      info = { kind: 'agent', name: agentNames.get(id) ?? 'Agent', phases: [] }
+      tasks.set(id, info)
+      out.push({ t: 'task', toolUseId: id, ...info })
     }
     if (!info) return
     const taskId = (info.kind === 'workflow' ? /Task ID:\s*(\S+)/ : /(?:Task ID|agentId|agent_id)\W+([A-Za-z0-9_-]+)/i).exec(text)?.[1]
@@ -230,6 +242,9 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
     const summary = tag(text, 'summary')
     out.push({ t: 'task_done', ...(toolUseId ? { toolUseId } : {}), ...(taskId ? { taskId } : {}), status, ...(summary ? { summary } : {}) })
   }
+
+  // The last slash command seen, to title the output record that follows it.
+  let lastCommand: string | null = null
 
   function user(r: Loose, out: ChatEvent[]): void {
     const content = r.message?.content
@@ -252,8 +267,14 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
         }
       } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
         const cmd = slashCommand(b.text)
+        const said = /^\s*<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(b.text)?.[1].replace(ANSI_RE, '').trim()
         if (/^\s*<task-notification>/.test(b.text)) notification(b.text, out)
-        else if (cmd) texts.push(cmd)
+        else if (cmd) {
+          texts.push(cmd)
+          lastCommand = cmd
+        }
+        // What a command like /effort says back is written as its own user record.
+        else if (said) out.push({ t: 'note', id: String(r.uuid ?? `${prefix}n${++anon}`), title: lastCommand ?? 'Command output', text: said.slice(0, NOTE_CAP) })
         // An interrupted turn writes no turn_duration; this marker is what ends it.
         else if (INTERRUPTED.test(b.text)) interrupted = true
         else if (!SYNTHETIC_USER.test(b.text)) texts.push(b.text)

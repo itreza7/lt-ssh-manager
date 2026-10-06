@@ -97,7 +97,9 @@ import {
   parseChatSessions
 } from '../shared/claudeSessions'
 import {
-  DIALOG_FOOTER,
+  dialogHasMore,
+  isDialogOpen,
+  joinScrolled,
   EFFORT_LEVELS,
   INTERRUPT,
   KEY,
@@ -2141,7 +2143,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   /** A command or Shift+Tab also lands in the /model picker, /usage or /status: anything with the dialog footer. */
   const chatRefuseAnyDialog = async (t: ChatTarget, pane: string): Promise<void> => {
     await chatRefuseDialog(t, pane)
-    if ((await chatScreen(t, pane)).includes(DIALOG_FOOTER)) throw chatFail('screen')
+    if (isDialogOpen(await chatScreen(t, pane))) throw chatFail('screen')
   }
 
   const chatRefuseDraft = async (t: ChatTarget, pane: string): Promise<void> => {
@@ -2239,6 +2241,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // ---- slash commands ----
 
   const COMMAND_NAME_RE = /^[A-Za-z0-9._:-]+$/
+  // A tall dialog (/usage) is read a screen at a time: this many Down presses, at most this many times.
+  const DIALOG_SCROLL_LINES = 15
+  const DIALOG_SCROLLS = 8
   const COMMAND_SOURCE_CAP = 1500
 
   /** A cwd the commands script may look under: absolute, one line, no `..`. */
@@ -2345,18 +2350,29 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         await chatNamed(args, pane, KEY.enter)
         if (!dialog) return
         await chatWait(2500)
-        let body = parseDialogText(await chatScreen(args, pane))
+        let screen = await chatScreen(args, pane)
+        let body = parseDialogText(screen)
         if (!body) {
           await chatWait(1500)
-          body = parseDialogText(await chatScreen(args, pane))
+          screen = await chatScreen(args, pane)
+          body = parseDialogText(screen)
         }
         // Escape only closes a dialog that is there: on the plain screen it would interrupt a turn.
         if (!body) {
           // A slow render may still open it; leave nothing open for the next command to type into.
-          if ((await chatScreen(args, pane)).includes(DIALOG_FOOTER)) await chatNamed(args, pane, KEY.escape)
-          throw chatFail('screen', `${DIALOG_FOOTER} was not on screen`)
+          if (isDialogOpen(await chatScreen(args, pane))) await chatNamed(args, pane, KEY.escape)
+          throw chatFail('screen', 'The dialog did not open')
         }
-        await chatNamed(args, pane, KEY.escape)
+        // Taller than the pane: scroll down and read the rest.
+        for (let i = 0; i < DIALOG_SCROLLS && dialogHasMore(screen); i++) {
+          await chatNamed(args, pane, ...Array<string>(DIALOG_SCROLL_LINES).fill('Down'))
+          await chatWait(300)
+          screen = await chatScreen(args, pane)
+          const more = parseDialogText(screen)
+          if (!more) break
+          body = joinScrolled(body, more)
+        }
+        if (isDialogOpen(await chatScreen(args, pane))) await chatNamed(args, pane, KEY.escape)
         text = body
       })
       return res.ok && text !== undefined ? { ...res, text } : res

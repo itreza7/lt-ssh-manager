@@ -130,6 +130,8 @@ export interface TuiFooter {
   model?: string
   mode?: ChatMode
   modeExtras: string[]
+  /** "9% until auto-compact", shown above the input box when context runs low: the 9. */
+  autoCompactLeft?: number
 }
 
 /** What chat:prompt answers with, from one screen capture. */

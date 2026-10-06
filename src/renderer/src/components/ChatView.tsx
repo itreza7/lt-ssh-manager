@@ -11,9 +11,9 @@ import type {
   TuiPrompt
 } from '../../../shared/chatProtocol'
 import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/transcriptEvents'
-import { EFFORT_LEVELS } from '../../../shared/tuiKeys'
+import { EFFORT_LEVELS, parseUsage, type UsageLimit } from '../../../shared/tuiKeys'
 import { initialChatState, prependState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
-import { ChatComposer } from './ChatComposer'
+import { ChatComposer, type UsageInfo } from './ChatComposer'
 import { ModeSwitch } from './ModeSwitch'
 import { Button, Modal } from './Modal'
 import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, ToolGroup, UserMessage } from './chat/Blocks'
@@ -146,6 +146,10 @@ const BUILTIN_NAMES = new Set(BUILTIN_COMMANDS.map((c) => c.name))
 const EFFORT_ARG = /^\s*(low|medium|high|xhigh|max)\s*$/
 const SLASH = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/
 
+// The plan limits are the account's, not the chat's: one /usage read per connection serves every chat for a minute.
+const USAGE_FRESH_MS = 60_000
+const usageCache = new Map<string, { at: number; limits: UsageLimit[] }>()
+
 const itemKey = (it: ChatItem): string => (it.kind === 'assistant' ? it.msgId : it.id)
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
@@ -198,6 +202,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const [wide, setWide] = useState(true)
   // Tasks the user closed the panel on: it comes back when one that is not in here shows up.
   const [closedTasks, setClosedTasks] = useState<string[]>([])
+  const [usage, setUsage] = useState<UsageInfo>({ state: 'idle', limits: [] })
   const root = useRef<HTMLDivElement>(null)
 
   // Byte offset after the last whole record applied — where a reconnect resumes.
@@ -554,6 +559,36 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       return ok
     })
   const openTerminal = tmuxSession ? () => onOpenTerminal(tmuxSession) : undefined
+  // For the context ring's popover: /usage read off the screen, without the card runCommand would show.
+  const loadUsage = (): void => {
+    const hit = usageCache.get(connectionId)
+    if (hit && Date.now() - hit.at < USAGE_FRESH_MS) {
+      setUsage({ state: 'ok', limits: hit.limits })
+      return
+    }
+    if (!drivable || !pane) {
+      setUsage((u) => ({ ...u, state: 'failed' }))
+      return
+    }
+    setUsage((u) => ({ ...u, state: 'loading' }))
+    void exclusive(async () => {
+      try {
+        const r = await window.api.chatCommand({ ...target, pane, command: '/usage', cwd })
+        const limits = r.ok && r.text ? parseUsage(r.text) : []
+        if (limits.length) {
+          usageCache.set(connectionId, { at: Date.now(), limits })
+          setUsage({ state: 'ok', limits })
+        } else setUsage((u) => ({ ...u, state: 'failed' }))
+        return r.ok
+      } catch {
+        setUsage((u) => ({ ...u, state: 'failed' }))
+        return false
+      }
+    }).then((ran) => {
+      // Another command was typing into the pane.
+      if (!ran) setUsage((u) => (u.state === 'loading' ? { ...u, state: 'failed' } : u))
+    })
+  }
   const pickEffort = async (l: string): Promise<void> => {
     if (await runCommand(`/effort ${l}`)) setEffort(l)
   }
@@ -635,6 +670,11 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const shownEffort = effort ?? norm(segs.find(isEffort)) ?? ''
   const chips = segs.filter((x) => x !== chipModel && !own.has(norm(x)) && !isEffort(x) && !(ctx && /^ctx\b/i.test(x)))
   const footerMode = footer?.mode ?? null
+  // The statusLine's "5h 21%" and "7d 63%", for the popover until /usage is read.
+  const usageFallback: UsageLimit[] = segs.flatMap((x) => {
+    const m = /^(5h|7d)\s+(\d+(?:\.\d+)?)%$/.exec(x.trim())
+    return m ? [{ label: m[1] === '5h' ? 'Session' : 'Weekly · all models', percent: Number(m[2]) }] : []
+  })
   const folder = session ? chatLabel(session) : leaf(cwd)
 
   // A call with no result yet is still running while the turn is live (busy, or waiting on a dialog).
@@ -775,13 +815,13 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           <span className="animate-glow shrink-0 rounded-full bg-sky-400/15 px-2.5 py-0.5 text-[11px] text-sky-400">Reconnecting…</span>
         )}
         <div className="ml-auto flex items-center gap-0.5">
-          {drivable && busy && (
+          {tasks.length > 0 && !showTasks && !ended && (
             <button
-              onClick={interrupt}
-              title="Stop the current turn (Esc)"
-              className="no-drag mr-1 shrink-0 rounded-md bg-danger/15 px-2.5 py-1 text-[13px] text-danger transition-colors hover:bg-danger/25"
+              onClick={() => setClosedTasks([])}
+              title="Show the Background tasks panel"
+              className="no-drag mr-1 shrink-0 rounded-lg bg-elevated px-2 py-1 text-[12.5px] leading-4 text-muted transition-colors hover:text-title"
             >
-              Interrupt
+              Tasks {tasks.length}
             </button>
           )}
           {openTerminal && <ModeSwitch mode="chat" onTerminal={openTerminal} className="mr-1" />}
@@ -891,6 +931,12 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           }
           chips={[...chips, ...(footer?.modeExtras ?? [])]}
           ctx={ctx}
+          autoCompactLeft={footer?.autoCompactLeft}
+          usage={usage}
+          usageFallback={usageFallback}
+          onContextOpen={loadUsage}
+          onCompact={!ended && drivable ? () => void runCommand('/compact') : undefined}
+          compactBusy={cmdRunning}
           folder={folder}
           branch={state.branch}
         />

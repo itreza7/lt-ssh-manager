@@ -1,5 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { CommandPicker, type CommandInfo } from './chat/Menus'
+import { CommandPicker, box, usePopover, type CommandInfo } from './chat/Menus'
+import type { UsageLimit } from '../../../shared/tuiKeys'
+
+/** The plan limits for the ring's popover, read with /usage. */
+export interface UsageInfo {
+  state: 'idle' | 'loading' | 'ok' | 'failed'
+  limits: UsageLimit[]
+}
 
 interface Props {
   /** Key of the autosaved draft (see window.api.drafts*). */
@@ -29,6 +36,15 @@ interface Props {
   chips?: string[]
   /** Prompt tokens in use and the context window, for the ring. */
   ctx?: { tokens: number; window: number } | null
+  /** The ring's popover: the TUI's "N% until auto-compact", plan limits, and Compact. */
+  autoCompactLeft?: number
+  usage?: UsageInfo
+  /** Limits read off the statusLine (5h, 7d), shown while /usage has none. */
+  usageFallback?: UsageLimit[]
+  onContextOpen?: () => void
+  onCompact?: () => void
+  /** Another command is typing into the pane (a /usage read): Compact waits. */
+  compactBusy?: boolean
   /** In the strip above the box: the folder, and the git branch once known. */
   folder?: string
   branch?: string | null
@@ -38,25 +54,120 @@ const MAX_HEIGHT = 240
 const RING_R = 6
 const RING_C = 2 * Math.PI * RING_R
 
+const kTokens = (n: number): string => (n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : `${+(n / 1000).toFixed(1)}k`)
+
 /** How full the context window is: an amber ring that turns red as it fills. */
-function ContextRing({ tokens, window }: { tokens: number; window: number }) {
-  const frac = Math.min(Math.max(tokens / window, 0), 1)
+function ContextRing({ frac }: { frac: number }) {
   return (
-    <span className="grid h-6 w-6 shrink-0 place-items-center" title={`ctx ${Math.round(tokens / 1000)}k / ${Math.round(window / 1000)}k`}>
-      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
-        <circle cx="8" cy="8" r={RING_R} fill="none" stroke="var(--color-sel)" strokeWidth="2" />
-        <circle
-          cx="8"
-          cy="8"
-          r={RING_R}
-          fill="none"
-          stroke={frac > 0.9 ? 'var(--color-danger)' : 'var(--color-amber)'}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeDasharray={`${frac * RING_C} ${RING_C}`}
-        />
-      </svg>
-    </span>
+    <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
+      <circle cx="8" cy="8" r={RING_R} fill="none" stroke="var(--color-sel)" strokeWidth="2" />
+      <circle
+        cx="8"
+        cy="8"
+        r={RING_R}
+        fill="none"
+        stroke={frac > 0.9 ? 'var(--color-danger)' : 'var(--color-amber)'}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={`${frac * RING_C} ${RING_C}`}
+      />
+    </svg>
+  )
+}
+
+function Bar({ frac, danger }: { frac: number; danger?: boolean }) {
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-sel">
+      <div className={`h-full rounded-full ${danger ? 'bg-danger' : 'bg-amber'}`} style={{ width: `${Math.round(Math.min(Math.max(frac, 0), 1) * 100)}%` }} />
+    </div>
+  )
+}
+
+/** The ring, and on click what Claude desktop shows there: the context window and the plan's usage limits. */
+function ContextButton(p: {
+  tokens: number
+  window: number
+  chips?: string[]
+  autoCompactLeft?: number
+  usage?: UsageInfo
+  usageFallback?: UsageLimit[]
+  onOpen?: () => void
+  onCompact?: () => void
+  compactBusy?: boolean
+}) {
+  const { open, setOpen, ref } = usePopover()
+  const frac = Math.min(Math.max(p.tokens / p.window, 0), 1)
+  const pct = Math.round(frac * 100)
+  const line = `${kTokens(p.tokens)} / ${kTokens(p.window)} (${pct}%)`
+  const tip = [`Context ${line}`, ...(p.chips ?? [])].join(' · ')
+  const limits = p.usage?.limits.length ? p.usage.limits : (p.usageFallback ?? [])
+  const head = 'text-[12px] font-medium text-muted'
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => {
+          if (!open) p.onOpen?.()
+          setOpen(!open)
+        }}
+        title={open ? undefined : tip}
+        className={`grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors hover:bg-white/[0.06] ${open ? 'bg-white/[0.06]' : ''}`}
+      >
+        <ContextRing frac={frac} />
+      </button>
+      {open && (
+        <div className={`${box} bottom-[calc(100%+6px)] right-0 w-72 p-3 text-[13px] text-fg`}>
+          <div className="flex items-baseline justify-between gap-2">
+            <span className={head}>Context window</span>
+            <span className="text-[12px] text-faint">{line}</span>
+          </div>
+          <div className="mt-2">
+            <Bar frac={frac} danger={frac > 0.9} />
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span className="text-[12px] text-faint">
+              {p.autoCompactLeft !== undefined ? `${p.autoCompactLeft}% left until auto-compact` : 'Auto-compacts when full'}
+            </span>
+            {p.onCompact && (
+              <button
+                disabled={p.compactBusy}
+                onClick={() => {
+                  setOpen(false)
+                  p.onCompact?.()
+                }}
+                className="shrink-0 rounded-md bg-sel px-2 py-0.5 text-[12px] text-title transition-colors hover:bg-white/[0.12] disabled:opacity-40 disabled:hover:bg-sel"
+              >
+                Compact session
+              </button>
+            )}
+          </div>
+          <div className="my-3 h-px bg-sel" />
+          <div className="flex items-baseline justify-between gap-2">
+            <span className={head}>Plan usage limits</span>
+            {p.usage?.state === 'loading' && <span className="animate-glow text-[11px] text-faint">Loading…</span>}
+          </div>
+          {limits.length === 0 ? (
+            <div className="mt-2 text-[12px] text-faint">
+              {p.usage?.state === 'loading' ? 'Reading /usage…' : p.usage?.state === 'failed' ? 'Could not read /usage right now.' : 'No usage data yet.'}
+            </div>
+          ) : (
+            <div className="mt-2 flex flex-col gap-2.5">
+              {limits.map((l) => (
+                <div key={l.label}>
+                  <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+                    <span className="truncate">{l.label}</span>
+                    <span className="shrink-0 text-faint">{Math.round(l.percent)}%</span>
+                  </div>
+                  <div className="mt-1">
+                    <Bar frac={l.percent / 100} danger={l.percent >= 90} />
+                  </div>
+                  {l.resets && <div className="mt-0.5 text-[11px] text-faint">Resets {l.resets}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -65,7 +176,7 @@ function ContextRing({ tokens, window }: { tokens: number; window: number }) {
  * line. The text is pasted into the Claude Code TUI in tmux; if that refuses (it
  * holds unsent text of its own), the draft stays here.
  */
-export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, commands, onNeedCommands, insert, leftControls, rightControls, chips, ctx, folder, branch }: Props) {
+export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, commands, onNeedCommands, insert, leftControls, rightControls, chips, ctx, autoCompactLeft, usage, usageFallback, onContextOpen, onCompact, compactBusy, folder, branch }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState('')
   // Nothing is saved until the stored draft has been read: the empty initial
@@ -267,9 +378,17 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
           <div className="min-w-0 flex-1" />
           {rightControls}
           {ctx && (
-            <span className="contents" title={chips?.length ? chips.join(' · ') : undefined}>
-              <ContextRing tokens={ctx.tokens} window={ctx.window} />
-            </span>
+            <ContextButton
+              tokens={ctx.tokens}
+              window={ctx.window}
+              chips={chips}
+              autoCompactLeft={autoCompactLeft}
+              usage={usage}
+              usageFallback={usageFallback}
+              onOpen={onContextOpen}
+              onCompact={onCompact}
+              compactBusy={compactBusy}
+            />
           )}
         </div>
       </div>

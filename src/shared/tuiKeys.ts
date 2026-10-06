@@ -143,7 +143,19 @@ export function parseFooter(screen: string): TuiFooter | null {
       .map((x) => x.replace(/\(shift\+tab[^)]*\)/i, '').trim())
       .filter((x) => x && !FOOTER_HINT_RE.test(x))
   }
-  return { segments, ...(segments[0] ? { model: segments[0] } : {}), ...(mode ? { mode } : {}), modeExtras }
+  // Right above the box's top rule, when context runs low.
+  let autoCompactLeft: number | undefined
+  for (let i = Math.max(0, input - 4); i < input; i++) {
+    const m = /(\d+(?:\.\d+)?)% until auto-compact/i.exec(lines[i])
+    if (m) autoCompactLeft = Number(m[1])
+  }
+  return {
+    segments,
+    ...(segments[0] ? { model: segments[0] } : {}),
+    ...(mode ? { mode } : {}),
+    modeExtras,
+    ...(autoCompactLeft !== undefined ? { autoCompactLeft } : {})
+  }
 }
 export const MODE_MAX_PRESSES = 4
 
@@ -263,11 +275,32 @@ export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** The marker every dialog command (/usage, /status) shows in its footer. */
 export const DIALOG_FOOTER = 'Esc to cancel'
 const DIALOG_TEXT_CAP = 60
+// A hint ("Scroll wheel is sending arrow keys…") may sit inside the edge row.
+const DIALOG_EDGE_RE = /^\s*▔{5,}/
+// A dialog taller than the pane shows ↓ (and ↑) at the right end of a line.
+const SCROLL_MARK_RE = /\s+[↑↓]\s*$/
+
+/**
+ * True if a dialog is open. A tall one (/usage in a short pane) is cut off at the
+ * bottom, so its "Esc to cancel" footer is not on screen: then it is the ▔ top edge
+ * with no input box under it.
+ */
+export function isDialogOpen(screen: string): boolean {
+  if (screen.includes(DIALOG_FOOTER)) return true
+  return parseFooter(screen) === null && screen.split('\n').some((l) => DIALOG_EDGE_RE.test(l))
+}
+
+/** True if the open dialog has more below what is on screen (Down scrolls it). */
+export function dialogHasMore(screen: string): boolean {
+  if (screen.includes(DIALOG_FOOTER)) return false
+  const lines = screen.split('\n').map((l) => l.trimEnd()).filter(Boolean)
+  return lines.slice(-3).some((l) => /↓$/.test(l))
+}
 
 /**
  * The body of a command dialog on a plain `capture-pane -p` screen: the lines between
- * the last solid rule above the "Esc to cancel" line and that line. Null when no such
- * dialog is on screen.
+ * its top edge (or the last solid rule) and the "Esc to cancel" line, or the bottom
+ * of the screen when the dialog is cut off there. Null when no such dialog is on screen.
  */
 export function parseDialogText(screen: string): string | null {
   const lines = screen.split('\n').map((l) => l.trimEnd())
@@ -278,11 +311,14 @@ export function parseDialogText(screen: string): string | null {
       break
     }
   }
-  if (end < 0) return null
+  if (end < 0) {
+    if (!isDialogOpen(screen)) return null
+    end = lines.length
+  }
   // A dialog's top edge is a row of ▔. Without one, the nearest solid rule above.
   let start = 0
   for (let i = end - 1; i >= 0; i--) {
-    if (/^\s*▔{5,}\s*$/.test(lines[i])) {
+    if (DIALOG_EDGE_RE.test(lines[i])) {
       start = i + 1
       break
     }
@@ -295,9 +331,55 @@ export function parseDialogText(screen: string): string | null {
       }
     }
   }
-  const body = lines.slice(Math.max(start, end - DIALOG_TEXT_CAP), end)
+  const body = lines.slice(Math.max(start, end - DIALOG_TEXT_CAP), end).map((l) => l.replace(SCROLL_MARK_RE, ''))
   const text = body.join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
   return text || null
+}
+
+/**
+ * Two reads of a scrolled dialog as one text. Its top rows (the tab row) stay put while
+ * the rest scrolls: those, and the lines `b` repeats from the end of `a`, are kept once.
+ */
+export function joinScrolled(a: string, b: string): string {
+  const x = a.split('\n')
+  let y = b.split('\n')
+  let fixed = 0
+  while (fixed < x.length && fixed < y.length - 1 && x[fixed] === y[fixed]) fixed++
+  y = y.slice(fixed)
+  for (let k = Math.min(x.length, y.length); k > 0; k--) {
+    if (x.slice(-k).join('\n') === y.slice(0, k).join('\n')) return [...x, ...y.slice(k)].join('\n')
+  }
+  return [...x, ...y].join('\n')
+}
+
+/** One plan limit from the /usage text: "Current session", "22% used", "Resets 11pm (UTC)". */
+export interface UsageLimit {
+  label: string
+  percent: number
+  resets?: string
+}
+
+/** The limits on the /usage screen, in order; empty when the text holds none. */
+export function parseUsage(text: string): UsageLimit[] {
+  const lines = text.split('\n').map((l) => l.trim())
+  const out: UsageLimit[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const head = /^Current (session|week)\b(.*)$/i.exec(lines[i])
+    if (!head) continue
+    let percent: number | undefined
+    let resets: string | undefined
+    for (let k = i + 1; k < Math.min(lines.length, i + 4); k++) {
+      const pct = /(\d+(?:\.\d+)?)%\s+used/i.exec(lines[k])
+      if (pct) percent = Number(pct[1])
+      const r = /^Resets\s+(.+)$/i.exec(lines[k])
+      if (r) resets = r[1]
+    }
+    if (percent === undefined) continue
+    const extra = head[2].trim().replace(/^\((.*)\)$/, '$1')
+    const label = head[1].toLowerCase() === 'session' ? 'Session' : `Weekly${extra ? ' · ' + extra : ''}`
+    out.push({ label, percent, ...(resets ? { resets } : {}) })
+  }
+  return out
 }
 
 /** True if the option with `digit` is on the screen with exactly `label` (a card may be stale). */
