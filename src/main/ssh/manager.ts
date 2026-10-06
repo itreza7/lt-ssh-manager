@@ -255,6 +255,12 @@ export class SshManager extends EventEmitter {
   // keyboard — an attended caller must not join one of those (see `acquire`).
   private sftpConnecting = new Map<string, { p: Promise<void>; unattended: boolean }>()
   private sftpAttaching = new Map<string, Promise<SFTPWrapper>>()
+  // Exec channels open on each pooled connection, and the commands waiting for one.
+  // sshd refuses a connection's channel past MaxSessions (10 by default), so a
+  // burst of polls queues here instead of failing.
+  private chanSlots = new Map<string, { open: number; cap: number; wait: (() => void)[] }>()
+  // Live transcript streams on each stream connection (see execStream).
+  private streamShards = new Map<string, number>()
   private pendingHostKeys = new Map<string, PendingHostKey>()
   // Active tunnels, keyed by their definition id (a def runs at most once).
   private tunnels = new Map<string, RunningTunnel>()
@@ -385,6 +391,8 @@ export class SshManager extends EventEmitter {
       const client = new Client()
       let settled = false
       let session: Session | undefined
+      // The pty size the channel was opened at.
+      let opened = { cols: opts.cols, rows: opts.rows }
       const done = (fn: () => void) => {
         if (settled) return
         settled = true
@@ -506,6 +514,9 @@ export class SshManager extends EventEmitter {
         }
 
         this.sessions.set(sessionId, sess)
+        // A resize while the channel was opening was only recorded: apply it now.
+        const r = this.redials.get(sessionId)
+        if (r && !sess.control && (r.cols !== opened.cols || r.rows !== opened.rows)) stream.setWindow(r.rows, r.cols, 0, 0)
         if (auto) sess.readyTimer = setTimeout(announceReady, AUTO_READY_FALLBACK_MS)
         else announceReady()
 
@@ -520,14 +531,17 @@ export class SshManager extends EventEmitter {
 
       client.on('ready', () => {
         if (!this.isCurrent(sessionId, epoch)) return abandon()
+        // The size now, not the one connect was called with: resize() only records
+        // a size while the session is still dialing, and the renderer sends each
+        // size once, so one that changed meanwhile would otherwise never arrive.
+        const r = this.redials.get(sessionId)
+        const cols = r ? r.cols : opts.cols
+        const rows = r ? r.rows : opts.rows
+        opened = { cols, rows }
         if (opts.command) {
-          client.exec(
-            opts.command,
-            { pty: { term: 'xterm-256color', cols: opts.cols, rows: opts.rows } },
-            onShell
-          )
+          client.exec(opts.command, { pty: { term: 'xterm-256color', cols, rows } }, onShell)
         } else {
-          client.shell({ term: 'xterm-256color', cols: opts.cols, rows: opts.rows }, onShell)
+          client.shell({ term: 'xterm-256color', cols, rows }, onShell)
         }
       })
 
@@ -685,15 +699,35 @@ export class SshManager extends EventEmitter {
     onData: (b: Buffer) => void,
     onClose: (err?: Error) => void
   ): Promise<{ close(): void }> {
-    await this.acquire(key, connection, opts.password, opts.passphrase, opts.timeoutMs, opts.unattended)
-    const client = this.sftpPool.get(key)?.client
+    // Streams live on connections of their own, STREAMS_PER_CONN to each: held open
+    // for as long as a chat is, they would otherwise use up the channels the
+    // short commands on the main connection need.
+    let shard = ''
+    for (let i = 0; ; i++) {
+      shard = `${key}#stream${i}`
+      if ((this.streamShards.get(shard) ?? 0) < SshManager.STREAMS_PER_CONN) break
+    }
+    this.streamShards.set(shard, (this.streamShards.get(shard) ?? 0) + 1)
+    const unshard = (): void => {
+      const n = (this.streamShards.get(shard) ?? 1) - 1
+      if (n > 0) this.streamShards.set(shard, n)
+      else this.streamShards.delete(shard)
+    }
+    try {
+      await this.acquire(shard, connection, opts.password, opts.passphrase, opts.timeoutMs, opts.unattended)
+    } catch (e) {
+      unshard()
+      throw e
+    }
+    const client = this.sftpPool.get(shard)?.client
     // Releases only a ref this call took: if the client has since died and a
     // newer one now sits under the same key, that ref was never ours to drop.
     let released = false
     const release = (): void => {
       if (released) return
       released = true
-      if (this.sftpPool.get(key)?.client === client) this.closeSftp(key)
+      unshard()
+      if (this.sftpPool.get(shard)?.client === client) this.closeSftp(shard)
     }
     if (!client) {
       release()
@@ -942,14 +976,63 @@ export class SshManager extends EventEmitter {
    * editor tab, and every other command sharing it, over one command that ran
    * long. That is the whole reason this exists.
    */
-  private execOnPooled(
+  private async execOnPooled(
     key: string,
     command: string,
     opts?: { deadlineMs?: number; maxBytes?: number; input?: Buffer }
   ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
-    const entry = this.sftpPool.get(key)
-    if (!entry) return Promise.reject(new Error('SFTP session is not open'))
-    const client = entry.client
+    for (let attempt = 1; ; attempt++) {
+      const entry = this.sftpPool.get(key)
+      if (!entry) throw new Error('SFTP session is not open')
+      const slots = await this.takeSlot(key)
+      try {
+        return await this.execOnce(entry.client, command, opts)
+      } catch (e) {
+        // Refused at the channel: the server's MaxSessions is lower than our cap.
+        // Learn it from what is open now (this one included) and queue again.
+        if (attempt >= SshManager.CHANNEL_TRIES || !/Channel open failure/i.test(String((e as Error)?.message ?? e))) throw e
+        slots.cap = Math.max(1, slots.open - 1)
+      } finally {
+        this.freeSlot(key)
+      }
+    }
+  }
+
+  /** Most exec channels one pooled connection runs at once; sshd's MaxSessions is 10 and SFTP takes one. */
+  private static readonly CHANNEL_CAP = 8
+  private static readonly CHANNEL_TRIES = 3
+  /** Live transcript streams per stream connection, under the same MaxSessions. */
+  private static readonly STREAMS_PER_CONN = 8
+
+  private takeSlot(key: string): Promise<{ open: number; cap: number }> {
+    let s = this.chanSlots.get(key)
+    if (!s) this.chanSlots.set(key, (s = { open: 0, cap: SshManager.CHANNEL_CAP, wait: [] }))
+    const slots = s
+    if (slots.open < slots.cap) {
+      slots.open++
+      return Promise.resolve(slots)
+    }
+    return new Promise((resolve) =>
+      slots.wait.push(() => {
+        slots.open++
+        resolve(slots)
+      })
+    )
+  }
+
+  private freeSlot(key: string): void {
+    const s = this.chanSlots.get(key)
+    if (!s) return
+    s.open = Math.max(0, s.open - 1)
+    while (s.open < s.cap && s.wait.length) s.wait.shift()!()
+  }
+
+  /** One command on one channel of `client`. */
+  private execOnce(
+    client: Client,
+    command: string,
+    opts?: { deadlineMs?: number; maxBytes?: number; input?: Buffer }
+  ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
     const limit = opts?.maxBytes ?? SshManager.EXEC_MAX_BYTES
     return new Promise((resolve, reject) => {
       let settled = false
