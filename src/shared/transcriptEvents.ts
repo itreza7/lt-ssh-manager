@@ -135,6 +135,7 @@ export function createTranscriptMapper(): TranscriptMapper {
   /** Workflow / background agent calls seen, by tool_use id. */
   const tasks = new Map<string, TaskInfo>()
   let model = ''
+  let branch = ''
   let usage = 0
   let anon = 0
 
@@ -311,6 +312,10 @@ export function createTranscriptMapper(): TranscriptMapper {
           }
           // Subagent work lives in the Task call's own result; it is not part of this thread.
           if (r.isSidechain === true) continue
+          if ((r.type === 'assistant' || r.type === 'user') && typeof r.gitBranch === 'string' && r.gitBranch && r.gitBranch !== branch) {
+            branch = r.gitBranch
+            out.push({ t: 'branch', branch })
+          }
           if (r.type === 'assistant') assistant(r, out)
           else if (r.type === 'user') {
             // A notification may be written as a meta record; it still ends the task.

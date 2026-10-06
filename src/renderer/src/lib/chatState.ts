@@ -86,6 +86,8 @@ export interface ChatUiState {
   turn: boolean
   mode: ChatMode | null
   model: string | null
+  /** The git branch the session works on, once a record names it. */
+  branch: string | null
   /** Background tasks by tool_use id, in launch order. */
   tasks: Record<string, TaskState>
   /** Prompt size of the last assistant message: what fills the context window. */
@@ -105,6 +107,7 @@ export const initialChatState: ChatUiState = {
   turn: false,
   mode: null,
   model: null,
+  branch: null,
   tasks: {},
   context: null,
   where: {}
@@ -179,6 +182,9 @@ function apply(s: ChatUiState, e: ChatEvent, copied: Set<string>): void {
       return
     case 'model':
       s.model = e.model
+      return
+    case 'branch':
+      s.branch = e.branch
       return
     case 'usage':
       s.context = { inputTokens: e.inputTokens }

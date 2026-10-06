@@ -60,6 +60,8 @@ export type ChatEvent =
   | { t: 'status'; status: 'idle' | 'busy' | 'waiting' | 'ended'; waitingFor?: string }
   | { t: 'mode'; mode: ChatMode }
   | { t: 'model'; model: string }
+  /** The git branch the session works on (`gitBranch` of a user/assistant record), when it changes. */
+  | { t: 'branch'; branch: string }
   /**
    * An AskUserQuestion (`question`) or ExitPlanMode (`plan`) tool_use that has no
    * tool_result yet. reqId is the tool_use id. A permission prompt has no

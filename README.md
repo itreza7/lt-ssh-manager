@@ -26,7 +26,9 @@ main process.
 
 - **Embedded terminals** — real interactive shells rendered with xterm.js,
   so `htop`, `vim`, `docker stats`, `tail -f` all work and look right.
-- **Multiple sessions** in tabs, each with a live connection-status indicator.
+- **Sidebar** — like the Claude desktop app: your open tabs, every live Claude chat on the
+  host grouped by folder (worktrees under their repo), and the host's tmux sessions, each
+  with a live status dot. ⌘B (Ctrl+Shift+B elsewhere) folds it to a thin rail.
 - **tmux control mode** — optional `tmux -CC` integration renders each tmux pane as
   its own native terminal: real scrollback and copy with no mouse-mode, while tmux
   keeps your sessions alive across drops.
@@ -53,9 +55,11 @@ main process.
   output, edits as diffs), and question, plan and permission prompts you answer by click.
   Every Claude live in tmux on the host appears, however it was started. The terminal tab
   and the chat tab show the same session, so use either; "Open in terminal" switches over.
-  The header shows Claude's live status line (model, context, limits, mode), running
-  workflows and background agents show their phases and agents as they go, and an actions
-  menu runs compact, clear, effort, context, usage and your skills and commands.
+  Runs of tool calls fold into one line ("Ran 3 commands"). The composer bar holds the
+  mode, model and effort pickers, a + for your skills and commands, a context ring, and
+  the folder and git branch; running workflows and background agents show their phases
+  and agents live in a Background tasks panel on the right, and an actions menu runs
+  compact, clear, effort, context and usage.
   Needs Claude Code and tmux on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only
@@ -82,7 +86,7 @@ main process.
   fails fast on permanent errors (bad auth, missing key, rejected host key).
 - **Native macOS chrome** — hidden title bar with real traffic lights, a proper
   application menu (⌘N new connection, ⌘W closes a tab, ⇧⌘W the window, ⇧⌘[ / ⇧⌘]
-  switch tabs), a frosted title bar (native vibrancy), the system font,
+  switch tabs), a frosted sidebar (native vibrancy), the system font,
   and the window reopens at whatever size and position you last left it instead of
   always maximizing.
 
@@ -92,7 +96,7 @@ main process.
 | --- | --- | --- |
 | Main | `src/main/` | SSH sessions (`ssh2`), host-key store, connection/secret stores, IPC |
 | Preload | `src/preload/` | `contextBridge` — exposes a minimal typed `window.api` |
-| Renderer | `src/renderer/src/` | React UI: tab strip, Command Palette, dialogs, xterm terminal tabs |
+| Renderer | `src/renderer/src/` | React UI: sidebar, Command Palette, dialogs, xterm terminal tabs |
 | Shared | `src/shared/` | Types shared across processes |
 
 Security: the renderer runs with `contextIsolation: true`, `nodeIntegration:

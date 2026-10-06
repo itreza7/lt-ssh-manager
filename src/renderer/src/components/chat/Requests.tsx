@@ -11,7 +11,7 @@ interface Props {
   onTerminal?: () => void
 }
 
-const card = 'animate-rise rounded-xl border border-accent/40 bg-elevated/70 p-4 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.6)]'
+const card = 'animate-rise rounded-xl border border-sel bg-bubble p-4'
 
 const HEADER: Record<TuiPrompt['kind'], string> = {
   question: 'Claude asks',
@@ -55,7 +55,7 @@ export function PromptCard({ prompt, onAnswer, onTerminal }: Props) {
                 disabled={sent}
                 onClick={() => (o.freeText ? setFreeDigit(open ? null : o.digit) : answer({ kind: 'option', digit: o.digit, label: o.label }))}
                 className={`flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
-                  o.checked || open ? 'border-accent/70 bg-accent/10' : 'border-line hover:border-faint'
+                  o.checked || open ? 'border-accent/70 bg-accent/10' : 'border-sel hover:bg-line'
                 }`}
               >
                 <span className={`mt-0.5 shrink-0 text-sm ${o.checked ? 'text-accent' : 'text-faint'}`}>
@@ -74,7 +74,7 @@ export function PromptCard({ prompt, onAnswer, onTerminal }: Props) {
                     rows={3}
                     value={text}
                     onChange={(e) => setText(e.target.value)}
-                    className="min-w-0 flex-1 resize-none rounded-lg border border-line bg-ink/60 px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+                    className="min-w-0 flex-1 resize-none rounded-lg border border-sel bg-panel px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-[#444]"
                   />
                   <Button
                     variant="primary"

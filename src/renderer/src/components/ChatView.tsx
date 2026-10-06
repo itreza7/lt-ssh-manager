@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   ChatAnswer,
   ChatEvent,
@@ -11,13 +11,13 @@ import type {
   TuiPrompt
 } from '../../../shared/chatProtocol'
 import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/transcriptEvents'
-import { initialChatState, reduceEvents, type ChatUiState } from '../lib/chatState'
+import { EFFORT_LEVELS } from '../../../shared/tuiKeys'
+import { initialChatState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
 import { ChatComposer } from './ChatComposer'
 import { Button, Modal } from './Modal'
-import { Select } from './Select'
-import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, UserMessage } from './chat/Blocks'
-import { CHAT_DOT, chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
-import { ActionsMenu, BUILTIN_COMMANDS, ModeMenu, type CommandInfo } from './chat/Menus'
+import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, ToolGroup, UserMessage } from './chat/Blocks'
+import { chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { ActionsMenu, BUILTIN_COMMANDS, ModeMenu, PickMenu, type CommandInfo } from './chat/Menus'
 import { PromptCard } from './chat/Requests'
 import { TasksPanel } from './chat/Tasks'
 
@@ -36,6 +36,10 @@ interface Props {
   onOpenTerminal: (tmuxSession: string) => void
   /** Resume started a different session id: the tab should follow it. */
   onResumed: (sessionId: string) => void
+  /** The header is the window's title bar (the app bar is hidden): it drags the window. */
+  titleBar?: boolean
+  /** Extra header controls at the right (the split controls, when the app bar is hidden). */
+  headerExtra?: ReactNode
 }
 
 // Closer to the bottom than this and a new message keeps the view pinned there.
@@ -59,7 +63,73 @@ const MODELS = [
   { value: 'haiku', label: 'Haiku' }
 ]
 
+// Below this width the Background tasks panel leaves its column and sits above the composer.
+const SIDE_MIN_PX = 1000
+// The context window: 1M for a "[1m]" model, else 200k.
+const WINDOW_SMALL = 200_000
+const WINDOW_LARGE = 1_000_000
+
+// The header's status dot: idle is a hollow ring, the live states are amber.
+const HEADER_DOT: Record<ChatStatus, string> = {
+  idle: 'border border-faint',
+  busy: 'bg-amber animate-pulse',
+  waiting: 'bg-amber',
+  ended: 'bg-danger/50'
+}
+
+const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
+
 type Link = 'connecting' | 'live' | 'reconnecting'
+
+type ToolBlock = Extract<UiBlock, { type: 'tool_use' }>
+
+/** A message to render as it is, or a run of tool calls to render as one group. */
+type Segment = { kind: 'item'; item: ChatItem; i: number } | { kind: 'tools'; id: string; blocks: ToolBlock[] }
+
+// Calls that keep their own card: they say more than a count can.
+const STANDALONE_TOOLS = new Set(['TodoWrite', 'Task', 'Agent'])
+
+/**
+ * The calls of an assistant message that holds nothing but tool calls and may be
+ * grouped, or null. A failed call, and a call still waiting on its result while the
+ * turn is live, stay in view on their own.
+ */
+function groupableCalls(it: AssistantItem, results: Record<string, ToolResult>, live: boolean): ToolBlock[] | null {
+  const calls: ToolBlock[] = []
+  for (const b of it.blocks) {
+    if (b.type === 'text' && !b.text) continue
+    if (b.type !== 'tool_use') return null
+    const r = results[b.id]
+    if (STANDALONE_TOOLS.has(b.name) || r?.isError || (!r && live)) return null
+    calls.push(b)
+  }
+  return calls.length ? calls : null
+}
+
+/** Consecutive groupable messages become one `tools` segment when they hold 2 or more calls. */
+function segmentsOf(items: ChatItem[], results: Record<string, ToolResult>, live: boolean): Segment[] {
+  const out: Segment[] = []
+  const run: { item: AssistantItem; i: number }[] = []
+  const calls: ToolBlock[] = []
+  const flush = (): void => {
+    if (calls.length >= 2) out.push({ kind: 'tools', id: run[0].item.msgId, blocks: [...calls] })
+    else for (const r of run) out.push({ kind: 'item', item: r.item, i: r.i })
+    run.length = 0
+    calls.length = 0
+  }
+  items.forEach((it, i) => {
+    const c = it.kind === 'assistant' ? groupableCalls(it, results, live) : null
+    if (it.kind === 'assistant' && c) {
+      run.push({ item: it, i })
+      calls.push(...c)
+      return
+    }
+    flush()
+    out.push({ kind: 'item', item: it, i })
+  })
+  flush()
+  return out
+}
 
 /** What is said above the composer after typing into the pane did not go through. */
 type Notice = { kind: 'draft' } | { kind: 'screen' } | { kind: 'text'; text: string }
@@ -77,7 +147,7 @@ function modelValue(model: string | null): string {
   return MODELS.find((m) => m.value !== 'default' && model.includes(m.value))?.value ?? model
 }
 
-export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed }: Props) {
+export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed, titleBar, headerExtra }: Props) {
   const [state, setState] = useState<ChatUiState>(initialChatState)
   const [link, setLink] = useState<Link>('connecting')
   // From chatStatus: the live Claude. Undefined until asked (or while a fresh start boots), null = none.
@@ -101,6 +171,13 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   // A command or mode change is typing into the pane: the screen poll waits, so it does not read a half-finished screen.
   const cmdBusy = useRef(false)
   const [cmdRunning, setCmdRunning] = useState(false)
+  // The level last picked here; the TUI does not say what it is.
+  const [effort, setEffort] = useState<string | null>(null)
+  // Wide enough for the Background tasks column.
+  const [wide, setWide] = useState(true)
+  // Tasks the user closed the panel on: it comes back when one that is not in here shows up.
+  const [closedTasks, setClosedTasks] = useState<string[]>([])
+  const root = useRef<HTMLDivElement>(null)
 
   // Byte offset after the last whole record applied — where a reconnect resumes.
   const offset = useRef(-1)
@@ -196,6 +273,18 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       if (streamId !== null) void window.api.chatUnstream({ streamId })
     }
   }, [connectionId, password, sessionId])
+
+  useEffect(() => {
+    const el = root.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0].contentRect.width
+      // A hidden tab measures 0: that says nothing about the layout.
+      if (w > 0) setWide(w >= SIDE_MIN_PX)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   // Claude Code's own status: the live process, its tmux pane, busy/waiting.
   useEffect(() => {
@@ -417,6 +506,9 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       return ok
     })
   const openTerminal = tmuxSession ? () => onOpenTerminal(tmuxSession) : undefined
+  const pickEffort = async (l: string): Promise<void> => {
+    if (await runCommand(`/effort ${l}`)) setEffort(l)
+  }
 
   const resume = async (): Promise<void> => {
     setResuming(true)
@@ -480,15 +572,27 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   const model = modelValue(state.model ?? footer?.model?.toLowerCase() ?? null)
   const modelOptions = MODELS.some((m) => m.value === model) ? MODELS : [{ value: model, label: model }, ...MODELS]
-  // Footer chips: the model first, then the user's other statusLine segments. The one that
-  // only repeats the tab's own name says nothing here.
+  // The user's statusLine segments, shown small in the composer. The model has its own picker, and the
+  // one that only repeats the tab's own name says nothing here, and the context ring shows ctx.
   const norm = (x: string | undefined): string => (x ?? '').trim().toLowerCase()
   const own = new Set([norm(tmuxSession), norm(session?.name), norm(leaf(cwd))].filter(Boolean))
+  const ctx = state.context
+    ? { tokens: state.context.inputTokens, window: /1m/i.test(`${state.model ?? ''} ${footer?.model ?? ''}`) ? WINDOW_LARGE : WINDOW_SMALL }
+    : null
   const segs = footer?.segments ?? []
   const chipModel = footer ? (footer.model ?? segs[0]) : undefined
-  const chips = segs.filter((x) => x !== chipModel && !own.has(norm(x)))
+  const isEffort = (x: string): boolean => (EFFORT_LEVELS as readonly string[]).includes(norm(x))
+  const shownEffort = effort ?? norm(segs.find(isEffort)) ?? ''
+  const chips = segs.filter((x) => x !== chipModel && !own.has(norm(x)) && !isEffort(x) && !(ctx && /^ctx\b/i.test(x)))
   const footerMode = footer?.mode ?? null
-  const ctxK = state.context ? Math.round(state.context.inputTokens / 1000) : null
+  const folder = session ? chatLabel(session) : leaf(cwd)
+
+  // A call with no result yet is still running while the turn is live (busy, or waiting on a dialog).
+  const segments = useMemo(() => segmentsOf(state.items, state.results, busy || waiting), [state.items, state.results, busy, waiting])
+  const tasks = Object.values(state.tasks).filter((t) => !t.hidden)
+  const showTasks = !ended && tasks.some((t) => !closedTasks.includes(t.toolUseId))
+  const closeTasks = (): void => setClosedTasks(tasks.map((t) => t.toolUseId))
+  const title = session?.name?.trim() || folder
 
   const lastAssistant = (() => {
     for (let i = state.items.length - 1; i >= 0; i--) if (state.items[i].kind === 'assistant') return i
@@ -504,70 +608,68 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         ? 'Not a TUI — read only'
         : 'Not in tmux — read only'
 
+  const ghost = 'no-drag grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-title'
+  const actions = (variant: 'chevron' | 'dots') => (
+    <ActionsMenu
+      variant={variant}
+      disabled={!drivable || cmdRunning}
+      commands={commands}
+      onNeedCommands={loadCommands}
+      onCompact={() => void runCommand('/compact')}
+      onClear={() => setConfirmClear(true)}
+      onEffort={(l) => void pickEffort(l)}
+      onContext={() => void runCommand('/context')}
+      onUsage={() => void runCommand('/usage')}
+      onPick={(name) => setInsert({ id: Date.now(), text: `/${name} ` })}
+      onOpenTerminal={openTerminal}
+    />
+  )
+
   return (
-    <div className="chat flex h-full flex-col overflow-hidden border-t border-line bg-ink">
-      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-2.5">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${CHAT_DOT[shown]}`} title={label} />
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-sm font-medium text-fg" title={cwd}>
-            {session ? chatLabel(session) : leaf(cwd)}
-          </div>
-          <div className={`truncate text-[11px] ${shown === 'waiting' ? 'text-amber' : 'text-faint'}`}>{cmdRunning ? 'Typing into the terminal…' : label}</div>
+    <div ref={root} className="chat flex h-full overflow-hidden bg-ink">
+      <div className="flex min-w-0 flex-1 flex-col">
+      <div className={`${titleBar ? 'drag ' : ''}flex h-11 shrink-0 items-center gap-2 bg-ink px-4`}>
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${HEADER_DOT[shown]}`}
+          title={cmdRunning ? 'Typing into the terminal…' : label}
+        />
+        <div className="min-w-0 truncate text-[14px] font-medium text-title" title={cwd}>
+          {title}
         </div>
+        {actions('chevron')}
+        {title !== folder && (
+          <span className="no-drag max-w-[40%] shrink-0 truncate rounded-md bg-elevated px-1.5 py-0.5 text-[12px] leading-4 text-muted" title={cwd}>
+            {folder}
+          </span>
+        )}
         {link === 'reconnecting' && (
           <span className="animate-glow shrink-0 rounded-full bg-sky-400/15 px-2.5 py-0.5 text-[11px] text-sky-400">Reconnecting…</span>
         )}
-        {!ended && (
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            {chipModel && <span className="shrink-0 rounded-full border border-line bg-elevated/60 px-2.5 py-0.5 text-[12px] font-medium text-fg" title="Model">{chipModel}</span>}
-            {chips.map((c, i) => (
-              <span key={`${i}-${c}`} className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 text-[11px] text-muted">
-                {c}
-              </span>
-            ))}
-            {!segs.some((x) => /^ctx\b/i.test(x)) && ctxK !== null && (
-              <span className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 font-mono text-[11px] text-muted" title="Context in use (tokens)">
-                ctx {ctxK}k
-              </span>
-            )}
-            {(footerMode ?? state.mode) && (
-              <ModeMenu mode={footerMode ?? state.mode} disabled={!drivable || cmdRunning} onPick={(m) => void setMode(m)} />
-            )}
-            {footer?.modeExtras.map((x, i) => (
-              <span key={`${i}-${x}`} className="shrink-0 rounded-full border border-line-soft px-2 py-0.5 text-[11px] text-muted">
-                {x}
-              </span>
-            ))}
-          </div>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          {drivable && <Select value={model} options={modelOptions} onChange={setModel} width={120} />}
+        <div className="ml-auto flex items-center gap-0.5">
+          {headerExtra && <div className="no-drag mr-1 flex items-center">{headerExtra}</div>}
           {drivable && busy && (
             <button
               onClick={interrupt}
               title="Stop the current turn (Esc)"
-              className="shrink-0 rounded-lg border border-danger/40 bg-danger/15 px-2.5 py-1.5 text-sm text-danger transition-colors hover:bg-danger/25"
+              className="no-drag mr-1 shrink-0 rounded-md bg-danger/15 px-2.5 py-1 text-[13px] text-danger transition-colors hover:bg-danger/25"
             >
               Interrupt
             </button>
           )}
-          <ActionsMenu
-            disabled={!drivable || cmdRunning}
-            commands={commands}
-            onNeedCommands={loadCommands}
-            onCompact={() => void runCommand('/compact')}
-            onClear={() => setConfirmClear(true)}
-            onEffort={(l) => void runCommand(`/effort ${l}`)}
-            onContext={() => void runCommand('/context')}
-            onUsage={() => void runCommand('/usage')}
-            onPick={(name) => setInsert({ id: Date.now(), text: `/${name} ` })}
-            onOpenTerminal={openTerminal}
-          />
+          {openTerminal && (
+            <button onClick={openTerminal} title="Open in terminal" className={ghost}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m4 17 6-6-6-6" />
+                <path d="M12 19h8" />
+              </svg>
+            </button>
+          )}
+          {actions('dots')}
         </div>
       </div>
 
       {ended && (
-        <div className="flex shrink-0 items-center gap-3 border-b border-line bg-elevated/60 px-4 py-2">
+        <div className="flex shrink-0 items-center gap-3 bg-panel px-4 py-2">
           <span className="text-sm text-muted">Session ended. This is a read-only copy of its transcript.</span>
           <Button className="ml-auto" variant="primary" disabled={resuming} onClick={() => void resume()}>
             {resuming ? 'Resuming…' : 'Resume in tmux'}
@@ -575,77 +677,105 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         </div>
       )}
 
-      <div
-        ref={scroller}
-        onScroll={onScroll}
-        onClick={onClick}
-        className="min-h-0 flex-1 overflow-y-auto px-6 py-6"
-        style={{ fontFamily: 'var(--font-sans)' }}
-      >
-        <div className="mx-auto flex max-w-[46rem] flex-col gap-6">
-          {partial && <div className="text-center text-[11px] text-faint">Earlier messages are not shown — open the Reader for the whole conversation.</div>}
-          {empty && (
-            <div className="py-16 text-center text-sm text-faint">
-              {link === 'connecting' || starting ? 'Connecting…' : 'Nothing in this session yet.'}
-            </div>
-          )}
-          {state.items.map((it, i) =>
-            it.kind === 'user' ? (
-              <UserMessage key={it.id} item={it} />
-            ) : it.kind === 'note' ? (
-              <NoteLine key={it.id} item={it} />
-            ) : (
-              <AssistantBlocks
-                key={it.msgId}
-                item={it}
-                live={busy && i === lastAssistant}
-                results={state.results}
-                groups={state.children}
-              />
-            )
-          )}
-          {queued.map((p) => (
-            <QueuedMessage key={p.id} text={p.text} />
-          ))}
-          {snapshot && <OutputCard title={snapshot.title} text={snapshot.text} onDismiss={() => setSnapshot(null)} />}
-          {waiting && polling && prompt && <PromptCard key={`${prompt.kind}\0${prompt.body}`} prompt={prompt} onAnswer={answer} onTerminal={openTerminal} />}
-          {busy && !waiting && <div className="animate-glow text-sm text-faint">Working…</div>}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scroller}
+          onScroll={onScroll}
+          onClick={onClick}
+          className="min-h-0 flex-1 overflow-y-auto px-6 py-6"
+          style={{ fontFamily: 'var(--font-sans)' }}
+        >
+          <div className="mx-auto flex max-w-[740px] flex-col gap-6">
+            {partial && <div className="text-center text-[11px] text-faint">Earlier messages are not shown — open the Reader for the whole conversation.</div>}
+            {empty && (
+              <div className="py-16 text-center text-sm text-faint">
+                {link === 'connecting' || starting ? 'Connecting…' : 'Nothing in this session yet.'}
+              </div>
+            )}
+            {segments.map((seg) =>
+              seg.kind === 'tools' ? (
+                <ToolGroup key={`tools-${seg.id}`} blocks={seg.blocks} results={state.results} groups={state.children} />
+              ) : seg.item.kind === 'user' ? (
+                <UserMessage key={seg.item.id} item={seg.item} />
+              ) : seg.item.kind === 'note' ? (
+                <NoteLine key={seg.item.id} item={seg.item} />
+              ) : (
+                <AssistantBlocks
+                  key={seg.item.msgId}
+                  item={seg.item}
+                  live={busy && seg.i === lastAssistant}
+                  results={state.results}
+                  groups={state.children}
+                />
+              )
+            )}
+            {queued.map((p) => (
+              <QueuedMessage key={p.id} text={p.text} />
+            ))}
+            {snapshot && <OutputCard title={snapshot.title} text={snapshot.text} onDismiss={() => setSnapshot(null)} />}
+            {waiting && polling && prompt && <PromptCard key={`${prompt.kind}\0${prompt.body}`} prompt={prompt} onAnswer={answer} onTerminal={openTerminal} />}
+            {busy && !waiting && <div className="animate-glow text-sm text-faint">Working…</div>}
+          </div>
         </div>
+
+        {showTasks && !wide && <TasksPanel tasks={tasks} target={target} active={active} onClose={closeTasks} />}
+
+        {notice && (
+          <div className="flex shrink-0 items-center gap-3 bg-panel px-4 py-1.5 text-[12px] text-amber">
+            <span className="min-w-0 flex-1">
+              {notice.kind === 'draft'
+                ? 'The terminal has unsent text.'
+                : notice.kind === 'screen'
+                  ? 'The terminal is not showing that prompt.'
+                  : notice.text}
+            </span>
+            {openTerminal && notice.kind !== 'text' && (
+              <button onClick={openTerminal} className="shrink-0 text-fg underline-offset-2 hover:underline">
+                {notice.kind === 'screen' ? 'Answer in terminal' : 'Open in terminal'}
+              </button>
+            )}
+          </div>
+        )}
+
+        <ChatComposer
+          draftKey={`chat:${sessionId}`}
+          active={active}
+          disabled={!drivable}
+          disabledHint={readOnlyHint}
+          busy={busy}
+          onSend={sendText}
+          onInterrupt={interrupt}
+          commands={commands ?? BUILTIN_COMMANDS}
+          onNeedCommands={loadCommands}
+          insert={insert}
+          leftControls={
+            !ended && (footerMode ?? state.mode) ? (
+              <ModeMenu up mode={footerMode ?? state.mode} disabled={!drivable || cmdRunning} onPick={(m) => void setMode(m)} />
+            ) : null
+          }
+          rightControls={
+            !ended && drivable ? (
+              <>
+                <PickMenu title="Model" value={model} options={modelOptions} onPick={(m) => void setModel(m)} />
+                <PickMenu
+                  title="Effort"
+                  value={shownEffort}
+                  placeholder="Effort"
+                  options={EFFORT_LEVELS.map((l) => ({ value: l, label: cap(l) }))}
+                  disabled={cmdRunning}
+                  onPick={(l) => void pickEffort(l)}
+                />
+              </>
+            ) : null
+          }
+          chips={[...chips, ...(footer?.modeExtras ?? [])]}
+          ctx={ctx}
+          folder={folder}
+          branch={state.branch}
+        />
       </div>
-
-      {!ended && (
-        <TasksPanel tasks={Object.values(state.tasks).filter((t) => !t.hidden)} target={target} active={active} />
-      )}
-
-      {notice && (
-        <div className="flex shrink-0 items-center gap-3 border-t border-line bg-elevated/60 px-4 py-1.5 text-[12px] text-amber">
-          <span className="min-w-0 flex-1">
-            {notice.kind === 'draft'
-              ? 'The terminal has unsent text.'
-              : notice.kind === 'screen'
-                ? 'The terminal is not showing that prompt.'
-                : notice.text}
-          </span>
-          {openTerminal && notice.kind !== 'text' && (
-            <button onClick={openTerminal} className="shrink-0 text-fg underline-offset-2 hover:underline">
-              {notice.kind === 'screen' ? 'Answer in terminal' : 'Open in terminal'}
-            </button>
-          )}
-        </div>
-      )}
-
-      <ChatComposer
-        draftKey={`chat:${sessionId}`}
-        active={active}
-        disabled={!drivable}
-        disabledHint={readOnlyHint}
-        busy={busy}
-        onSend={sendText}
-        onInterrupt={interrupt}
-        commands={commands ?? BUILTIN_COMMANDS}
-        onNeedCommands={loadCommands}
-        insert={insert}
-      />
+      </div>
+      {showTasks && wide && <TasksPanel side tasks={tasks} target={target} active={active} onClose={closeTasks} />}
 
       {confirmClear && (
         <Modal

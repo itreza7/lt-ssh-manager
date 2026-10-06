@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import type { CommandInfo } from './chat/Menus'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { CommandPicker, type CommandInfo } from './chat/Menus'
 
 interface Props {
   /** Key of the autosaved draft (see window.api.drafts*). */
@@ -21,16 +21,51 @@ interface Props {
   onNeedCommands: () => void
   /** A new `id` puts `text` in the box and focuses it (an Actions menu pick). */
   insert: { id: number; text: string } | null
+  /** The bottom row, after the "+": the mode. */
+  leftControls?: ReactNode
+  /** The bottom row, at the right: model and effort. */
+  rightControls?: ReactNode
+  /** The user's statusLine segments, shown as small text. */
+  chips?: string[]
+  /** Prompt tokens in use and the context window, for the ring. */
+  ctx?: { tokens: number; window: number } | null
+  /** In the strip above the box: the folder, and the git branch once known. */
+  folder?: string
+  branch?: string | null
 }
 
 const MAX_HEIGHT = 240
+const RING_R = 6
+const RING_C = 2 * Math.PI * RING_R
+
+/** How full the context window is: an amber ring that turns red as it fills. */
+function ContextRing({ tokens, window }: { tokens: number; window: number }) {
+  const frac = Math.min(Math.max(tokens / window, 0), 1)
+  return (
+    <span className="grid h-6 w-6 shrink-0 place-items-center" title={`ctx ${Math.round(tokens / 1000)}k / ${Math.round(window / 1000)}k`}>
+      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
+        <circle cx="8" cy="8" r={RING_R} fill="none" stroke="var(--color-sel)" strokeWidth="2" />
+        <circle
+          cx="8"
+          cy="8"
+          r={RING_R}
+          fill="none"
+          stroke={frac > 0.9 ? 'var(--color-danger)' : 'var(--color-amber)'}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={`${frac * RING_C} ${RING_C}`}
+        />
+      </svg>
+    </span>
+  )
+}
 
 /**
  * The message box at the bottom of a chat. Enter sends, Shift+Enter breaks the
  * line. The text is pasted into the Claude Code TUI in tmux; if that refuses (it
  * holds unsent text of its own), the draft stays here.
  */
-export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, commands, onNeedCommands, insert }: Props) {
+export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, commands, onNeedCommands, insert, leftControls, rightControls, chips, ctx, folder, branch }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState('')
   // Nothing is saved until the stored draft has been read: the empty initial
@@ -92,6 +127,12 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
     setDraft(`/${c.name} `)
     setSel(0)
   }
+  // From the "+" menu: same as choosing it in the suggestions.
+  const pickName = (name: string): void => {
+    setDraft(`/${name} `)
+    setSel(0)
+    ref.current?.focus()
+  }
 
   // Grow with the text, up to a cap, then scroll.
   useLayoutEffect(() => {
@@ -142,57 +183,95 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
   }
 
   return (
-    <div className="relative mx-auto w-full max-w-[46rem] px-6 pb-4 pt-2">
-      {showing && (
-        <div className="panel animate-rise absolute inset-x-6 bottom-[calc(100%-0.5rem)] z-20 max-h-56 overflow-y-auto p-1 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.8)]">
-          {matches.map((c, i) => (
-            <button
-              key={`${c.source}:${c.name}`}
-              // mousedown, so the textarea keeps its focus
-              onMouseDown={(e) => {
-                e.preventDefault()
-                pick(c)
+    <div className="w-full shrink-0 px-6 pb-0.5 pt-2">
+      <div className="mx-auto w-full max-w-[740px]">
+        <div className="relative">
+          {showing && (
+            <div className="animate-rise absolute inset-x-0 bottom-[calc(100%+8px)] z-20 max-h-56 overflow-y-auto rounded-[10px] border border-sel bg-elevated p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)]">
+              {matches.map((c, i) => (
+                <button
+                  key={`${c.source}:${c.name}`}
+                  // mousedown, so the textarea keeps its focus
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    pick(c)
+                  }}
+                  onMouseEnter={() => setSel(i)}
+                  className={`flex w-full items-baseline gap-3 rounded-md px-2 py-1 text-left transition-colors ${i === at ? 'bg-sel' : ''}`}
+                >
+                  <span className="shrink-0 font-mono text-[13px] text-fg">/{c.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{c.description}</span>
+                  <span className="shrink-0 text-[11px] text-faint">{c.source}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {(folder || branch) && (
+            <div className="mb-1.5 flex h-10 min-w-0 items-center gap-2 rounded-lg bg-bubble px-3 text-[13px] text-faint">
+              {folder && <span className="truncate font-sans">{folder}</span>}
+              {branch && (
+                <span className="min-w-0 truncate font-mono" title="Git branch">
+                  {branch}
+                </span>
+              )}
+            </div>
+          )}
+          <div
+            className={`flex items-end rounded-lg border bg-panel transition-colors focus-within:border-[#444] ${
+              busy ? 'border-amber/40' : 'border-line'
+            }`}
+          >
+            <textarea
+              ref={ref}
+              value={draft}
+              rows={1}
+              dir="auto"
+              spellCheck={false}
+              onChange={(e) => {
+                setDraft(e.target.value)
+                setSel(0)
+                setDismissed(false)
               }}
-              onMouseEnter={() => setSel(i)}
-              className={`flex w-full items-baseline gap-3 rounded-md px-2.5 py-1.5 text-left transition-colors ${i === at ? 'bg-accent/15' : ''}`}
-            >
-              <span className={`shrink-0 font-mono text-[13px] ${i === at ? 'text-accent' : 'text-fg/90'}`}>/{c.name}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{c.description}</span>
-              <span className="shrink-0 text-[10px] text-faint">{c.source}</span>
-            </button>
-          ))}
+              onKeyDown={onKeyDown}
+              placeholder={disabled ? disabledHint : 'Message Claude…'}
+              className="min-h-[38px] min-w-0 flex-1 resize-none bg-transparent px-3 py-[9px] text-[14px] leading-5 text-fg outline-none placeholder:text-faint"
+            />
+            {busy && !disabled && !draft.trim() ? (
+              <button
+                onClick={onInterrupt}
+                title="Stop the current turn (Esc)"
+                className="mb-1 mr-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-title"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={() => void send()}
+                disabled={disabled || sending || !draft.trim()}
+                title="Send (Enter)"
+                className="mb-1 mr-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-md text-fg transition-colors hover:bg-white/[0.06] disabled:text-faint disabled:hover:bg-transparent"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="9 10 4 15 9 20" />
+                  <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
-      )}
-      <div
-        className={`flex items-end gap-2 rounded-2xl border bg-surface px-3.5 py-2.5 transition-colors focus-within:border-accent/60 ${
-          busy ? 'border-accent/30' : 'border-line'
-        }`}
-      >
-        <textarea
-          ref={ref}
-          value={draft}
-          rows={1}
-          dir="auto"
-          spellCheck={false}
-          onChange={(e) => {
-            setDraft(e.target.value)
-            setSel(0)
-            setDismissed(false)
-          }}
-          onKeyDown={onKeyDown}
-          placeholder={disabled ? disabledHint : 'Message Claude…'}
-          className="min-h-[1.75rem] flex-1 resize-none bg-transparent py-0.5 text-[15px] leading-relaxed text-fg outline-none placeholder:text-faint"
-        />
-        <button
-          onClick={() => void send()}
-          disabled={disabled || sending || !draft.trim()}
-          title="Send (Enter)"
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent text-ink transition-opacity hover:opacity-90 disabled:opacity-30"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 19V5M5 12l7-7 7 7" />
-          </svg>
-        </button>
+        <div className="flex h-8 items-center gap-1">
+          <CommandPicker commands={commands} disabled={disabled} onNeedCommands={onNeedCommands} onPick={pickName} />
+          {leftControls}
+          <div className="min-w-0 flex-1" />
+          {rightControls}
+          {ctx && (
+            <span className="contents" title={chips?.length ? chips.join(' · ') : undefined}>
+              <ContextRing tokens={ctx.tokens} window={ctx.window} />
+            </span>
+          )}
+        </div>
       </div>
     </div>
   )

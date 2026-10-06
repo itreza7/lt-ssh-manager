@@ -15,6 +15,30 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const lines = (s: string): string[] => (s === '' ? [] : s.split('\n'))
 const firstLine = (s: string): string => s.split('\n', 1)[0]
 
+/** The › that turns down when its row is open. */
+function Caret({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`}
+    >
+      <path d="m9 18 6-6-6-6" />
+    </svg>
+  )
+}
+
+// A plain muted row, as Claude desktop shows a run of tool calls.
+const quietRow = 'flex max-w-full items-center gap-1 text-left text-[14px] leading-5 text-faint transition-colors hover:text-muted'
+// What an open row holds.
+const openBody = 'mt-1.5 rounded-lg bg-panel px-3 py-2.5'
+
 // ---- diff ------------------------------------------------------------------
 
 interface DiffLine {
@@ -47,7 +71,7 @@ function Diff({ edits }: { edits: { old: string; new: string }[] }) {
     [edits]
   )
   return (
-    <pre dir="ltr" className="max-h-72 overflow-auto rounded-lg border border-line bg-ink/60 py-1.5 font-mono text-[12px] leading-relaxed">
+    <pre dir="ltr" className="max-h-72 overflow-auto rounded-md bg-well py-1.5 font-mono text-[12px] leading-relaxed">
       {rows.map((r, i) => (
         <div
           key={i}
@@ -133,8 +157,8 @@ function Out({ result }: { result: ToolResult }) {
     <>
       <pre
         dir="ltr"
-        className={`max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-ink/60 p-3 font-mono text-[12px] leading-relaxed ${
-          result.isError ? 'border-danger/40 text-danger' : 'border-line text-fg/85'
+        className={`max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well p-3 font-mono text-[12px] leading-relaxed ${
+          result.isError ? 'text-danger' : 'text-fg/85'
         }`}
       >
         {result.content || '(no output)'}
@@ -147,7 +171,7 @@ function Out({ result }: { result: ToolResult }) {
 function TodoList({ input }: { input: Input }) {
   const todos = Array.isArray(input.todos) ? (input.todos as Input[]) : []
   return (
-    <div dir="auto" className="rounded-lg border border-line px-3.5 py-2.5">
+    <div dir="auto" className="rounded-lg bg-panel px-3.5 py-2.5">
       <div className="eyebrow mb-1.5">Todos</div>
       <ul className="space-y-1">
         {todos.map((t, k) => {
@@ -190,7 +214,7 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
     if (block.name === 'Bash') {
       return (
         <div className="space-y-2">
-          <pre dir="ltr" className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-ink/60 p-3 font-mono text-[12px] text-fg/90">
+          <pre dir="ltr" className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well p-3 font-mono text-[12px] text-fg/90">
             {str(input.command)}
           </pre>
           {result && <Out result={result} />}
@@ -206,7 +230,7 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
             </div>
           )}
           {subs && subs.length > 0 && (
-            <div className="space-y-1.5 border-l border-line pl-3">
+            <div className="space-y-1.5 border-l border-sel pl-3">
               {subs.map((m) => (
                 <AssistantBlocks key={m.msgId} item={m} live={false} results={results} groups={groups} compact />
               ))}
@@ -220,7 +244,7 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
     return (
       <div className="space-y-2">
         {generic && (
-          <pre dir="ltr" className="max-h-48 overflow-auto rounded-lg border border-line bg-ink/60 p-3 font-mono text-[12px] text-fg/80">
+          <pre dir="ltr" className="max-h-48 overflow-auto rounded-md bg-well p-3 font-mono text-[12px] text-fg/80">
             {JSON.stringify(block.input, null, 2)}
           </pre>
         )}
@@ -232,23 +256,66 @@ function ToolCard({ block, result, pending, subs, results, groups }: CardProps) 
   const failed = result?.isError
   const expandable = (isEdit || isTask || !!result || block.name === 'Bash' || block.name === 'Write' || block.input !== undefined)
   return (
-    <div className={`rounded-lg border ${failed ? 'border-danger/40' : 'border-line'} bg-surface/40`}>
-      <button
-        onClick={() => expandable && setOpen((o) => !o)}
-        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left"
-      >
-        <span className={`w-4 shrink-0 text-center font-mono text-[12px] ${failed ? 'text-danger' : 'text-accent'}`}>{sum.glyph}</span>
-        <span className="shrink-0 text-[13px] font-medium text-fg/90">{sum.name || block.name}</span>
-        <span dir="auto" className="min-w-0 flex-1 truncate font-mono text-[12px] text-faint">
+    <div>
+      <button onClick={() => expandable && setOpen((o) => !o)} className={`${quietRow} ${failed ? '!text-danger' : ''}`}>
+        <span className="shrink-0">{sum.name || block.name}</span>
+        <span dir="auto" className="min-w-0 truncate font-mono text-[12px]">
           {sum.detail}
         </span>
-        {isTask && stepCount > 0 && <span className="shrink-0 text-[11px] text-faint">{stepCount} step{stepCount === 1 ? '' : 's'}</span>}
+        {isTask && stepCount > 0 && <span className="shrink-0 text-[12px]">{stepCount} step{stepCount === 1 ? '' : 's'}</span>}
         {sum.stat}
-        {pending && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-signal" />}
-        {failed && <span className="shrink-0 text-[11px] text-danger">failed</span>}
-        {expandable && <span className="shrink-0 text-[10px] text-faint">{open ? '▾' : '▸'}</span>}
+        {pending && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber" />}
+        {failed && <span className="shrink-0 text-[12px]">failed</span>}
+        {expandable && <Caret open={open} />}
       </button>
-      {open && <div className="border-t border-line-soft px-3 py-2.5">{body()}</div>}
+      {open && <div className={openBody}>{body()}</div>}
+    </div>
+  )
+}
+
+// ---- tool group ------------------------------------------------------------
+
+// What a group's summary counts: [kind, one, many].
+const KINDS: Record<string, [string, string, string]> = {
+  Bash: ['ran', 'command', 'commands'],
+  Read: ['read', 'file', 'files'],
+  Edit: ['edited', 'file', 'files'],
+  MultiEdit: ['edited', 'file', 'files'],
+  Write: ['edited', 'file', 'files'],
+  Grep: ['searched', 'time', 'times'],
+  Glob: ['searched', 'time', 'times']
+}
+const OTHER: [string, string, string] = ['used', 'tool', 'tools']
+
+/** "Ran 3 commands, read 2 files": calls counted by kind, in the order the kinds first appear. */
+function groupSummary(blocks: ToolBlock[]): string {
+  const counts = new Map<string, { kind: [string, string, string]; n: number }>()
+  for (const b of blocks) {
+    const kind = KINDS[b.name] ?? OTHER
+    const c = counts.get(kind[0])
+    if (c) c.n++
+    else counts.set(kind[0], { kind, n: 1 })
+  }
+  const text = [...counts.values()].map(({ kind, n }) => `${kind[0]} ${n} ${n === 1 ? kind[1] : kind[2]}`).join(', ')
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/** A run of finished tool calls as one collapsed row; it opens into the usual cards. */
+export function ToolGroup({ blocks, results, groups }: { blocks: ToolBlock[]; results: Record<string, ToolResult>; groups: Record<string, AssistantItem[]> }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button onClick={() => setOpen((o) => !o)} className={quietRow}>
+        <span className="min-w-0 truncate">{groupSummary(blocks)}</span>
+        <Caret open={open} />
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1.5">
+          {blocks.map((b) => (
+            <ToolCard key={b.id} block={b} result={results[b.id]} pending={false} subs={groups[b.id]} results={results} groups={groups} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -324,7 +391,7 @@ export const AssistantBlocks = memo(AssistantBlocksImpl, (a, b) => {
 export const UserMessage = memo(function UserMessage({ item }: { item: Pick<UserItem, 'text' | 'images'> }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl bg-elevated px-4 py-2.5 text-[15px] leading-relaxed text-fg">
+      <div className="max-w-[85%] rounded-xl bg-bubble px-3 py-2 text-[14px] leading-5 text-fg">
         {item.images?.map((im, k) => (
           <img key={k} src={`data:${im.mediaType};base64,${im.data}`} className="mb-2 max-h-56 rounded-lg" />
         ))}
@@ -339,11 +406,11 @@ export const UserMessage = memo(function UserMessage({ item }: { item: Pick<User
 export function QueuedMessage({ text }: { text: string }) {
   return (
     <div className="flex justify-end opacity-60">
-      <div className="max-w-[85%] rounded-2xl bg-elevated px-4 py-2.5 text-[15px] leading-relaxed text-fg">
+      <div className="max-w-[85%] rounded-xl bg-bubble px-3 py-2 text-[14px] leading-5 text-fg">
         <div dir="auto" className="whitespace-pre-wrap break-words">
           {text}
         </div>
-        <div className="mt-1 text-right text-[10px] text-faint">queued</div>
+        <div className="mt-1 text-right text-[11px] text-faint">queued</div>
       </div>
     </div>
   )
@@ -353,12 +420,11 @@ export function QueuedMessage({ text }: { text: string }) {
 export function OutputCard({ title, text, onDismiss }: { title: string; text: string; onDismiss?: () => void }) {
   const [open, setOpen] = useState(!!onDismiss)
   return (
-    <div className="rounded-lg border border-line bg-surface/40">
-      <div className="flex items-center gap-2.5 px-3 py-1.5">
-        <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
-          <span className="w-4 shrink-0 text-center font-mono text-[12px] text-accent">$</span>
-          <span className="truncate font-mono text-[12px] text-fg/90">{title}</span>
-          <span className="ml-auto shrink-0 text-[10px] text-faint">{open ? '▾' : '▸'}</span>
+    <div>
+      <div className="flex items-center gap-2">
+        <button onClick={() => setOpen((o) => !o)} className={`${quietRow} min-w-0`}>
+          <span className="truncate font-mono text-[12px]">{title}</span>
+          <Caret open={open} />
         </button>
         {onDismiss && (
           <button onClick={onDismiss} title="Dismiss" className="shrink-0 rounded-md px-1.5 text-base leading-none text-faint transition-colors hover:text-fg">
@@ -367,7 +433,7 @@ export function OutputCard({ title, text, onDismiss }: { title: string; text: st
         )}
       </div>
       {open && (
-        <pre dir="ltr" className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-line-soft px-3 py-2.5 font-mono text-[12px] leading-relaxed text-fg/85">
+        <pre dir="ltr" className={`${openBody} max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-fg/85`}>
           {text || '(no output)'}
         </pre>
       )}

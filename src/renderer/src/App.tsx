@@ -17,12 +17,14 @@ import type {
   SessionStatus,
   SplitDirection,
   TmuxIntent,
+  TmuxSession,
   Workspace
 } from '../../shared/types'
 import { DEFAULTS, type AppSettings, type SettingsPatch } from './lib/terminalSettings'
 import { MenuBar } from './components/MenuBar'
 import { WindowControls } from './components/WindowControls'
 import { SummaryView } from './components/SummaryView'
+import { Sidebar, type SidebarOpenRow } from './components/Sidebar'
 import { SettingsPage } from './components/SettingsPage'
 import { CommandPalette } from './components/CommandPalette'
 import { ConnectionDialog } from './components/ConnectionDialog'
@@ -45,7 +47,7 @@ import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
-import { COMPOSE_ACCEL, type ComposerHandle } from './lib/xtermAttach'
+import type { ComposerHandle } from './lib/xtermAttach'
 import { TERMINAL_BG } from './lib/xtermSetup'
 import { useAgentSessions } from './hooks/useAgentSessions'
 import { isMac } from './lib/platform'
@@ -180,7 +182,7 @@ export type Tab =
   | ChatTab
 
 /**
- * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
+ * A sidebar "Open" entry. A view with one pane is an ordinary tab; a view with 2–3
  * panes is a split that is *itself* a tab — the joined leaves are no longer
  * shown as separate tabs. `panes` holds the leaf id per pane (null = an empty
  * pane awaiting a tab); `focused` is the pane that takes keyboard input. Each
@@ -342,14 +344,10 @@ export default function App() {
   const restoredRef = useRef(false)
   const lastSavedRef = useRef('')
 
-  // Tab drag-to-reorder state (operates on views).
-  const dragViewId = useRef<string | null>(null)
-  const [dragOverId, setDragOverId] = useState<string | null>(null)
-
   // The split container, so dividers can translate pointer travel into fractions.
   const contentRef = useRef<HTMLDivElement>(null)
 
-  // One composer handle per session/tmux tab, so the header's toggle button can
+  // One composer handle per session/tmux tab, so the sidebar's toggle button can
   // reach whichever pane is focused without owning any drafting state itself.
   const composerRefs = useRef(new Map<string, ComposerHandle>())
   // Mirrors each handle's `isOpen` into render-visible state — the map above is
@@ -789,8 +787,8 @@ export default function App() {
     }
   }, [])
 
-  // Native macOS fullscreen removes the traffic lights entirely, so the header
-  // row's reserved left padding for them would otherwise show as a dead gutter.
+  // Native macOS fullscreen removes the traffic lights entirely, so the sidebar's top
+  // reserved for them would otherwise show as dead space.
   useEffect(() => {
     if (!isMac) return
     void window.api.winIsFullScreen().then(setFullScreen)
@@ -824,7 +822,7 @@ export default function App() {
 
   // The badge counts sessions, not signals — five questions from one agent is
   // still one session waiting on you. Only in `notify` mode: dot-only means the
-  // tab strip is the whole surface, dock included.
+  // sidebar is the whole surface, dock included.
   useEffect(() => {
     window.api.agentBadge(appSettings.terminal.agentAlerts === 'notify' ? waiting.size : 0)
   }, [waiting, appSettings.terminal.agentAlerts])
@@ -1456,6 +1454,13 @@ export default function App() {
     await openNewChat(conn, pw ?? undefined)
   }
 
+  // A group's + in the sidebar: a new chat in that folder.
+  const newChatIn = async (conn: Connection, dir: string): Promise<void> => {
+    const pw = await resolvePassword(conn)
+    if (pw === null) return // user cancelled the prompt
+    setNewChat({ conn, password: pw ?? undefined, dir })
+  }
+
   // The connection the palette's chat entries act on: whatever is on screen.
   const paletteConn = connections.find((c) => c.id === (selectedConnId ?? activeConnectionId)) ?? null
 
@@ -1477,6 +1482,33 @@ export default function App() {
       if (!password) return []
     }
     return sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+  }
+
+  // The sidebar's two reads, for the active connection. Quiet like the palette's:
+  // a host that asks for a password is only read with a saved secret or one an
+  // open tab already holds, and otherwise yields nothing rather than a prompt.
+  const quietPassword = async (conn: Connection): Promise<{ ok: boolean; password?: string }> => {
+    if (conn.authMethod !== 'password' || (await window.api.hasSecret(conn.id))) return { ok: true }
+    const password = tabs
+      .map((t) => ('password' in t && t.connectionId === conn.id ? t.password : undefined))
+      .find(Boolean)
+    return password ? { ok: true, password } : { ok: false }
+  }
+
+  const fetchChatsSidebar = async (): Promise<ChatSession[]> => {
+    const conn = activeConnection
+    if (!conn) return []
+    const { ok, password } = await quietPassword(conn)
+    if (!ok) return []
+    return sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+  }
+
+  const fetchTmuxSidebar = async (): Promise<TmuxSession[]> => {
+    const conn = activeConnection
+    if (!conn) return []
+    const { ok, password } = await quietPassword(conn)
+    if (!ok) return []
+    return window.api.tmuxList({ connectionId: conn.id, password })
   }
 
   const fetchTmuxFor = (conn: Connection) => async () => {
@@ -1758,167 +1790,118 @@ export default function App() {
   }, [activeTabId])
   const activeComposerOpen = !!(activeTabId && composerOpen[activeTabId])
 
+  // A single chat tab on screen: ChatView's own header is the title bar, so the
+  // app bar steps aside (on other platforms it shrinks to a strip that keeps the
+  // menus and window controls reachable).
+  const chatOnly = !isSplit && activeTab?.kind === 'chat'
+
+  const activeLeaves = activeView?.panes.map((p) => (p ? (tabs.find((t) => t.id === p) ?? null) : null)) ?? []
+  const activeLabel =
+    activeLeaves.length > 1
+      ? activeLeaves
+          .map((l) => (l ? leafLabel(l) : '+'))
+          .join(activeView?.direction === 'columns' ? ' │ ' : ' ─ ')
+      : activeLeaves[0]
+        ? leafLabel(activeLeaves[0])
+        : ''
+
+  // What the sidebar's "Open" list shows: the old tab pills, one row per view.
+  const openRows: SidebarOpenRow[] = views.map((view) => {
+    const active = view.id === activeViewId
+    const split = view.panes.length > 1
+    const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
+    return {
+      id: view.id,
+      active,
+      split,
+      direction: view.direction,
+      label: split
+        ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
+        : leaves[0]
+          ? leafLabel(leaves[0])
+          : 'Tab',
+      icon: leaves[0] ? leafIcon(leaves[0], active) : null,
+      waiting: leaves
+        .filter((l): l is Tab => !!l && waiting.has(l.id))
+        .map((l) => ({ id: l.id, label: leafLabel(l) })),
+      closable: !(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID)
+    }
+  })
+
   return (
-    <div className="flex h-full w-full flex-col">
+    <div className="flex h-full w-full flex-row">
+      <Sidebar
+        connections={connections}
+        activeConnection={activeConnection}
+        onSelectConnection={selectConnection}
+        onNewChat={() => activeConnection && void newChatFor(activeConnection)}
+        onNewChatIn={(cwd) => activeConnection && void newChatIn(activeConnection, cwd)}
+        onOpenSummary={openSummary}
+        openRows={openRows}
+        onSelectView={setActiveViewId}
+        onCloseView={closeView}
+        onMoveView={moveView}
+        fetchChats={fetchChatsSidebar}
+        fetchTmux={fetchTmuxSidebar}
+        activeChatSessionId={activeTab?.kind === 'chat' ? activeTab.sessionId : null}
+        activeTmuxName={
+          (activeTab?.kind === 'session' || activeTab?.kind === 'tmux') &&
+          activeTab.connectionId === activeConnectionId
+            ? (activeTab.tmux?.session ?? null)
+            : null
+        }
+        onOpenChat={(chat) => activeConnection && void openChatFor(activeConnection, chat)}
+        onOpenTmux={(name) => activeConnection && showTmuxSession(activeConnection.id, name)}
+        agentHosts={agentHosts}
+        onOpenSettings={openSettings}
+        onToggleComposer={toggleActiveComposer}
+        composerEnabled={activeIsPane}
+        composerOpen={activeComposerOpen}
+        fullScreen={fullScreen}
+      />
+
       <div className="app-canvas flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Merged title/tab-bar row. `drag` on the root plus `no-drag` on every
-            interactive cluster mirrors how Chrome's own tab strip stays
-            draggable everywhere except its buttons and pills. */}
-        <div
-          className={`drag relative z-30 flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 ${
-            // leave room for the native traffic lights on macOS — they vanish
-            // in true fullscreen, so the reserved gutter would go dead too
-            isMac && !fullScreen ? 'pl-[78px]' : 'pl-2.5'
-          }`}
-        >
-          {/* brand mark + menus — macOS gets a real menu bar (menu.ts) and native
-              traffic lights instead; rendering both would give every command two
-              homes and no reason to prefer either */}
-          {!isMac && (
-            <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
-              <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
-              <MenuBar onNewConnection={() => setDialogConn(null)} />
-            </div>
-          )}
+        {/* Title bar: the active view's name and the split controls. `drag` on the
+            root plus `no-drag` on every interactive cluster keeps the bar draggable
+            everywhere except its buttons. Hidden on macOS while a single chat is
+            on screen, since ChatView's header is the title bar there. */}
+        {(!chatOnly || !isMac) && (
+          <div
+            className={`drag relative z-30 flex shrink-0 items-stretch gap-2 bg-ink pr-2 pl-3 ${
+              chatOnly ? 'h-8' : 'h-11'
+            }`}
+          >
+            {/* brand mark + menus — macOS gets a real menu bar (menu.ts) and native
+                traffic lights instead; rendering both would give every command two
+                homes and no reason to prefer either */}
+            {!isMac && (
+              <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
+                <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
+                <MenuBar onNewConnection={() => setDialogConn(null)} />
+              </div>
+            )}
 
-          {/* tab pills — pt-1.5 here (not the row root) so they read as "poking
-              up" from the row's bottom border without pushing every other
-              cluster down */}
-          <div className="no-drag flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto pt-1.5">
-            {views.map((view) => {
-                const active = view.id === activeViewId
-                const split = view.panes.length > 1
-                const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
-                const waitingLeaves = leaves.filter((l): l is Tab => !!l && waiting.has(l.id))
-                const label = split
-                  ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
-                  : leaves[0]
-                    ? leafLabel(leaves[0])
-                    : 'Tab'
-                return (
-                  <div
-                    key={view.id}
-                    draggable
-                    onClick={() => setActiveViewId(view.id)}
-                    onDragStart={(e) => {
-                      dragViewId.current = view.id
-                      e.dataTransfer.effectAllowed = 'move'
-                      e.dataTransfer.setData('text/plain', view.id)
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault()
-                      e.dataTransfer.dropEffect = 'move'
-                      if (dragViewId.current && dragViewId.current !== view.id) setDragOverId(view.id)
-                    }}
-                    onDragLeave={() => setDragOverId((id) => (id === view.id ? null : id))}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      const from = dragViewId.current
-                      if (from) moveView(from, view.id)
-                      dragViewId.current = null
-                      setDragOverId(null)
-                    }}
-                    onDragEnd={() => {
-                      dragViewId.current = null
-                      setDragOverId(null)
-                    }}
-                    className={`group flex shrink-0 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
-                      dragOverId === view.id ? 'ring-2 ring-inset ring-accent/70' : ''
-                    } ${
-                      active
-                        ? 'border-line bg-ink text-fg'
-                        : 'border-transparent text-muted hover:bg-elevated/40 hover:text-fg/90'
-                    }`}
-                  >
-                    {split ? (
-                      <span className={active ? 'text-accent' : 'text-faint'} title="split tab">
-                        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-                          <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
-                          {view.direction === 'columns' ? (
-                            <line x1="7" y1="2.5" x2="7" y2="11.5" />
-                          ) : (
-                            <line x1="1.5" y1="7" x2="12.5" y2="7" />
-                          )}
-                        </svg>
-                      </span>
-                    ) : leaves[0] ? (
-                      leafIcon(leaves[0], active)
-                    ) : null}
-                    {/* One dot per leaf of this tab that's waiting on you. In a
-                        split they read left to right in the same order as the
-                        joined label, so the dot and the name line up. */}
-                    {waitingLeaves.length > 0 && (
-                      <span
-                        className="flex items-center gap-1"
-                        title={`Waiting: ${waitingLeaves.map(leafLabel).join(', ')}`}
-                      >
-                        {waitingLeaves.map((l) => (
-                          <span
-                            key={l.id}
-                            className="dot-glow h-1.5 w-1.5 shrink-0 rounded-full bg-amber text-amber"
-                          />
-                        ))}
-                      </span>
-                    )}
-                    <span className="max-w-[260px] truncate font-mono text-[12px]">{label}</span>
-                    {!(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID) && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          closeView(view.id)
-                        }}
-                        className="text-faint opacity-60 transition-opacity hover:text-fg group-hover:opacity-100"
-                        title={split ? 'Close split (all its panes)' : 'Close tab'}
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-          </div>
-          {/* split-screen controls, composer toggle, and settings — one
-              cluster of fixed-height header actions */}
-          <div className="no-drag flex shrink-0 items-center gap-1 self-center border-l border-line pl-2">
-            <SplitControls
-              count={activeView?.panes.length ?? 1}
-              direction={activeView?.direction ?? 'columns'}
-              onSingle={ungroup}
-              onSplit={applySplit}
-            />
-            <button
-              onClick={toggleActiveComposer}
-              disabled={!activeIsPane}
-              title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
-              className={`grid h-7 w-7 place-items-center rounded-md border transition-colors disabled:pointer-events-none disabled:opacity-30 ${
-                activeComposerOpen
-                  ? 'border-accent/50 bg-accent/15 text-accent'
-                  : 'border-transparent text-muted hover:bg-elevated hover:text-fg'
-              }`}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-              </svg>
-            </button>
-            <button
-              onClick={openSettings}
-              title="Settings (Ctrl+,)"
-              className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-fg"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
-          </div>
+            <span className="min-w-0 flex-1 self-center truncate text-[14px] font-medium text-title">
+              {chatOnly ? '' : activeLabel}
+            </span>
 
-          {/* window controls — macOS supplies native traffic lights instead */}
-          {!isMac && (
-            <div className="no-drag flex h-full items-stretch">
-              <WindowControls />
+            <div className="no-drag flex shrink-0 items-center self-center">
+              <SplitControls
+                count={activeView?.panes.length ?? 1}
+                direction={activeView?.direction ?? 'columns'}
+                onSingle={ungroup}
+                onSplit={applySplit}
+              />
             </div>
-          )}
-        </div>
+
+            {/* window controls — macOS supplies native traffic lights instead */}
+            {!isMac && (
+              <div className="no-drag flex h-full items-stretch">
+                <WindowControls />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* main content */}
         <div ref={contentRef} className="relative min-h-0 flex-1">
@@ -2226,7 +2209,7 @@ export default function App() {
             .map((tab) => (
               <div
                 key={tab.id}
-                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                className={`overflow-hidden ${chatOnly ? '' : 'border-t border-line'} ${paneRing(tab.id)}`}
                 {...paneProps(tab.id)}
               >
                 <ChatView
@@ -2240,6 +2223,17 @@ export default function App() {
                   onOpenTerminal={(name) => showTmuxSession(tab.connectionId, name)}
                   onResumed={(sid) => moveChat(tab.id, sid)}
                   onStarted={() => chatStarted(tab.id)}
+                  titleBar={chatOnly && tab.id === activeTabId}
+                  headerExtra={
+                    chatOnly && isMac && tab.id === activeTabId ? (
+                      <SplitControls
+                        count={activeView?.panes.length ?? 1}
+                        direction={activeView?.direction ?? 'columns'}
+                        onSingle={ungroup}
+                        onSplit={applySplit}
+                      />
+                    ) : undefined
+                  }
                 />
                 {paneTools(tab.id)}
               </div>

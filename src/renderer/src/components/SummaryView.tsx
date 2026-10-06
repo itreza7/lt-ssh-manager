@@ -272,14 +272,14 @@ function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => 
   )
 }
 
-const STATUS_LABEL: Record<AgentStatus, string> = {
+export const STATUS_LABEL: Record<AgentStatus, string> = {
   waiting: 'Waiting for you',
   working: 'Working',
   idle: 'Idle',
   unknown: 'Unknown'
 }
 
-const STATUS_DOT: Record<AgentStatus, string> = {
+export const STATUS_DOT: Record<AgentStatus, string> = {
   waiting: 'bg-amber dot-glow',
   working: 'bg-signal dot-glow animate-pulse',
   idle: 'bg-faint',
