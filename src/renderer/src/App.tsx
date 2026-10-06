@@ -1806,25 +1806,37 @@ export default function App() {
         : ''
 
   // What the sidebar's "Open" list shows: the old tab pills, one row per view.
+  // A row's name in the sidebar: the tmux session for a terminal on one, else the tab's
+  // title without the server's name, which the sidebar already shows once at the bottom.
+  const sideLabel = (t: Tab): string => {
+    if ((t.kind === 'session' || t.kind === 'tmux') && t.tmux) return t.tmux.session
+    const label = leafLabel(t)
+    const conn = 'connectionId' in t ? connections.find((c) => c.id === t.connectionId) : undefined
+    return conn && label.startsWith(`${conn.name} · `) ? label.slice(conn.name.length + 3) : label
+  }
   const openRows: SidebarOpenRow[] = views.map((view) => {
     const active = view.id === activeViewId
     const split = view.panes.length > 1
     const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
+    const only = split ? null : leaves[0]
     return {
       id: view.id,
       active,
       split,
       direction: view.direction,
       label: split
-        ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
+        ? leaves.map((l) => (l ? sideLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
         : leaves[0]
-          ? leafLabel(leaves[0])
+          ? sideLabel(leaves[0])
           : 'Tab',
       icon: leaves[0] ? leafIcon(leaves[0], active) : null,
       waiting: leaves
         .filter((l): l is Tab => !!l && waiting.has(l.id))
         .map((l) => ({ id: l.id, label: leafLabel(l) })),
-      closable: !(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID)
+      closable: !(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID),
+      chatSessionId: only?.kind === 'chat' ? only.sessionId : undefined,
+      tmuxSession: only && (only.kind === 'session' || only.kind === 'tmux') ? only.tmux?.session : undefined,
+      special: only?.kind === 'summary' || only?.kind === 'settings' ? only.kind : undefined
     }
   })
 

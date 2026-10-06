@@ -90,7 +90,7 @@ export function ModeMenu({ mode, disabled, onPick, up }: { mode: ChatMode | null
         disabled={disabled}
         onClick={() => setOpen(!open)}
         title="Permission mode (Shift+Tab in the terminal)"
-        className={`flex h-7 items-center gap-0.5 rounded-md px-1.5 text-[13px] text-muted transition-colors disabled:opacity-100 ${disabled ? '' : 'hover:bg-white/[0.06]'}`}
+        className={`flex h-7 items-center gap-0.5 rounded-md px-1.5 text-[12.5px] text-muted transition-colors disabled:opacity-100 ${disabled ? '' : 'hover:bg-white/[0.06]'}`}
       >
         {mode ? modeLabel(mode) : 'Mode'}
         {!disabled && <Chevron />}
@@ -141,7 +141,7 @@ export function PickMenu({
         disabled={disabled}
         onClick={() => setOpen(!open)}
         title={title}
-        className={`flex h-7 items-center gap-0.5 rounded-md px-1.5 text-[13px] text-fg transition-colors disabled:opacity-100 ${disabled ? '' : 'hover:bg-white/[0.06]'}`}
+        className={`flex h-7 items-center gap-0.5 rounded-md px-1.5 text-[12.5px] text-fg transition-colors disabled:opacity-100 ${disabled ? '' : 'hover:bg-white/[0.06]'}`}
       >
         {current?.label ?? placeholder ?? value}
         {!disabled && <Chevron />}

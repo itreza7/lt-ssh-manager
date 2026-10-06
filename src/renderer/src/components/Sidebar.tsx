@@ -20,6 +20,12 @@ export interface SidebarOpenRow {
   /** One entry per leaf of this view that is waiting on you. */
   waiting: { id: string; label: string }[]
   closable: boolean
+  /** Set when the view is one chat tab: its row is the chat's own, under its folder. */
+  chatSessionId?: string
+  /** Set when the view is one terminal on a tmux session: its row is the session's own. */
+  tmuxSession?: string
+  /** Summary and Settings: not listed, their icons at the bottom light up instead. */
+  special?: 'summary' | 'settings'
 }
 
 interface Props {
@@ -178,7 +184,7 @@ function initials(name: string | undefined): string {
 
 // A row is a 16px leading slot (icon or dot) then text, on a 28px line, like Claude's.
 const rowCls = (active: boolean): string =>
-  `group flex h-7 w-full min-w-0 items-center gap-2 rounded-lg pl-2.5 pr-2 text-left text-[14px] leading-5 transition-colors ${
+  `group flex h-7 w-full min-w-0 items-center gap-2 rounded-lg pl-2.5 pr-2 text-left text-[13px] leading-5 transition-colors ${
     active ? 'bg-sel text-fg' : 'text-muted hover:bg-elevated'
   }`
 
@@ -423,7 +429,20 @@ export function Sidebar({
       }))
       .filter((g) => g.rows.length > 0)
   }, [chats, needle])
-  const shownOpenRows = openRows.filter((r) => hit(r.label))
+  // Summary and Settings are icons at the bottom, which light up instead of a row.
+  const summaryActive = openRows.some((r) => r.special === 'summary' && r.active)
+  const settingsActive = openRows.some((r) => r.special === 'settings' && r.active)
+  // A live chat's tab is already its row under the folder, and a tmux terminal its row
+  // under tmux, so only the rest are listed.
+  const live = new Set(chats.map((c) => c.sessionId))
+  const liveTmux = new Set(tmux.map((s) => s.name))
+  const shownOpenRows = openRows.filter(
+    (r) =>
+      !r.special &&
+      !(r.chatSessionId && live.has(r.chatSessionId)) &&
+      !(r.tmuxSession && liveTmux.has(r.tmuxSession)) &&
+      hit(r.label)
+  )
   const shownTmux = tmux.filter((s) => hit(s.name))
   const nothingFound = searching && groups.length === 0 && shownOpenRows.length === 0 && shownTmux.length === 0
 
@@ -509,7 +528,7 @@ export function Sidebar({
             }}
             placeholder="Search"
             spellCheck={false}
-            className="min-w-0 flex-1 bg-transparent text-[14px] leading-5 text-fg outline-none placeholder:text-faint"
+            className="min-w-0 flex-1 bg-transparent text-[13px] leading-5 text-fg outline-none placeholder:text-faint"
           />
           {query && (
             <button
@@ -524,22 +543,6 @@ export function Sidebar({
         </label>
       </div>
 
-      <div className="shrink-0 px-1.5 pt-[7px]">
-        <button onClick={onNewChat} disabled={!activeConnection} className={`${rowCls(false)} disabled:opacity-40`}>
-          <Slot>
-            <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-sel text-fg">
-              <PlusIcon />
-            </span>
-          </Slot>
-          New chat
-        </button>
-        <button onClick={onOpenSummary} className={rowCls(false)}>
-          <Slot>
-            <SummaryIcon />
-          </Slot>
-          Summary
-        </button>
-      </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2 pt-4 [scrollbar-width:none]">
         {/* Open — the views, exactly as the old tab strip had them, as rows */}
@@ -716,12 +719,18 @@ export function Sidebar({
           <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-elevated text-[10px] font-medium leading-none text-title">
             {initials(activeConnection?.name)}
           </span>
-          <span className="min-w-0 truncate text-[14px] text-muted">{activeConnection?.name ?? 'No server'}</span>
+          <span className="min-w-0 truncate text-[13px] text-muted">{activeConnection?.name ?? 'No server'}</span>
           <span className={`shrink-0 text-faint transition-transform ${serverOpen ? 'rotate-180' : ''}`}>
             <ChevronDown />
           </span>
         </button>
         <span className="flex-1" />
+        <button onClick={onNewChat} disabled={!activeConnection} title="New chat" aria-label="New chat" className={`${iconBtn()} disabled:opacity-40`}>
+          <PlusIcon />
+        </button>
+        <button onClick={onOpenSummary} title="Summary" aria-label="Summary" className={iconBtn(summaryActive)}>
+          <SummaryIcon />
+        </button>
         <button
           onClick={onToggleComposer}
           disabled={!composerEnabled}
@@ -731,7 +740,7 @@ export function Sidebar({
         >
           <ComposerIcon />
         </button>
-        <button onClick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings" className={iconBtn()}>
+        <button onClick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings" className={iconBtn(settingsActive)}>
           <SettingsIcon />
         </button>
         {serverOpen && (
@@ -744,7 +753,7 @@ export function Sidebar({
                   setServerOpen(false)
                   if (c.id !== activeConnection?.id) onSelectConnection(c.id)
                 }}
-                className={`flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[14px] transition-colors ${
+                className={`flex h-7 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] transition-colors ${
                   c.id === activeConnection?.id ? 'bg-sel text-fg' : 'text-muted hover:bg-elevated'
                 }`}
               >
