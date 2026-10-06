@@ -231,10 +231,61 @@ function apply(s: ChatUiState, e: ChatEvent, copied: Set<string>): void {
     case 'compact':
       s.items.push({
         kind: 'note',
-        id: `compact-${s.items.length}`,
+        id: `compact-${e.id}`,
         tone: 'info',
         text: e.preTokens ? `Context compacted (was ${Math.round(e.preTokens / 1000)}k tokens)` : 'Context compacted'
       })
       return
+  }
+}
+
+/**
+ * Put `older` — the state of an earlier part of the transcript, read by its own
+ * mapper — in front of `cur`. Anything live (status, requests, mode…) is cur's.
+ * An assistant message cut by the boundary is in both: its blocks join in the
+ * older slot.
+ */
+export function prependState(older: ChatUiState, cur: ChatUiState): ChatUiState {
+  const join = (a: AssistantItem, b: AssistantItem): AssistantItem => {
+    const blocks = a.blocks.slice()
+    for (const x of b.blocks) {
+      if (!blocks.some((y) => (x.type === 'tool_use' ? y.type === 'tool_use' && y.id === x.id : y.type === x.type && 'text' in y && y.text === x.text))) blocks.push(x)
+    }
+    return { ...a, blocks }
+  }
+  const merge = <T extends ChatItem>(a: T[], b: T[]): T[] => {
+    const out = a.slice()
+    const at = new Map<string, number>()
+    out.forEach((it, i) => it.kind === 'assistant' && at.set(it.msgId, i))
+    for (const it of b) {
+      const i = it.kind === 'assistant' ? at.get(it.msgId) : undefined
+      if (i === undefined) out.push(it)
+      else out[i] = join(out[i] as AssistantItem, it as AssistantItem) as T
+    }
+    return out
+  }
+  const items = merge(older.items, cur.items)
+  const children: Record<string, AssistantItem[]> = { ...older.children }
+  for (const k in cur.children) children[k] = children[k] ? merge(children[k], cur.children[k]) : cur.children[k]
+  const where: ChatUiState['where'] = {}
+  items.forEach((it, i) => {
+    if (it.kind === 'assistant') where[it.msgId] = { parent: null, i }
+  })
+  for (const k in children) children[k].forEach((it, i) => (where[it.msgId] = { parent: k, i }))
+  const tasks: Record<string, TaskState> = {}
+  // Older tasks are history: their task-notification may be in cur, where it found no task to finish.
+  for (const k in older.tasks) if (!cur.tasks[k]) tasks[k] = { ...older.tasks[k], hidden: true }
+  Object.assign(tasks, cur.tasks)
+  return {
+    ...cur,
+    items,
+    children,
+    results: { ...older.results, ...cur.results },
+    tasks,
+    mode: cur.mode ?? older.mode,
+    model: cur.model ?? older.model,
+    branch: cur.branch ?? older.branch,
+    context: cur.context ?? older.context,
+    where
   }
 }

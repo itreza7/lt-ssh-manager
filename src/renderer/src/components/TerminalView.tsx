@@ -137,6 +137,11 @@ export function TerminalView({
   const stuckRef = useRef(true)
   const programmaticScrollRef = useRef(false)
   const roRafRef = useRef(0)
+  // Last size sent to the PTY, and the timer that debounces the next one. Ink
+  // TUIs (Claude Code) miscount their erase-and-redraw across width changes, so
+  // the PTY must see one settled size, not every intermediate layout.
+  const lastSentRef = useRef({ cols: 0, rows: 0 })
+  const resizeTimerRef = useRef(0)
   // xterm's grid element, cached after open() to measure the true row height.
   const screenElRef = useRef<HTMLElement | null>(null)
 
@@ -247,10 +252,22 @@ export function TerminalView({
     fitToHeight()
     const term = termRef.current
     if (term) {
-      try {
-        window.api.resize(sessionId, term.cols, term.rows)
-      } catch {
-        /* ignore mid-teardown resize */
+      const { cols, rows } = term
+      const last = lastSentRef.current
+      if (cols !== last.cols || rows !== last.rows) {
+        window.clearTimeout(resizeTimerRef.current)
+        resizeTimerRef.current = window.setTimeout(() => {
+          const t = termRef.current
+          if (!t) return
+          const cur = lastSentRef.current
+          if (t.cols === cur.cols && t.rows === cur.rows) return
+          lastSentRef.current = { cols: t.cols, rows: t.rows }
+          try {
+            window.api.resize(sessionId, t.cols, t.rows)
+          } catch {
+            /* ignore mid-teardown resize */
+          }
+        }, 120)
       }
     }
     stickToBottom()
@@ -275,6 +292,9 @@ export function TerminalView({
       // looks like recovery while silently discarding what was there.
       const command =
         mode === 'attach' && a.tmux ? (tmuxReattachCommand(a.tmux) ?? a.command) : a.command
+      // A new pty starts at the size passed here; forget what the old one had.
+      window.clearTimeout(resizeTimerRef.current)
+      lastSentRef.current = { cols: term.cols, rows: term.rows }
       void window.api.connect({
         sessionId,
         connectionId: a.connectionId,
@@ -461,17 +481,29 @@ export function TerminalView({
     // user may be watching in another tab. Derive a size from the window instead,
     // which is at worst close; the ResizeObserver corrects it the moment the pane
     // is laid out. See wrapperStyle() in App.tsx for the parking rule.
-    const measured = scroll.clientWidth > 0 && scroll.clientHeight > 0
-    const { cw, ch } = measureCell(settingsRef.current)
-    void window.api.connect({
-      sessionId,
-      connectionId,
-      cols: measured ? term.cols : Math.max(20, Math.floor(window.innerWidth / cw)),
-      rows: measured ? term.rows : Math.max(5, Math.floor(window.innerHeight / ch)),
-      retries,
-      password,
-      command,
-      tmux
+    //
+    // Wait for the web font first: before it loads, cell sizes are the fallback
+    // font's, so the connect size would be wrong and a corrected resize would
+    // follow straight away — the double size an Ink TUI redraws badly across.
+    let live = true
+    void document.fonts.ready.then(() => {
+      if (!live) return
+      const measured = scroll.clientWidth > 0 && scroll.clientHeight > 0
+      if (measured) fitToHeight()
+      const { cw, ch } = measureCell(settingsRef.current)
+      const cols = measured ? term.cols : Math.max(20, Math.floor(window.innerWidth / cw))
+      const rows = measured ? term.rows : Math.max(5, Math.floor(window.innerHeight / ch))
+      lastSentRef.current = { cols, rows }
+      void window.api.connect({
+        sessionId,
+        connectionId,
+        cols,
+        rows,
+        retries,
+        password,
+        command,
+        tmux
+      })
     })
 
     // Watch the visible host (not the tall inner one) so a window/pane resize
@@ -483,6 +515,8 @@ export function TerminalView({
     ro.observe(scroll)
 
     return () => {
+      live = false
+      window.clearTimeout(resizeTimerRef.current)
       offData()
       offStatus()
       offRender.dispose()

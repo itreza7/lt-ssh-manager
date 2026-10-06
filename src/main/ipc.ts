@@ -84,6 +84,7 @@ import type {
   ChatMode,
   ChatScreenInfo,
   ChatSession,
+  ChatOlder,
   ChatStreamData,
   ChatStreamEnd,
   ChatTarget,
@@ -1876,8 +1877,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   const chatWait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-  /** Longest first load of a transcript — the same 4 MiB the Reader looks back. */
-  const CHAT_TAIL_MAX = 4 * 1024 * 1024
+  /** How far back a first open of a transcript looks: small, so the chat paints fast. */
+  const CHAT_TAIL_MAX = 512 * 1024
+  /** Most one chat:older read pulls, as the user scrolls up into earlier history. */
+  const CHAT_OLDER_MAX = 1024 * 1024
 
   const chatSessionsOf = async (t: ChatTarget): Promise<ChatSession[]> => {
     const res = await chatExec(t, CHAT_LIST_SCRIPT, { maxBytes: 8 * 1024 * 1024 })
@@ -1907,7 +1910,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     async (
       e,
       args: ChatTarget & { sessionId: string; offset: number }
-    ): Promise<{ streamId: string; start: number }> => {
+    ): Promise<{ streamId: string; start: number; size: number }> => {
       if (!isUuid(args.sessionId)) throw new Error('Invalid session id')
       const connection = connectionStore.get(args.connectionId)
       if (!connection) throw new Error('Connection not found')
@@ -1915,17 +1918,19 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
       // Find the file, and where to start in it: the offset asked for, or — on a
       // first open (negative), or one past the end of a file that shrank — the
-      // last 4 MiB from the next whole line, like reader:read.
+      // last CHAT_TAIL_MAX from the next whole line. Older parts come from chat:older.
       const locate =
         `f=$(ls -t "$HOME"/.claude/projects/*/${args.sessionId}.jsonl 2>/dev/null | head -n 1)${SEP}` +
         `[ -n "$f" ] || exit 3${SEP}sz=$(wc -c < "$f" | tr -d ' ')${SEP}o=${offset}${SEP}` +
         `if [ "$o" -lt 0 ] || [ "$o" -gt "$sz" ]; then o=$(( sz - ${CHAT_TAIL_MAX} )); [ "$o" -lt 0 ] && o=0; ` +
         `if [ "$o" -gt 0 ]; then l=$(tail -c +"$o" "$f" | head -n 1 | wc -c | tr -d ' '); o=$(( o - 1 + l )); fi; fi${SEP}` +
-        `echo "$o"${SEP}echo "$f"`
+        `echo "$o $sz"${SEP}echo "$f"`
       const found = await chatExec(args, locate)
       if (found.code === 3) throw new Error('Transcript not found')
       const [startLine, path] = found.stdout.toString('utf-8').split('\n')
-      const start = /^\d+$/.test(startLine ?? '') ? Number(startLine) : NaN
+      const nums = /^(\d+) (\d+)$/.exec(startLine ?? '')
+      const start = nums ? Number(nums[1]) : NaN
+      const size = nums ? Number(nums[2]) : 0
       if (!Number.isFinite(start) || !path?.startsWith('/') || !path.endsWith(`/${args.sessionId}.jsonl`)) {
         throw new Error(found.stderr.trim() || 'Transcript not found')
       }
@@ -2026,7 +2031,48 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
           if (d.isMainFrame && !d.isSameDocument) closeAll()
         })
       }
-      return { streamId, start }
+      return { streamId, start, size }
+    }
+  )
+
+  /**
+   * Whole records from before byte `before`: up to CHAT_OLDER_MAX of them, read
+   * when the user scrolls up past what the stream began with. `start` is where
+   * they begin; 0 means the top of the file was reached.
+   */
+  ipcMain.handle(
+    'chat:older',
+    async (_e, args: ChatTarget & { sessionId: string; before: number }): Promise<ChatOlder> => {
+      if (!isUuid(args.sessionId)) throw new Error('Invalid session id')
+      const before = Number.isFinite(args.before) ? Math.max(0, Math.floor(args.before)) : 0
+      if (before === 0) return { records: [], start: 0 }
+      const from = Math.max(0, before - CHAT_OLDER_MAX)
+      const script =
+        `f=$(ls -t "$HOME"/.claude/projects/*/${args.sessionId}.jsonl 2>/dev/null | head -n 1)${SEP}` +
+        `[ -n "$f" ] || exit 3${SEP}tail -c +${from + 1} "$f" | head -c ${before - from}`
+      const res = await chatExec(args, script, { maxBytes: CHAT_OLDER_MAX + 1024, deadlineMs: 90000 })
+      if (res.code === 3) throw new Error('Transcript not found')
+      let body = res.stdout
+      let start = from
+      if (from > 0) {
+        // Started mid-file, so the first line is most likely a fragment; the
+        // next read ends where this one's whole lines begin.
+        const cut = body.indexOf(0x0a)
+        const drop = cut < 0 ? body.length : cut + 1
+        start += drop
+        body = body.subarray(drop)
+      }
+      const records: unknown[] = []
+      for (const line of body.toString('utf-8').split('\n')) {
+        if (!line) continue
+        try {
+          const rec: unknown = JSON.parse(line)
+          if (rec && typeof rec === 'object') records.push(rec)
+        } catch {
+          /* a torn or foreign line */
+        }
+      }
+      return { records, start }
     }
   )
 

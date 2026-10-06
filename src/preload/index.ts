@@ -38,6 +38,7 @@ import type {
   ChatMode,
   ChatScreenInfo,
   ChatSession,
+  ChatOlder,
   ChatStreamData,
   ChatStreamEnd,
   ChatTarget,
@@ -434,12 +435,18 @@ const api = {
 
   /**
    * Follow a session's transcript from byte `offset`; a negative offset starts at
-   * the last 4 MiB, from a whole line. `start` is the offset actually used. Results
-   * come through onChatData / onChatEnd tagged with the returned streamId. After an
-   * end with an error, open a new stream at the last `next` seen.
+   * the last 512 KiB, from a whole line. `start` is the offset actually used and
+   * `size` the file's size when it opened. Results come through onChatData /
+   * onChatEnd tagged with the returned streamId. After an end with an error, open
+   * a new stream at the last `next` seen.
    */
-  chatStream: (t: ChatTarget & { sessionId: string; offset: number }): Promise<{ streamId: string; start: number }> =>
-    ipcRenderer.invoke('chat:stream', t),
+  chatStream: (
+    t: ChatTarget & { sessionId: string; offset: number }
+  ): Promise<{ streamId: string; start: number; size: number }> => ipcRenderer.invoke('chat:stream', t),
+
+  /** Up to 1 MiB of whole records ending at byte `before`; `start` = 0 once the top of the file is reached. */
+  chatOlder: (t: ChatTarget & { sessionId: string; before: number }): Promise<ChatOlder> =>
+    ipcRenderer.invoke('chat:older', t),
 
   /** Stop following. onChatEnd then fires for that stream without an error. */
   chatUnstream: (args: { streamId: string }): Promise<void> =>

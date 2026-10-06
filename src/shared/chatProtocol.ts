@@ -73,7 +73,7 @@ export type ChatEvent =
   /** End of a turn (`system/turn_duration`). */
   | { t: 'result'; durationMs?: number }
   /** Context was compacted. */
-  | { t: 'compact'; trigger: 'manual' | 'auto'; preTokens?: number }
+  | { t: 'compact'; id: string; trigger: 'manual' | 'auto'; preTokens?: number }
   /** Usage of the last assistant message, for the context meter. */
   | { t: 'usage'; inputTokens: number }
   /**
@@ -103,6 +103,12 @@ export interface ChatStreamData {
   streamId: string
   records: unknown[]
   next: number
+}
+
+/** Records from before a stream's start, read on demand; `start` is where they begin (0 = the file's top). */
+export interface ChatOlder {
+  records: unknown[]
+  start: number
 }
 
 export interface ChatStreamEnd {

@@ -12,7 +12,7 @@ import type {
 } from '../../../shared/chatProtocol'
 import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/transcriptEvents'
 import { EFFORT_LEVELS } from '../../../shared/tuiKeys'
-import { initialChatState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
+import { initialChatState, prependState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
 import { ChatComposer } from './ChatComposer'
 import { Button, Modal } from './Modal'
 import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, ToolGroup, UserMessage } from './chat/Blocks'
@@ -42,6 +42,13 @@ interface Props {
 
 // Closer to the bottom than this and a new message keeps the view pinned there.
 const NEAR_BOTTOM_PX = 80
+// Closer to the top than this and earlier messages are shown (or read from the host).
+const NEAR_TOP_PX = 300
+// Segments rendered at first, and added each time the reader nears the top.
+const WINDOW = 60
+// A first load paints once it has the whole tail; this long with no data, it paints what it has.
+// Generous: the ssh exec takes a while to start, and a chunk can lag on a slow link.
+const BOOT_QUIET_MS = 3000
 // Wait before each stream reconnect attempt (seconds), then stay at the last.
 const BACKOFF_S = [1, 2, 4, 8, 10]
 // How often the screen is read for the open dialog and the footer chips: each read is an ssh exec.
@@ -82,7 +89,8 @@ type Link = 'connecting' | 'live' | 'reconnecting'
 type ToolBlock = Extract<UiBlock, { type: 'tool_use' }>
 
 /** A message to render as it is, or a run of tool calls to render as one group. */
-type Segment = { kind: 'item'; item: ChatItem; i: number } | { kind: 'tools'; id: string; blocks: ToolBlock[] }
+/** `i` is the index in `items` of the (first) item the segment shows. */
+type Segment = { kind: 'item'; item: ChatItem; i: number } | { kind: 'tools'; id: string; i: number; blocks: ToolBlock[] }
 
 // Calls that keep their own card: they say more than a count can.
 const STANDALONE_TOOLS = new Set(['TodoWrite', 'Task', 'Agent'])
@@ -110,7 +118,7 @@ function segmentsOf(items: ChatItem[], results: Record<string, ToolResult>, live
   const run: { item: AssistantItem; i: number }[] = []
   const calls: ToolBlock[] = []
   const flush = (): void => {
-    if (calls.length >= 2) out.push({ kind: 'tools', id: run[0].item.msgId, blocks: [...calls] })
+    if (calls.length >= 2) out.push({ kind: 'tools', id: run[0].item.msgId, i: run[0].i, blocks: [...calls] })
     else for (const r of run) out.push({ kind: 'item', item: r.item, i: r.i })
     run.length = 0
     calls.length = 0
@@ -137,6 +145,8 @@ const BUILTIN_NAMES = new Set(BUILTIN_COMMANDS.map((c) => c.name))
 const EFFORT_ARG = /^\s*(low|medium|high|xhigh|max)\s*$/
 const SLASH = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/
 
+const itemKey = (it: ChatItem): string => (it.kind === 'assistant' ? it.msgId : it.id)
+
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** The model the transcript reports is a resolved id (`claude-opus-4-…`); the picker is keyed by alias. */
@@ -153,8 +163,20 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const [pending, setPending] = useState<{ id: string; text: string }[]>([])
   const [notice, setNotice] = useState<Notice | null>(null)
   const [resuming, setResuming] = useState(false)
-  // The stream began part-way into a long transcript.
-  const [partial, setPartial] = useState(false)
+  // The first load has painted. Until then its events wait in `bootEvents`, so the chat
+  // appears once, at the bottom, instead of filling from the top batch by batch.
+  const [loaded, setLoaded] = useState(false)
+  // Byte offset where what we hold begins; above 0, earlier messages can be read on scroll up.
+  const startOffset = useRef(0)
+  const [hasOlder, setHasOlder] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const loadingOlderRef = useRef(false)
+  // The first item rendered, by key: only segments from it down are in the DOM. Null = the last WINDOW.
+  const [firstKey, setFirstKey] = useState<string | null>(null)
+  // Distance from the bottom to hold while earlier content is put above the view.
+  const anchor = useRef<number | null>(null)
+  // Earlier messages were just read: show some of them once they are in the state.
+  const expandNext = useRef(false)
   // The dialog on the TUI's screen. Claude Code writes none of them to the transcript until answered.
   const [prompt, setPrompt] = useState<TuiPrompt | null>(null)
   // The TUI's footer under the input box: the statusLine segments and the mode line.
@@ -208,11 +230,30 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
     const early: ChatStreamData[] = []
     const earlyEnds: ChatStreamEnd[] = []
 
+    // The first load: events held back until the tail read at open is all here.
+    let boot: { events: ChatEvent[]; size: number } | null = null
+    let quiet: ReturnType<typeof setTimeout> | undefined
+    const paint = (): void => {
+      clearTimeout(quiet)
+      if (!boot || cancelled) return
+      const events = boot.events
+      boot = null
+      setState((s) => reduceEvents(s, events))
+      setLoaded(true)
+    }
+
     const take = (d: ChatStreamData): void => {
       offset.current = d.next
       attempt = 0
       const events: ChatEvent[] = mapper.current.push(d.records)
-      setState((s) => reduceEvents(s, events))
+      if (!boot) {
+        setState((s) => reduceEvents(s, events))
+        return
+      }
+      boot.events.push(...events)
+      clearTimeout(quiet)
+      if (d.next >= boot.size) paint()
+      else quiet = setTimeout(paint, BOOT_QUIET_MS)
     }
 
     const dropped = (): void => {
@@ -248,7 +289,14 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           return
         }
         streamId = r.streamId
-        if (offset.current < 0) setPartial(r.start > 0)
+        if (offset.current < 0) {
+          startOffset.current = r.start
+          setHasOlder(r.start > 0)
+          boot = { events: [], size: r.size }
+          // Nothing past the start (or a line still being written): paint now, or soon.
+          if (r.size <= r.start) paint()
+          else quiet = setTimeout(paint, BOOT_QUIET_MS)
+        }
         setLink('live')
         for (const d of early.splice(0)) if (d.streamId === r.streamId) take(d)
         if (earlyEnds.splice(0).some((d) => d.streamId === r.streamId)) dropped()
@@ -266,6 +314,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
     return () => {
       cancelled = true
       clearTimeout(timer)
+      clearTimeout(quiet)
       offData()
       offEnd()
       if (streamId !== null) void window.api.chatUnstream({ streamId })
@@ -553,7 +602,9 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   const onScroll = (): void => {
     const el = scroller.current
-    if (el) nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
+    if (!el) return
+    nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
+    if (el.scrollTop < NEAR_TOP_PX) showEarlier()
   }
 
   // Links open in the OS browser (http/https only); never navigate the app.
@@ -587,6 +638,86 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   // A call with no result yet is still running while the turn is live (busy, or waiting on a dialog).
   const segments = useMemo(() => segmentsOf(state.items, state.results, busy || waiting), [state.items, state.results, busy, waiting])
+  // Only segments from `from` down are rendered; firstKey pins it to an item, so messages
+  // arriving below (or read in above) never move what is on screen.
+  const from = (() => {
+    const at = firstKey === null ? -1 : state.items.findIndex((it) => itemKey(it) === firstKey)
+    if (at < 0) return Math.max(0, segments.length - WINDOW)
+    const k = segments.findIndex((seg) => seg.i >= at)
+    return k < 0 ? 0 : k
+  })()
+  const hidden = from > 0
+  const shownSegments = hidden ? segments.slice(from) : segments
+
+  // Freeze the window once the first load has painted.
+  useLayoutEffect(() => {
+    if (loaded && firstKey === null && segments.length) setFirstKey(itemKey(state.items[segments[from].i]))
+  }, [loaded, firstKey, segments, from, state.items])
+
+  // Earlier content went in above the view: keep the same distance from the bottom.
+  useLayoutEffect(() => {
+    const el = scroller.current
+    if (el && anchor.current !== null) {
+      el.scrollTop = el.scrollHeight - anchor.current
+      anchor.current = null
+    }
+  }, [from, state.items])
+
+  /** Show WINDOW more segments above, reading earlier transcript first when none are left. */
+  function showEarlier(): void {
+    const el = scroller.current
+    if (!el || !loaded) return
+    if (hidden) {
+      anchor.current = el.scrollHeight - el.scrollTop
+      setFirstKey(itemKey(state.items[segments[Math.max(0, from - WINDOW)].i]))
+      // Few left above: read the earlier part now, so it is there when the reader gets to it.
+      if (from < 2 * WINDOW) readOlder(false)
+      return
+    }
+    readOlder(true)
+  }
+
+  /** Read the transcript part before what we hold and put it in front; `show` = render some of it right away. */
+  function readOlder(show: boolean): void {
+    if (startOffset.current <= 0) return
+    if (show) {
+      expandNext.current = true
+      setLoadingOlder(true)
+    }
+    // A read already under way (a prefetch) shows its messages when it lands, if asked to by now.
+    if (loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    void (async () => {
+      try {
+        const r = await window.api.chatOlder({ connectionId, password, sessionId, before: startOffset.current })
+        // A fresh mapper: the records are earlier than anything the stream's mapper saw.
+        const older = reduceEvents(initialChatState, createTranscriptMapper(`o${r.start}-`).push(r.records))
+        startOffset.current = r.start
+        setHasOlder(r.start > 0)
+        const box = scroller.current
+        if (box) anchor.current = box.scrollHeight - box.scrollTop
+        setState((s) => prependState(older, s))
+      } catch {
+        // The next scroll to the top tries again.
+        expandNext.current = false
+      } finally {
+        loadingOlderRef.current = false
+        setLoadingOlder(false)
+      }
+    })()
+  }
+
+  // After earlier messages were read in, or when the window does not fill the view
+  // (nothing to scroll, so no scroll event), show more.
+  useLayoutEffect(() => {
+    const el = scroller.current
+    if (!el || !loaded) return
+    const short = el.scrollHeight <= el.clientHeight + NEAR_TOP_PX
+    if (expandNext.current && hidden) {
+      expandNext.current = false
+      showEarlier()
+    } else if (short && (hidden || hasOlder)) showEarlier()
+  })
   const tasks = Object.values(state.tasks).filter((t) => !t.hidden)
   const showTasks = !ended && tasks.some((t) => !closedTasks.includes(t.toolUseId))
   const closeTasks = (): void => setClosedTasks(tasks.map((t) => t.toolUseId))
@@ -683,13 +814,13 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           style={{ fontFamily: 'var(--font-sans)' }}
         >
           <div className="mx-auto flex max-w-[740px] flex-col gap-6">
-            {partial && <div className="text-center text-[11px] text-faint">Earlier messages are not shown — open the Reader for the whole conversation.</div>}
+            {loadingOlder && <div className="animate-glow text-center text-[12px] text-faint">Loading earlier messages…</div>}
             {empty && (
               <div className="py-16 text-center text-sm text-faint">
-                {link === 'connecting' || starting ? 'Connecting…' : 'Nothing in this session yet.'}
+                {link === 'connecting' || starting ? 'Connecting…' : link === 'live' && !loaded ? 'Loading…' : 'Nothing in this session yet.'}
               </div>
             )}
-            {segments.map((seg) =>
+            {shownSegments.map((seg) =>
               seg.kind === 'tools' ? (
                 <ToolGroup key={`tools-${seg.id}`} blocks={seg.blocks} results={state.results} groups={state.children} />
               ) : seg.item.kind === 'user' ? (

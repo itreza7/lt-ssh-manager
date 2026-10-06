@@ -5,7 +5,8 @@
 // request only ends when a later record carries its tool_result.
 //
 // Records arrive in file order, in batches. The first batch starts mid-file (the
-// last 4 MiB), so a tool_result can name a tool_use that was never seen: tolerated.
+// last 512 KiB; older parts are read later, each by a fresh mapper), so a
+// tool_result can name a tool_use that was never seen: tolerated.
 import type { ChatBlock, ChatEvent, ChatImage, ChatMode } from './chatProtocol'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,7 +128,11 @@ export interface TranscriptMapper {
   push(records: unknown[]): ChatEvent[]
 }
 
-export function createTranscriptMapper(): TranscriptMapper {
+/**
+ * `prefix` keeps the made-up ids of records with no uuid apart when a second mapper
+ * reads an earlier part of the same file (older history loaded on scroll).
+ */
+export function createTranscriptMapper(prefix = ''): TranscriptMapper {
   /** Blocks of each assistant message so far, by message.id (insertion order = age). */
   const messages = new Map<string, ChatBlock[]>()
   /** Question/plan requests seen: tool_use id -> true once its tool_result arrived. */
@@ -141,7 +146,7 @@ export function createTranscriptMapper(): TranscriptMapper {
 
   function assistant(r: Loose, out: ChatEvent[]): void {
     const msg = (r.message ?? {}) as Loose
-    const id = String(msg.id ?? r.uuid ?? `a${++anon}`)
+    const id = String(msg.id ?? r.uuid ?? `${prefix}a${++anon}`)
     const parent = ((r.parent_tool_use_id ?? r.parentToolUseId) as string | null | undefined) ?? null
 
     if (typeof msg.model === 'string' && msg.model && msg.model !== '<synthetic>' && msg.model !== model) {
@@ -257,7 +262,7 @@ export function createTranscriptMapper(): TranscriptMapper {
       }
     }
     if (texts.length || images.length) {
-      out.push({ t: 'user', id: String(r.uuid ?? `u${++anon}`), text: texts.join('\n'), images: images.length ? images : undefined })
+      out.push({ t: 'user', id: String(r.uuid ?? `${prefix}u${++anon}`), text: texts.join('\n'), images: images.length ? images : undefined })
     }
     if (interrupted) out.push({ t: 'result' })
   }
@@ -272,7 +277,7 @@ export function createTranscriptMapper(): TranscriptMapper {
     const p = a.prompt
     const text = typeof p === 'string' ? p : Array.isArray(p) ? p.map((b: Loose) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).filter(Boolean).join('\n') : ''
     if (!text.trim() || SYNTHETIC_USER.test(text)) return
-    out.push({ t: 'user', id: String(r.uuid ?? `u${++anon}`), text })
+    out.push({ t: 'user', id: String(r.uuid ?? `${prefix}u${++anon}`), text })
   }
 
   function system(r: Loose, out: ChatEvent[]): void {
@@ -280,7 +285,7 @@ export function createTranscriptMapper(): TranscriptMapper {
       out.push({ t: 'result', durationMs: typeof r.durationMs === 'number' ? r.durationMs : undefined })
     } else if (r.subtype === 'compact_boundary') {
       const m = (r.compactMetadata ?? r.compact_metadata ?? {}) as Loose
-      out.push({ t: 'compact', trigger: m.trigger === 'manual' ? 'manual' : 'auto', preTokens: typeof m.preTokens === 'number' ? m.preTokens : undefined })
+      out.push({ t: 'compact', id: String(r.uuid ?? `${prefix}c${++anon}`), trigger: m.trigger === 'manual' ? 'manual' : 'auto', preTokens: typeof m.preTokens === 'number' ? m.preTokens : undefined })
     } else if (r.subtype === 'local_command' && typeof r.content === 'string') {
       // A command's own output (/context, say), not in any message. A command with
       // none (/clear) writes an empty one.
@@ -292,7 +297,7 @@ export function createTranscriptMapper(): TranscriptMapper {
       const args = typeof run.args === 'string' ? run.args.trim() : ''
       out.push({
         t: 'note',
-        id: String(r.uuid ?? `n${++anon}`),
+        id: String(r.uuid ?? `${prefix}n${++anon}`),
         title: command ? `/${command}${args ? ' ' + args : ''}` : 'Command output',
         text: text.length > NOTE_CAP ? text.slice(0, NOTE_CAP) : text
       })
