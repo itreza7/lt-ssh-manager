@@ -59,6 +59,8 @@ interface Props {
   composerOpen: boolean
 
   fullScreen: boolean
+  /** The split-screen buttons, at the right of the top row (stacked in the rail). */
+  splitControls: ReactNode
   /** Tells the app shell whether the sidebar is collapsed, so the top bar can clear the traffic lights. */
   onCollapsedChange?: (collapsed: boolean) => void
 }
@@ -343,6 +345,7 @@ export function Sidebar({
   composerEnabled,
   composerOpen,
   fullScreen,
+  splitControls,
   onCollapsedChange
 }: Props) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
@@ -479,6 +482,7 @@ export function Sidebar({
         <button onClick={onOpenSummary} title="Summary" aria-label="Summary" className={`${iconBtn()} mt-1`}>
           <SummaryIcon />
         </button>
+        <div className="mt-2 [&_div]:flex-col [&_div]:ml-0 [&_div]:border-l-0 [&_div]:pl-0">{splitControls}</div>
         <div className="flex-1" />
         <button
           onClick={onToggleComposer}
@@ -511,6 +515,8 @@ export function Sidebar({
         >
           <PanelIcon />
         </button>
+        <span className="flex-1" />
+        <div className="no-drag">{splitControls}</div>
       </div>
 
       {/* search */}

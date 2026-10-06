@@ -38,8 +38,6 @@ interface Props {
   onResumed: (sessionId: string) => void
   /** The header is the window's title bar (the app bar is hidden): it drags the window. */
   titleBar?: boolean
-  /** Extra header controls at the right (the split controls, when the app bar is hidden). */
-  headerExtra?: ReactNode
 }
 
 // Closer to the bottom than this and a new message keeps the view pinned there.
@@ -147,7 +145,7 @@ function modelValue(model: string | null): string {
   return MODELS.find((m) => m.value !== 'default' && model.includes(m.value))?.value ?? model
 }
 
-export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed, titleBar, headerExtra }: Props) {
+export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed, titleBar }: Props) {
   const [state, setState] = useState<ChatUiState>(initialChatState)
   const [link, setLink] = useState<Link>('connecting')
   // From chatStatus: the live Claude. Undefined until asked (or while a fresh start boots), null = none.
@@ -646,7 +644,6 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           <span className="animate-glow shrink-0 rounded-full bg-sky-400/15 px-2.5 py-0.5 text-[11px] text-sky-400">Reconnecting…</span>
         )}
         <div className="ml-auto flex items-center gap-0.5">
-          {headerExtra && <div className="no-drag mr-1 flex items-center">{headerExtra}</div>}
           {drivable && busy && (
             <button
               onClick={interrupt}

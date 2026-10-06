@@ -1790,20 +1790,9 @@ export default function App() {
   }, [activeTabId])
   const activeComposerOpen = !!(activeTabId && composerOpen[activeTabId])
 
-  // A single chat tab on screen: ChatView's own header is the title bar, so the
-  // app bar steps aside (on other platforms it shrinks to a strip that keeps the
-  // menus and window controls reachable).
+  // A single chat tab on screen: its header drags the window, as there is no app
+  // title bar.
   const chatOnly = !isSplit && activeTab?.kind === 'chat'
-
-  const activeLeaves = activeView?.panes.map((p) => (p ? (tabs.find((t) => t.id === p) ?? null) : null)) ?? []
-  const activeLabel =
-    activeLeaves.length > 1
-      ? activeLeaves
-          .map((l) => (l ? leafLabel(l) : '+'))
-          .join(activeView?.direction === 'columns' ? ' │ ' : ' ─ ')
-      : activeLeaves[0]
-        ? leafLabel(activeLeaves[0])
-        : ''
 
   // What the sidebar's "Open" list shows: the old tab pills, one row per view.
   // A row's name in the sidebar: the tmux session for a terminal on one, else the tab's
@@ -1870,48 +1859,30 @@ export default function App() {
         composerEnabled={activeIsPane}
         composerOpen={activeComposerOpen}
         fullScreen={fullScreen}
+        splitControls={
+          <SplitControls
+            count={activeView?.panes.length ?? 1}
+            direction={activeView?.direction ?? 'columns'}
+            onSingle={ungroup}
+            onSplit={applySplit}
+          />
+        }
       />
 
       <div className="app-canvas flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Title bar: the active view's name and the split controls. `drag` on the
-            root plus `no-drag` on every interactive cluster keeps the bar draggable
-            everywhere except its buttons. Hidden on macOS while a single chat is
-            on screen, since ChatView's header is the title bar there. */}
-        {(!chatOnly || !isMac) && (
-          <div
-            className={`drag relative z-30 flex shrink-0 items-stretch gap-2 bg-ink pr-2 pl-3 ${
-              chatOnly ? 'h-8' : 'h-11'
-            }`}
-          >
-            {/* brand mark + menus — macOS gets a real menu bar (menu.ts) and native
-                traffic lights instead; rendering both would give every command two
-                homes and no reason to prefer either */}
-            {!isMac && (
-              <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
-                <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
-                <MenuBar onNewConnection={() => setDialogConn(null)} />
-              </div>
-            )}
-
-            <span className="min-w-0 flex-1 self-center truncate text-[14px] font-medium text-title">
-              {chatOnly ? '' : activeLabel}
-            </span>
-
-            <div className="no-drag flex shrink-0 items-center self-center">
-              <SplitControls
-                count={activeView?.panes.length ?? 1}
-                direction={activeView?.direction ?? 'columns'}
-                onSingle={ungroup}
-                onSplit={applySplit}
-              />
+        {/* No title bar on macOS: the view runs full height and the window drags by the
+            sidebar's top row (and a chat's own header). Elsewhere a thin strip keeps the
+            menus and window controls, which macOS supplies natively. */}
+        {!isMac && (
+          <div className="drag relative z-30 flex h-8 shrink-0 items-stretch gap-2 bg-ink pr-2 pl-3">
+            <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
+              <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
+              <MenuBar onNewConnection={() => setDialogConn(null)} />
             </div>
-
-            {/* window controls — macOS supplies native traffic lights instead */}
-            {!isMac && (
-              <div className="no-drag flex h-full items-stretch">
-                <WindowControls />
-              </div>
-            )}
+            <span className="flex-1" />
+            <div className="no-drag flex h-full items-stretch">
+              <WindowControls />
+            </div>
           </div>
         )}
 
@@ -2236,16 +2207,6 @@ export default function App() {
                   onResumed={(sid) => moveChat(tab.id, sid)}
                   onStarted={() => chatStarted(tab.id)}
                   titleBar={chatOnly && tab.id === activeTabId}
-                  headerExtra={
-                    chatOnly && isMac && tab.id === activeTabId ? (
-                      <SplitControls
-                        count={activeView?.panes.length ?? 1}
-                        direction={activeView?.direction ?? 'columns'}
-                        onSingle={ungroup}
-                        onSplit={applySplit}
-                      />
-                    ) : undefined
-                  }
                 />
                 {paneTools(tab.id)}
               </div>
