@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { ChatSession } from '../../../shared/chatProtocol'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type {
-  AgentHostScan,
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
   ClaudeSyncBulkOp,
@@ -12,14 +10,10 @@ import type {
   ClaudeSyncOpResult,
   ClaudeTmuxPassthroughStatus,
   Connection,
-  ServerStats,
-  TmuxSession
+  ServerStats
 } from '../../../shared/types'
 import { Button, Modal } from './Modal'
-import { ago, CHAT_DOT, chatLabel, chatStatusOf, statusLabel } from './chat/format'
 import { ClaudeSyncModal } from './ClaudeSyncModal'
-import { isClaudeSession } from '../lib/claude'
-import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 
 interface Props {
@@ -31,15 +25,7 @@ interface Props {
   onOpenFiles: () => void
   onOpenTunnels: () => void
   onEdit: () => void
-  fetchTmux: () => Promise<TmuxSession[]>
   fetchStats: () => Promise<ServerStats>
-  onAttach: (name: string) => void
-  onNewSession: (name: string) => void
-  fetchChats: () => Promise<ChatSession[]>
-  onOpenChat: (chat: ChatSession) => void
-  onNewChat: () => void
-  onKillSession: (name: string) => Promise<void>
-  onRenameSession: (from: string, to: string) => Promise<void>
   /** Resolve this connection's password once, for all the reads below. */
   resolvePassword: () => Promise<string | null | undefined>
   fetchHookStatus: (password?: string) => Promise<ClaudeHookStatus>
@@ -56,10 +42,7 @@ interface Props {
    *  can keep polling in the background regardless of which tab is visible.
    *  Filtered down to the active connection below — every other host in the
    *  scan is irrelevant now that only one connection is ever active. */
-  agentHosts: AgentHostScan[] | null
   agentScanError: string | null
-  agentScanning: boolean
-  rescanAgents: () => void
 }
 
 const authLabel: Record<Connection['authMethod'], string> = {
@@ -95,7 +78,7 @@ function Fact({ label, value, mono }: { label: string; value: ReactNode; mono?: 
   return (
     <div className="min-w-0">
       <div className="eyebrow mb-1">{label}</div>
-      <div className={`truncate text-sm text-fg/90 ${mono ? 'font-mono' : ''}`}>{value}</div>
+      <div className={`break-words text-sm text-fg/90 ${mono ? 'font-mono' : ''}`}>{value}</div>
     </div>
   )
 }
@@ -105,9 +88,9 @@ function Meter({ label, pct, detail }: { label: string; pct: number; detail: str
   const color = meterColor(clamped)
   return (
     <div>
-      <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <span className="eyebrow">{label}</span>
-        <span className="font-mono text-[12px] text-fg/80">{detail}</span>
+      <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-3">
+        <span className="eyebrow whitespace-nowrap">{label}</span>
+        <span className="whitespace-nowrap font-mono text-[12px] text-fg/80">{detail}</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-black/40 ring-1 ring-line-soft">
         <div
@@ -117,33 +100,6 @@ function Meter({ label, pct, detail }: { label: string; pct: number; detail: str
       </div>
       <div className="mt-1 text-right font-mono text-[11px] text-faint">{Math.round(clamped)}%</div>
     </div>
-  )
-}
-
-function IconButton({
-  children,
-  title,
-  onClick,
-  disabled,
-  danger
-}: {
-  children: ReactNode
-  title: string
-  onClick: () => void
-  disabled?: boolean
-  danger?: boolean
-}) {
-  return (
-    <button
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      className={`grid h-7 w-7 place-items-center rounded-md border border-line text-xs text-muted transition-colors disabled:opacity-40 ${
-        danger ? 'hover:border-danger/50 hover:text-danger' : 'hover:border-accent/40 hover:text-accent'
-      }`}
-    >
-      {children}
-    </button>
   )
 }
 
@@ -286,13 +242,6 @@ export const STATUS_DOT: Record<AgentStatus, string> = {
   unknown: 'bg-muted/40'
 }
 
-const STATUS_TEXT: Record<AgentStatus, string> = {
-  waiting: 'text-amber',
-  working: 'text-signal',
-  idle: 'text-faint',
-  unknown: 'text-faint'
-}
-
 export function SummaryView({
   connection: c,
   hasConnections,
@@ -302,15 +251,7 @@ export function SummaryView({
   onOpenFiles,
   onOpenTunnels,
   onEdit,
-  fetchTmux,
   fetchStats,
-  onAttach,
-  onNewSession,
-  fetchChats,
-  onOpenChat,
-  onNewChat,
-  onKillSession,
-  onRenameSession,
   resolvePassword,
   fetchHookStatus,
   applyHook,
@@ -322,30 +263,13 @@ export function SummaryView({
   readClaudeSyncFile,
   applyClaudeSync,
   bulkClaudeSync,
-  agentHosts,
   agentScanError,
-  agentScanning,
-  rescanAgents
 }: Props) {
-  const [tmux, setTmux] = useState<TmuxSession[] | null>(null)
-  const [tmuxLoading, setTmuxLoading] = useState(false)
-  const [tmuxError, setTmuxError] = useState<string | null>(null)
-  const [newName, setNewName] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [editing, setEditing] = useState<string | null>(null)
-  const [editValue, setEditValue] = useState('')
-
-  const [chats, setChats] = useState<ChatSession[] | null>(null)
-  const [chatsLoading, setChatsLoading] = useState(false)
-  const [chatsError, setChatsError] = useState<string | null>(null)
-
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsError, setStatsError] = useState<string | null>(null)
 
-  // System vitals / connection details / notes are secondary to "start or resume
-  // an agent" — collapsed by default so that job stays above the fold.
-  const [hostDetailsOpen, setHostDetailsOpen] = useState(false)
+  const [hostDetailsOpen, setHostDetailsOpen] = useState(true)
 
   const [setupOpen, setSetupOpen] = useState(false)
   const [syncOpen, setSyncOpen] = useState(false)
@@ -364,34 +288,6 @@ export function SummaryView({
   const [tmuxPassthroughError, setTmuxPassthroughError] = useState<string | null>(null)
   const [tmuxPassthroughAction, setTmuxPassthroughAction] = useState<'install' | 'uninstall' | null>(null)
   const [tmuxPassthroughBusy, setTmuxPassthroughBusy] = useState(false)
-
-  const loadTmux = useCallback(async () => {
-    setTmuxLoading(true)
-    setTmuxError(null)
-    try {
-      setTmux(await fetchTmux())
-    } catch (e) {
-      setTmuxError(e instanceof Error ? e.message : String(e))
-      setTmux(null)
-    } finally {
-      setTmuxLoading(false)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c?.id])
-
-  const loadChats = useCallback(async () => {
-    setChatsLoading(true)
-    setChatsError(null)
-    try {
-      setChats(await fetchChats())
-    } catch (e) {
-      setChatsError(e instanceof Error ? e.message : String(e))
-      setChats(null)
-    } finally {
-      setChatsLoading(false)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c?.id])
 
   const loadStats = useCallback(async () => {
     setStatsLoading(true)
@@ -456,12 +352,8 @@ export function SummaryView({
 
   useEffect(() => {
     if (!c) return
-    setTmux(null)
-    setChats(null)
     setStats(null)
-    setEditing(null)
     setSetupOpen(false)
-    setSyncOpen(false)
     setHook(null)
     setHookError(null)
     setHookAction(null)
@@ -471,8 +363,6 @@ export function SummaryView({
     setTmuxPassthrough(null)
     setTmuxPassthroughError(null)
     setTmuxPassthroughAction(null)
-    void loadTmux()
-    void loadChats()
     void loadStats()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c?.id])
@@ -526,46 +416,9 @@ export function SummaryView({
     }
   }
 
-  const runTmux = async (fn: () => Promise<void>): Promise<void> => {
-    setBusy(true)
-    setTmuxError(null)
-    try {
-      await fn()
-      await loadTmux()
-    } catch (e) {
-      setTmuxError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const createSession = (): void => {
-    onNewSession(newName.trim() || 'main')
-    setNewName('')
-    setTimeout(() => void loadTmux(), 1200)
-  }
-
-  const commitRename = (from: string): void => {
-    const to = editValue.trim()
-    setEditing(null)
-    if (!to || to === from) return
-    void runTmux(() => onRenameSession(from, to))
-  }
-
   const memPct =
     stats?.memTotalKb && stats?.memUsedKb !== undefined ? (stats.memUsedKb / stats.memTotalKb) * 100 : null
   const loadRatio = stats?.load && stats?.cpus ? Math.min(100, (stats.load[0] / stats.cpus) * 100) : null
-
-  // This host's slice of the live-agent sweep, keyed by session name so each
-  // tmux row below can show whether it's waiting/working/idle — a status the
-  // plain tmux list has no way to know on its own.
-  const agentStatusByName = useMemo(() => {
-    const m = new Map<string, AgentStatus>()
-    if (!c) return m
-    const host = (agentHosts ?? []).find((h) => h.connectionId === c.id)
-    for (const s of host?.sessions ?? []) m.set(s.session, agentStatus(s))
-    return m
-  }, [agentHosts, c])
 
   if (!c) {
     return (
@@ -586,15 +439,15 @@ export function SummaryView({
   }
 
   return (
-    <div className="h-full overflow-y-auto px-10 py-9">
+    <div className="h-full overflow-y-auto px-6 py-9 md:px-10">
       <div className="mx-auto max-w-5xl">
         {/* hero */}
-        <div className="animate-rise mb-8 flex items-end justify-between gap-6">
-          <div className="min-w-0">
+        <div className="animate-rise mb-8 flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
+          <div className="min-w-0 max-w-full">
             <div className="eyebrow mb-2 flex items-center gap-2.5">
               Connection
               {!statsError && stats && (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-accent/12 px-3 py-1 text-[10px] font-medium normal-case tracking-normal text-accent">
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-accent/12 px-3 py-1 text-[10px] font-medium normal-case tracking-normal text-accent">
                   <span className="h-1.5 w-1.5 rounded-full bg-accent dot-glow" />
                   online
                   {stats.probeMs !== undefined && <span className="text-accent/60">· {stats.probeMs}ms</span>}
@@ -607,17 +460,17 @@ export function SummaryView({
                 </span>
               )}
             </div>
-            <h1 className="truncate text-3xl font-bold tracking-tight text-fg">{c.name}</h1>
-            <p className="mt-1.5 font-mono text-sm text-muted">
+            <h1 className="break-words text-3xl font-bold tracking-tight text-fg">{c.name}</h1>
+            <p className="mt-1.5 break-all font-mono text-sm text-muted">
               {c.username ? `${c.username}@` : ''}
               {c.host}
               <span className="text-accent">:{c.port}</span>
               {stats?.hostname && stats.hostname !== c.host && (
-                <span className="text-faint"> · {stats.hostname}</span>
+                <span className="whitespace-nowrap text-faint"> · {stats.hostname}</span>
               )}
             </p>
           </div>
-          <div className="flex shrink-0 gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button onClick={onEdit}>Edit</Button>
             <Button onClick={onOpenTunnels}>Tunnels</Button>
             <Button onClick={onOpenFiles}>Browse Files</Button>
@@ -645,195 +498,7 @@ export function SummaryView({
           </p>
         )}
 
-        {/* tmux + live agents */}
-        <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '20ms' }}>
-          <div className="mb-3.5 flex items-center justify-between">
-            <span className="eyebrow">tmux sessions</span>
-            <RefreshButton
-              loading={tmuxLoading || agentScanning}
-              onClick={() => {
-                void loadTmux()
-                rescanAgents()
-              }}
-            />
-          </div>
-
-          <div className="mb-3 flex gap-2">
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && createSession()}
-              placeholder="new session name  ·  blank = main"
-              className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
-            />
-            <Button variant="primary" onClick={createSession}>
-              New ▸
-            </Button>
-          </div>
-
-          {tmuxError && (
-            <p className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-              {tmuxError}
-            </p>
-          )}
-
-          {!tmuxError && tmuxLoading && tmux === null && (
-            <p className="py-2 font-mono text-xs text-faint">scanning host…</p>
-          )}
-
-          {!tmuxError && tmux !== null && tmux.length === 0 && (
-            <p className="py-2 text-sm text-faint">No tmux sessions running on this host.</p>
-          )}
-
-          {tmux && tmux.length > 0 && (
-            <div className="space-y-1.5">
-              {tmux.map((s, i) => {
-                const status = agentStatusByName.get(s.name)
-                return (
-                  <div
-                    key={s.name}
-                    style={{ animationDelay: `${i * 30}ms` }}
-                    className="animate-rise flex items-center justify-between gap-2 rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
-                  >
-                    <div className="min-w-0 flex-1">
-                      {editing === s.name ? (
-                        <input
-                          autoFocus
-                          value={editValue}
-                          onChange={(e) => setEditValue(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') commitRename(s.name)
-                            if (e.key === 'Escape') setEditing(null)
-                          }}
-                          onBlur={() => commitRename(s.name)}
-                          className="w-full rounded-md border border-accent/50 bg-ink/80 px-2 py-1 font-mono text-sm text-fg outline-none"
-                        />
-                      ) : (
-                        <>
-                          <div className="flex items-center gap-2">
-                            {status && (
-                              <span
-                                className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[status]}`}
-                                title={STATUS_LABEL[status]}
-                              />
-                            )}
-                            <span className="truncate font-mono text-sm text-fg">{s.name}</span>
-                            {isClaudeSession(s.name) && (
-                              <span className="rounded-full bg-fg/10 px-2 py-0.5 text-[10px] font-medium text-fg/70">
-                                agent
-                              </span>
-                            )}
-                            {status && (
-                              <span className={`text-[10px] ${STATUS_TEXT[status]}`}>{STATUS_LABEL[status]}</span>
-                            )}
-                            {s.attached && (
-                              <span className="flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
-                                <span className="h-1 w-1 rounded-full bg-accent" />
-                                attached
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-0.5 font-mono text-[11px] text-faint">
-                            {s.windows} window{s.windows === 1 ? '' : 's'}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                    {editing !== s.name && (
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <IconButton
-                          title="Rename session"
-                          disabled={busy}
-                          onClick={() => {
-                            setEditValue(s.name)
-                            setEditing(s.name)
-                          }}
-                        >
-                          ✎
-                        </IconButton>
-                        <IconButton
-                          title="Kill session"
-                          danger
-                          disabled={busy}
-                          onClick={() => {
-                            if (confirm(`Kill tmux session “${s.name}”? Running programs are terminated.`))
-                              void runTmux(() => onKillSession(s.name))
-                          }}
-                        >
-                          ✕
-                        </IconButton>
-                        <Button variant="primary" onClick={() => onAttach(s.name)}>
-                          Attach ▸
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* chats — every live Claude Code on the host, as a chat view of its tmux session */}
-        <div className="panel animate-rise mb-4 p-5" style={{ animationDelay: '30ms' }}>
-          <div className="mb-3.5 flex items-center justify-between">
-            <span className="eyebrow">Chats</span>
-            <div className="flex items-center gap-2">
-              <RefreshButton loading={chatsLoading} onClick={() => void loadChats()} />
-              <Button variant="primary" onClick={onNewChat}>
-                New chat ▸
-              </Button>
-            </div>
-          </div>
-
-          {chatsError && (
-            <p className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-              {chatsError}
-            </p>
-          )}
-
-          {!chatsError && chatsLoading && chats === null && (
-            <p className="py-2 font-mono text-xs text-faint">looking for chats…</p>
-          )}
-
-          {!chatsError && chats !== null && chats.length === 0 && (
-            <p className="py-2 text-sm text-faint">No Claude is running on this host.</p>
-          )}
-
-          {chats && chats.length > 0 && (
-            <div className="space-y-1.5">
-              {chats.map((chat) => {
-                const status = chatStatusOf(chat)
-                return (
-                  <div
-                    key={chat.sessionId}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-line-soft bg-black/20 px-3.5 py-2.5 transition-colors hover:border-line"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${CHAT_DOT[status]}`} title={status} />
-                        <span dir="auto" className="truncate text-sm text-fg">
-                          {chatLabel(chat)}
-                        </span>
-                        <span className="shrink-0 text-[10px] text-faint">{statusLabel(status, chat.waitingFor)}</span>
-                        {!chat.drivable && <span className="shrink-0 text-[10px] text-faint">— {chat.tmux ? 'not a TUI, read only' : 'not in tmux'}</span>}
-                      </div>
-                      <div dir="auto" className="mt-0.5 truncate text-[11px] text-faint" title={chat.cwd}>
-                        {chat.name ? `${chat.name} · ` : ''}
-                        {ago(chat.updatedAt)}
-                      </div>
-                    </div>
-                    <Button variant="primary" onClick={() => onOpenChat(chat)}>
-                      Open ▸
-                    </Button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* host details — vitals, connection info, notes: secondary to the agent job above */}
+        {/* host details — vitals, connection info, notes */}
         <div className="panel animate-rise p-5" style={{ animationDelay: '140ms' }}>
           <button
             onClick={() => setHostDetailsOpen((v) => !v)}
@@ -864,7 +529,7 @@ export function SummaryView({
 
                 {!statsError && stats && (
                   <>
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-x-6 gap-y-4">
                       <Fact label="OS" value={stats.os ?? '—'} />
                       <Fact label="Kernel" value={stats.kernel ?? '—'} mono />
                       <Fact label="Arch" value={stats.arch ?? '—'} mono />
@@ -889,7 +554,7 @@ export function SummaryView({
                     )}
 
                     {(memPct !== null || stats.diskPct !== undefined || loadRatio !== null) && (
-                      <div className="mt-4 grid gap-4 border-t border-line-soft pt-4 sm:grid-cols-3">
+                      <div className="mt-4 grid gap-4 border-t border-line-soft pt-4 lg:grid-cols-3">
                         {memPct !== null && (
                           <Meter
                             label="Memory"

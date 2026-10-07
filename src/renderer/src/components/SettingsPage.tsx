@@ -3,7 +3,6 @@ import type { Connection } from '../../../shared/types'
 import type {
   AgentAlerts,
   AppSettings,
-  ComposerSendMode,
   CursorStyle,
   SettingsPatch,
   ShiftEnterMode,
@@ -29,7 +28,7 @@ import {
 import { Button } from './Modal'
 import { Select } from './Select'
 import { isMac } from '../lib/platform'
-import { COMPOSE_ACCEL, PASTE_UPLOAD_ACCEL } from '../lib/xtermAttach'
+import { PASTE_UPLOAD_ACCEL } from '../lib/xtermAttach'
 
 interface Props {
   settings: AppSettings
@@ -49,11 +48,10 @@ const authLabel: Record<Connection['authMethod'], string> = {
   agent: 'AGENT'
 }
 
-type SectionId = 'appearance' | 'terminal' | 'composer' | 'editor' | 'connections' | 'shortcuts'
+type SectionId = 'appearance' | 'terminal' | 'editor' | 'connections' | 'shortcuts'
 const SECTIONS: { id: SectionId; label: string; icon: string }[] = [
   { id: 'appearance', label: 'Appearance', icon: '◐' },
   { id: 'terminal', label: 'Terminal', icon: '▍' },
-  { id: 'composer', label: 'Composer', icon: '✦' },
   { id: 'editor', label: 'Editor', icon: '✎' },
   { id: 'connections', label: 'Connections', icon: '⇄' },
   { id: 'shortcuts', label: 'Shortcuts', icon: '⌨' }
@@ -82,17 +80,6 @@ const AGENT_ALERTS: { value: AgentAlerts; label: string }[] = [
   { value: 'dot', label: 'Dot' },
   { value: 'notify', label: 'Notify' }
 ]
-
-const COMPOSER_SENDS: { value: ComposerSendMode; label: string }[] = [
-  { value: 'mod-enter', label: isMac ? '⌘+Enter' : 'Ctrl+Enter' },
-  { value: 'enter', label: 'Enter' }
-]
-
-/** What plain Enter actually does right now — the setting above decides. */
-const COMPOSER_SEND_HELP: Record<ComposerSendMode, string> = {
-  'mod-enter': 'Enter adds a line; ⌘/Ctrl+Enter sends',
-  enter: 'Enter sends; Shift+Enter adds a line'
-}
 
 /** What Shift+Enter actually does right now — the setting above decides. */
 const SHIFT_ENTER_HELP: Record<ShiftEnterMode, string> = {
@@ -372,36 +359,6 @@ export function SettingsPage({
               </>
             )}
 
-            {section === 'composer' && (
-              <div className="panel px-5 py-2">
-                <Row
-                  label="Open by default"
-                  hint="Every new tab starts with the prompt composer already open, ready to draft — instead of waiting for the chord below."
-                >
-                  <Toggle on={t.composerDefaultOpen} onChange={(b) => setT({ composerDefaultOpen: b })} />
-                </Row>
-                <Row label="Send key" hint={COMPOSER_SEND_HELP[t.composerSendMode]}>
-                  <Segmented
-                    value={t.composerSendMode}
-                    options={COMPOSER_SENDS}
-                    onChange={(v) => setT({ composerSendMode: v })}
-                  />
-                </Row>
-                <Row
-                  label="Stay open after sending"
-                  hint="Keep drafting the next message instead of closing and handing focus back to the terminal."
-                >
-                  <Toggle on={t.composerStayOpen} onChange={(b) => setT({ composerStayOpen: b })} />
-                </Row>
-                <Row
-                  label="Toggle from the keyboard"
-                  hint="The same chord opens the composer and closes it again — no separate off switch to remember."
-                >
-                  <span className="font-mono text-xs text-accent">{COMPOSE_ACCEL}</span>
-                </Row>
-              </div>
-            )}
-
             {section === 'editor' && (
               <>
                 {/* preview */}
@@ -571,13 +528,6 @@ export function SettingsPage({
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
                   <span className="font-mono text-xs text-accent">Ctrl+J</span>
                   <span className="text-right text-muted">Newline — always, whatever Shift+Enter is set to</span>
-                </div>
-                <div className="flex items-center justify-between gap-4 py-1.5 text-sm">
-                  <span className="font-mono text-xs text-accent">{COMPOSE_ACCEL}</span>
-                  <span className="text-right text-muted">
-                    Prompt composer — toggle it open to draft a multi-line prompt, then send it as one
-                    paste. More options in the Composer section.
-                  </span>
                 </div>
                 <div className="eyebrow py-2 pt-4">Files</div>
                 <div className="flex items-center justify-between gap-4 py-1.5 text-sm">

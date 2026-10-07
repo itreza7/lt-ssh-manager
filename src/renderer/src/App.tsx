@@ -48,7 +48,6 @@ import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
-import type { ComposerHandle } from './lib/xtermAttach'
 import { TERMINAL_BG } from './lib/xtermSetup'
 import { useAgentSessions } from './hooks/useAgentSessions'
 import { isMac } from './lib/platform'
@@ -157,6 +156,9 @@ interface ReaderTab {
 }
 
 /** A rich second view of a Claude Code session running in tmux on the server (see chatProtocol.ts). */
+// How many earlier session ids a chat tab remembers (see ChatTab.formerIds).
+const MAX_FORMER_IDS = 5
+
 interface ChatTab {
   kind: 'chat'
   id: string // `chat:${sessionId it was opened with}`; kept when a resume moves the tab to a new session
@@ -167,6 +169,9 @@ interface ChatTab {
   password?: string
   /** Just started or resumed: the live Claude may not be visible yet. Not persisted. */
   starting?: boolean
+  /** Session ids this tab had before /clear or /resume moved it, newest last. The sidebar's
+   *  list can still name one of them for a moment. Not persisted. */
+  formerIds?: string[]
 }
 
 // A "leaf" — one unit of content. Leaves live inside views (see below).
@@ -304,19 +309,6 @@ function serializeTab(t: Tab): PersistedTab {
   }
 }
 
-// A tmux tab's drafts are stored as one JSON blob per pane under the tab's
-// single tabKey (see TmuxControlView's persist effect) — parse it back out,
-// falling back to empty on missing/corrupt data.
-function parseTmuxDrafts(raw: string | undefined): Record<string, string> {
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
 function statusDot(status: SessionStatus): string {
   switch (status.kind) {
     case 'ready':
@@ -351,8 +343,6 @@ export default function App() {
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [secretsAvailable, setSecretsAvailable] = useState(true)
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULTS)
-  // Prompt composer drafts, local-autosave keyed by tabKey — see PersistedTab.tabKey.
-  const [drafts, setDrafts] = useState<Record<string, string>>({})
 
   const [dialogConn, setDialogConn] = useState<Connection | null | undefined>(undefined) // undefined = closed
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
@@ -368,35 +358,6 @@ export default function App() {
 
   // The split container, so dividers can translate pointer travel into fractions.
   const contentRef = useRef<HTMLDivElement>(null)
-
-  // One composer handle per session/tmux tab, so the sidebar's toggle button can
-  // reach whichever pane is focused without owning any drafting state itself.
-  const composerRefs = useRef(new Map<string, ComposerHandle>())
-  // Mirrors each handle's `isOpen` into render-visible state — the map above is
-  // a ref precisely so touching it doesn't cause a render, but the toggle
-  // button's own color does need one. useImperativeHandle re-invokes this
-  // callback with a fresh handle whenever a pane's composer opens or closes.
-  const [composerOpen, setComposerOpen] = useState<Record<string, boolean>>({})
-  // useImperativeHandle's effect keys off the `ref` prop's own identity as well
-  // as its deps, so a `ref={setComposerRef(id)}` that mints a new closure every
-  // render makes it re-fire on every render — which, now that it calls setState,
-  // becomes an infinite loop. Cache one stable callback per id instead.
-  const composerRefCallbacks = useRef(new Map<string, (h: ComposerHandle | null) => void>())
-  const setComposerRef = useCallback((id: string) => {
-    let cb = composerRefCallbacks.current.get(id)
-    if (!cb) {
-      cb = (h: ComposerHandle | null): void => {
-        if (h) composerRefs.current.set(id, h)
-        else composerRefs.current.delete(id)
-        setComposerOpen((m) => {
-          const next = h?.isOpen ?? false
-          return m[id] === next ? m : { ...m, [id]: next }
-        })
-      }
-      composerRefCallbacks.current.set(id, cb)
-    }
-    return cb
-  }, [])
 
   // Derived view state. The active view is the tab on screen; the focused pane's
   // leaf is the app's notion of the "active" tab (sidebar + keyboard follow it).
@@ -756,12 +717,7 @@ export default function App() {
 
   // Summary is always mounted, so the live-agent poll just always runs — no
   // more "has the inbox ever been opened" gate to thread through.
-  const {
-    hosts: agentHosts,
-    error: agentScanError,
-    scanning: agentScanning,
-    rescan: rescanAgents
-  } = useAgentSessions(true)
+  const { hosts: agentHosts, error: agentScanError } = useAgentSessions(true)
 
   useEffect(() => {
     void (async () => {
@@ -769,9 +725,6 @@ export default function App() {
       setConnections(conns)
       void window.api.secretsAvailable().then(setSecretsAvailable)
       try {
-        // Load persisted drafts before restoring tabs so TerminalView/TmuxControlView
-        // seed their initial state from disk on first mount instead of starting blank.
-        setDrafts(await window.api.draftsAll())
         const ws = await window.api.getWorkspace()
         await restoreWorkspace(ws, conns)
       } finally {
@@ -1468,7 +1421,9 @@ export default function App() {
 
   const moveChat = (tabId: string, sessionId: string): void =>
     setTabs((ts) =>
-      ts.map((t) => (t.id === tabId && t.kind === 'chat' ? { ...t, sessionId, starting: true } : t))
+      ts.map((t) =>
+        t.id === tabId && t.kind === 'chat' ? { ...t, sessionId, starting: true, formerIds: [...(t.formerIds ?? []), t.sessionId].slice(-MAX_FORMER_IDS) } : t
+      )
     )
 
   // The terminal tab on a tmux session: the one already open, else a new one.
@@ -1510,15 +1465,6 @@ export default function App() {
     }
     rememberMode(tab.connectionId, name, 'chat')
     openChat(tab.connectionId, tab.password, chat.sessionId, chat.cwd, chatTabTitle(chat), false, tab.id)
-  }
-
-  // The chat list for a connection. Summary reads it like it reads tmux (a
-  // password prompt is fine there); the palette must never raise one just for
-  // opening, so it only uses a password that is already known.
-  const fetchChatsFor = (conn: Connection) => async (): Promise<ChatSession[]> => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to list chats.')
-    return sortChats(await window.api.chatList({ connectionId: conn.id, password: password ?? undefined }))
   }
 
   // Where a new chat starts: the folder of the terminal on screen when it is a
@@ -1600,12 +1546,6 @@ export default function App() {
     const { ok, password } = await quietPassword(conn)
     if (!ok) return []
     return window.api.tmuxList({ connectionId: conn.id, password })
-  }
-
-  const fetchTmuxFor = (conn: Connection) => async () => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to list sessions.')
-    return window.api.tmuxList({ connectionId: conn.id, password: password ?? undefined })
   }
 
   const fetchStatsFor = (conn: Connection) => async () => {
@@ -1732,21 +1672,36 @@ export default function App() {
   }
 
 
-  // Kill / rename run as one-shot commands; Summary refreshes its list after.
+  // Kill / rename run as one-shot commands; the sidebar refreshes its list after.
+  // Terminal tabs on the session follow it, so none of them brings the old name back.
+  const tmuxTabsOf = (conn: Connection, name: string): Tab[] =>
+    tabs.filter((t) => (t.kind === 'session' || t.kind === 'tmux') && t.connectionId === conn.id && t.tmux?.session === name)
   const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required.')
+    const open = tmuxTabsOf(conn, name).map((t) => t.id)
+    if (open.length) removeTabs(open)
     await window.api.tmuxKill({ connectionId: conn.id, password: password ?? undefined, name })
   }
   const renameTmux = (conn: Connection) => async (from: string, to: string): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required.')
-    await window.api.tmuxRename({
-      connectionId: conn.id,
-      password: password ?? undefined,
-      from,
-      to: tmuxSessionName(to)
-    })
+    const name = tmuxSessionName(to)
+    await window.api.tmuxRename({ connectionId: conn.id, password: password ?? undefined, from, to: name })
+    const ids = new Set(tmuxTabsOf(conn, from).map((t) => t.id))
+    if (!ids.size) return
+    setTabs((ts) =>
+      ts.map((t) => {
+        if (!ids.has(t.id) || (t.kind !== 'session' && t.kind !== 'tmux') || !t.tmux) return t
+        const tmux = { ...t.tmux, session: name }
+        return {
+          ...t,
+          tmux,
+          command: t.command === tmuxCreateCommand(t.tmux) ? tmuxCreateCommand(tmux) : t.command,
+          title: t.title === `${conn.name} · ${from}` ? `${conn.name} · ${name}` : t.title
+        }
+      })
+    )
   }
 
   // Close one or more leaves in a single pass (atomic so back-to-back closes
@@ -1756,10 +1711,7 @@ export default function App() {
   const removeTabs = (ids: string[]): void => {
     const dead = new Set(ids)
     for (const t of tabs) {
-      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) {
-        window.api.closeSession(t.id)
-        void window.api.draftsSet(t.tabKey, '')
-      }
+      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) window.api.closeSession(t.id)
       // Closing a chat tab leaves Claude running; only the unsent draft goes.
       if (dead.has(t.id) && t.kind === 'chat') void window.api.draftsSet(`chat:${t.sessionId}`, '')
     }
@@ -1875,12 +1827,6 @@ export default function App() {
   const controlTabs = tabs.filter((t): t is ControlTab => t.kind === 'tmux')
   const activeConnection = connections.find((c) => c.id === activeConnectionId) ?? null
 
-  const activeIsPane = activeTab?.kind === 'session' || activeTab?.kind === 'tmux'
-  const toggleActiveComposer = useCallback(() => {
-    if (activeTabId) composerRefs.current.get(activeTabId)?.toggleComposer()
-  }, [activeTabId])
-  const activeComposerOpen = !!(activeTabId && composerOpen[activeTabId])
-
   // A single chat tab on screen: its header drags the window, as there is no app
   // title bar.
   const chatOnly = !isSplit && activeTab?.kind === 'chat'
@@ -1915,6 +1861,7 @@ export default function App() {
         .map((l) => ({ id: l.id, label: leafLabel(l) })),
       closable: !(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID),
       chatSessionId: only?.kind === 'chat' ? only.sessionId : undefined,
+      chatFormerIds: only?.kind === 'chat' ? only.formerIds : undefined,
       tmuxSession: only && (only.kind === 'session' || only.kind === 'tmux') ? only.tmux?.session : undefined,
       special: only?.kind === 'summary' || only?.kind === 'settings' ? only.kind : undefined
     }
@@ -1944,11 +1891,11 @@ export default function App() {
         }
         onOpenChat={(chat) => activeConnection && openSessionRow(activeConnection, chat)}
         onOpenTmux={(name) => activeConnection && showTmuxSession(activeConnection.id, name)}
+        onNewTmux={(name) => activeConnection && void attachTmux(activeConnection, tmuxSessionName(name))}
+        onRenameTmux={activeConnection ? renameTmux(activeConnection) : async () => {}}
+        onKillTmux={activeConnection ? killTmux(activeConnection) : async () => {}}
         agentHosts={agentHosts}
         onOpenSettings={openSettings}
-        onToggleComposer={toggleActiveComposer}
-        composerEnabled={activeIsPane}
-        composerOpen={activeComposerOpen}
         fullScreen={fullScreen}
         splitControls={
           <SplitControls
@@ -1995,7 +1942,6 @@ export default function App() {
               onOpenFiles={() => activeConnection && void openSftp(activeConnection)}
               onOpenTunnels={() => activeConnection && void openTunnels(activeConnection)}
               onEdit={() => activeConnection && setDialogConn(activeConnection)}
-              fetchTmux={activeConnection ? fetchTmuxFor(activeConnection) : async () => []}
               fetchStats={
                 activeConnection
                   ? fetchStatsFor(activeConnection)
@@ -2003,19 +1949,6 @@ export default function App() {
                       throw new Error('No active connection')
                     }
               }
-              onAttach={(name) => activeConnection && attachTmux(activeConnection, name)}
-              // A name the user just typed, unlike onAttach's, has never been
-              // through tmux. Normalise it here so the tab records the name
-              // tmux will actually use — `.` and `:` split tmux's target
-              // syntax, so a session called "api.v2" could never be reattached.
-              onNewSession={(name) =>
-                activeConnection && attachTmux(activeConnection, tmuxSessionName(name))
-              }
-              fetchChats={activeConnection ? fetchChatsFor(activeConnection) : async () => []}
-              onOpenChat={(chat) => activeConnection && void openChatFor(activeConnection, chat)}
-              onNewChat={() => activeConnection && void newChatFor(activeConnection)}
-              onKillSession={activeConnection ? killTmux(activeConnection) : async () => {}}
-              onRenameSession={activeConnection ? renameTmux(activeConnection) : async () => {}}
               resolvePassword={
                 activeConnection ? resolvePasswordFor(activeConnection) : async () => null
               }
@@ -2089,10 +2022,7 @@ export default function App() {
                       throw new Error('No active connection')
                     }
               }
-              agentHosts={agentHosts}
               agentScanError={agentScanError}
-              agentScanning={agentScanning}
-              rescanAgents={rescanAgents}
             />
             {paneTools(SUMMARY_TAB_ID)}
           </div>
@@ -2129,7 +2059,6 @@ export default function App() {
                 style={{ ...pp.style, backgroundColor: TERMINAL_BG }}
               >
                 <TerminalView
-                  ref={setComposerRef(tab.id)}
                   sessionId={tab.id}
                   connectionId={tab.connectionId}
                   active={activeTabId === tab.id}
@@ -2141,10 +2070,6 @@ export default function App() {
                   onStatus={onStatus}
                   onTitle={onTitle}
                   onAgentSignal={onAgentSignal}
-                  draftKey={tab.tabKey}
-                  initialDraft={drafts[tab.tabKey] ?? ''}
-                  onOpenReader={() => void openReaderForTab(tab)}
-                  onOpenChat={tab.tmux ? () => void openChatForTab(tab) : undefined}
                 />
                 {terminalSwitch(tab)}
                 {paneTools(tab.id)}
@@ -2160,7 +2085,6 @@ export default function App() {
               {...paneProps(tab.id)}
             >
               <TmuxControlView
-                ref={setComposerRef(tab.id)}
                 sessionId={tab.id}
                 connectionId={tab.connectionId}
                 active={activeTabId === tab.id}
@@ -2172,10 +2096,6 @@ export default function App() {
                 settings={appSettings.terminal}
                 onStatus={onStatus}
                 onAgentSignal={onAgentSignal}
-                draftKey={tab.tabKey}
-                initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
-                onOpenReader={() => void openReaderForTab(tab)}
-                onOpenChat={tab.tmux ? () => void openChatForTab(tab) : undefined}
               />
               {terminalSwitch(tab)}
               {paneTools(tab.id)}
@@ -2300,6 +2220,7 @@ export default function App() {
                   onResumed={(sid) => moveChat(tab.id, sid)}
                   onStarted={() => chatStarted(tab.id)}
                   titleBar={chatOnly && tab.id === activeTabId}
+                  onAgentSignal={(s) => onAgentSignal(tab.id, s)}
                 />
                 {paneTools(tab.id)}
               </div>

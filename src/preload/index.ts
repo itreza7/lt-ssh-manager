@@ -31,6 +31,7 @@ import type {
 } from '../shared/types'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import type { ReaderChunk, ReaderSession } from '../shared/claudeTranscript'
+import type { ScreenModel } from '../shared/tuiKeys'
 import type {
   ChatAnswer,
   ChatCommandInfo,
@@ -42,7 +43,7 @@ import type {
   ChatStreamData,
   ChatStreamEnd,
   ChatTarget,
-  WorkflowAgent
+  WorkflowJournal
 } from '../shared/chatProtocol'
 
 export interface ConnectArgs {
@@ -77,11 +78,9 @@ const api = {
   hasSecret: (id: string): Promise<boolean> => ipcRenderer.invoke('secrets:has', id),
   pickKeyFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickKey'),
 
-  // prompt composer drafts (local autosave, independent of the SSH connection)
+  // chat composer drafts (local autosave, independent of the SSH connection)
   draftsAll: (): Promise<Record<string, string>> => ipcRenderer.invoke('drafts:all'),
   draftsSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('drafts:set', key, value),
-  promptHistoryAll: (): Promise<string[]> => ipcRenderer.invoke('promptHistory:all'),
-  promptHistoryAdd: (text: string): Promise<string[]> => ipcRenderer.invoke('promptHistory:add', text),
 
   // settings (persisted on disk in the app's user folder)
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
@@ -453,34 +452,58 @@ const api = {
     ipcRenderer.invoke('chat:unstream', args),
 
   /** Type a message into the pane's input. Refused (`draft`) if the input holds unsent text. */
-  chatSend: (t: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> =>
+  chatSend: (t: ChatTarget & { pane: string; text: string; sendId?: string }): Promise<ChatKeysResult> =>
     ipcRenderer.invoke('chat:send', t),
+
+  /** Call off a chatSend (by its sendId) that has not been typed yet: it then answers `cancelled`. */
+  chatCancelSend: (args: { sendId: string }): Promise<void> => ipcRenderer.invoke('chat:cancelSend', args),
+
+  /** Take a typed message back out of Claude's queue. `gone`: Claude already took it. */
+  chatUnqueue: (t: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:unqueue', t),
 
   /** Answer the question, plan or permission prompt on screen. */
   /** One screen capture: the dialog Claude Code has open (or null) and the footer under its input box (or null). */
   chatPrompt: (t: ChatTarget & { pane: string }): Promise<ChatScreenInfo> =>
     ipcRenderer.invoke('chat:prompt', t),
 
+  /** The text of the plan file a plan dialog names. */
+  chatPlanFile: (t: ChatTarget & { path: string }): Promise<string> => ipcRenderer.invoke('chat:planFile', t),
+
   /** Shift+Tab until the footer shows `mode`. `screen` when the mode line is unreadable or the cycle never reaches it. */
   chatMode: (t: ChatTarget & { pane: string; mode: ChatMode }): Promise<ChatKeysResult> =>
     ipcRenderer.invoke('chat:mode', t),
 
   /**
-   * Type a slash command: /compact [instructions], /clear, /context, /usage,
-   * /effort <level>, or /<name> of a skill or command chatCommands lists for `cwd`.
-   * Refused (`draft`, `screen`) like chatSend. /usage answers with `text`, the dialog's
-   * content (the dialog is closed again).
+   * Type any slash command (but the few the chat refuses). Refused (`draft`, `screen`) like
+   * chatSend. A read-only screen (/usage, /status, /help) answers with its `text` and is
+   * closed again; any other screen stays open and answers `live`, for chatScreen/chatDialogKeys.
    */
-  chatCommand: (t: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string }> =>
+  chatCommand: (t: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string; live?: boolean }> =>
     ipcRenderer.invoke('chat:command', t),
+
+  /** The text of the screen a command opened, or null once it is closed. */
+  chatScreen: (t: ChatTarget & { pane: string }): Promise<{ text: string; screen: ScreenModel | null } | null> => ipcRenderer.invoke('chat:screen', t),
+  /** Moves the open screen's selection to a row (screenItemKey) and presses Enter or Space. */
+  chatScreenPick: (t: ChatTarget & { pane: string; key: string; press?: 'Enter' | 'Space' }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:screenPick', t),
+  chatScreenTab: (t: ChatTarget & { pane: string; label: string }): Promise<ChatKeysResult> => ipcRenderer.invoke('chat:screenTab', t),
+
+  /** Keys (Up, Down, Left, Right, Enter, Escape, Tab, BTab, BSpace, Space, PPage, NPage, Home, End) and text into an open screen. */
+  chatDialogKeys: (t: ChatTarget & { pane: string; keys?: string[]; text?: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:dialogKeys', t),
 
   /** Skills and custom commands on the host (~/.claude and `cwd`/.claude). */
   chatCommands: (t: ChatTarget & { cwd: string }): Promise<ChatCommandInfo[]> =>
     ipcRenderer.invoke('chat:commands', t),
 
-  /** The agents of one workflow, from its journal. `dir` is the `task` event's `dir`. [] while there is no journal yet. */
-  chatJournal: (t: ChatTarget & { dir: string }): Promise<WorkflowAgent[]> =>
+  /** The agents of one workflow, from its journal, and its end state. `dir` is the `task` event's `dir`. No agents while there is no journal yet. */
+  chatJournal: (t: ChatTarget & { dir: string }): Promise<WorkflowJournal> =>
     ipcRenderer.invoke('chat:journal', t),
+
+  /** Stop one running background workflow by its name, as the TUI's task rows list it. */
+  chatStopTask: (t: ChatTarget & { pane: string; name: string }): Promise<ChatKeysResult> =>
+    ipcRenderer.invoke('chat:stopTask', t),
 
   chatAnswer: (t: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> =>
     ipcRenderer.invoke('chat:answer', t),

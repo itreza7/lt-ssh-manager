@@ -116,7 +116,7 @@ function summarize(name: string, i: Input): Summary {
         name,
         detail: str(i.file_path),
         stat: (
-          <span className="font-mono text-[11px]">
+          <span className="shrink-0 whitespace-nowrap font-mono text-[11px]">
             <span className="text-signal">+{add}</span> <span className="text-danger">−{del}</span>
           </span>
         )
@@ -127,7 +127,7 @@ function summarize(name: string, i: Input): Summary {
         glyph: '+',
         name,
         detail: str(i.file_path),
-        stat: <span className="font-mono text-[11px] text-faint">{lines(str(i.content)).length} lines</span>
+        stat: <span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-faint">{lines(str(i.content)).length} lines</span>
       }
     case 'Grep':
       return { glyph: '⌕', name, detail: [str(i.pattern), str(i.path)].filter(Boolean).join('  ·  ') }
@@ -388,32 +388,147 @@ export const AssistantBlocks = memo(AssistantBlocksImpl, (a, b) => {
   return true
 })
 
+// Text pasted into the TUI reaches the transcript wrapped in these tags.
+// The closing tag may repeat the id: </pasted_content id="42b7">.
+const PASTED = /<pasted_content(?:\s+id="[^"]*")?>\n?([\s\S]*?)\n?<\/pasted_content(?:\s+id="[^"]*")?>/g
+
+type MessagePart = { pasted: boolean; text: string }
+
+function splitPasted(text: string): MessagePart[] {
+  const parts: MessagePart[] = []
+  let at = 0
+  const plain = (s: string): void => {
+    if (s.trim()) parts.push({ pasted: false, text: s.replace(/^\n+|\s+$/g, '') })
+  }
+  for (const m of text.matchAll(PASTED)) {
+    plain(text.slice(at, m.index))
+    parts.push({ pasted: true, text: m[1] })
+    at = m.index + m[0].length
+  }
+  plain(text.slice(at))
+  return parts
+}
+
+/** A pasted block, closed to one row until clicked. */
+function PastedBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const n = lines(text).length
+  return (
+    <div className="my-1 rounded-lg bg-panel">
+      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-[12px] text-faint hover:text-muted">
+        <Caret open={open} />
+        Pasted text · {n} {n === 1 ? 'line' : 'lines'}
+      </button>
+      {open && (
+        <pre dir="auto" className="max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-mono text-[12px] leading-[18px] text-muted">
+          {text}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function MessageText({ text }: { text: string }) {
+  const parts = useMemo(() => splitPasted(text), [text])
+  return (
+    <>
+      {parts.map((p, k) =>
+        p.pasted ? (
+          <PastedBlock key={k} text={p.text} />
+        ) : (
+          <div key={k} dir="auto" className="whitespace-pre-wrap break-words">
+            {p.text}
+          </div>
+        )
+      )}
+    </>
+  )
+}
+
 export const UserMessage = memo(function UserMessage({ item }: { item: Pick<UserItem, 'text' | 'images'> }) {
   return (
-    <div className="flex justify-end">
+    <div className="my-2 flex justify-end">
       <div className="max-w-[85%] rounded-xl bg-bubble px-3 py-2 text-[14px] leading-5 text-fg">
         {item.images?.map((im, k) => (
           <img key={k} src={`data:${im.mediaType};base64,${im.data}`} className="mb-2 max-h-56 rounded-lg" />
         ))}
-        <div dir="auto" className="whitespace-pre-wrap break-words">
-          {item.text}
-        </div>
+        <MessageText text={item.text} />
       </div>
     </div>
   )
 })
 
-export function QueuedMessage({ text }: { text: string }) {
+export type PendingState = 'sending' | 'sent' | 'failed'
+
+const iconBtn = 'flex h-5 w-5 items-center justify-center rounded text-[12px] text-faint transition-colors hover:bg-line hover:text-fg'
+
+/**
+ * A message on its way: shown at once, until the transcript echoes it back. Its state sits
+ * beside the bubble, so the bubble is as tall as a sent one.
+ * `onCancel`: unset while a cancel is running. `note`: why it failed, or why it could not be cancelled.
+ */
+export function QueuedMessage({
+  text,
+  state,
+  note,
+  onCancel,
+  onRetry,
+  onDismiss
+}: {
+  text: string
+  state: PendingState
+  note?: string
+  onCancel?: () => void
+  onRetry: () => void
+  onDismiss: () => void
+}) {
+  const failed = state === 'failed'
   return (
-    <div className="flex justify-end opacity-60">
-      <div className="max-w-[85%] rounded-xl bg-bubble px-3 py-2 text-[14px] leading-5 text-fg">
-        <div dir="auto" className="whitespace-pre-wrap break-words">
-          {text}
-        </div>
-        <div className="mt-1 text-right text-[11px] text-faint">queued</div>
+    <div className="my-2 flex items-center justify-end gap-1.5">
+      {failed ? (
+        <>
+          <span title={note || 'Not sent'} className="text-[13px] text-red-400">
+            ⚠
+          </span>
+          <button title="Retry" onClick={onRetry} className={iconBtn}>
+            ↻
+          </button>
+          <button title="Dismiss" onClick={onDismiss} className={iconBtn}>
+            ✕
+          </button>
+        </>
+      ) : (
+        <>
+          {onCancel && (
+            <button title="Cancel" onClick={onCancel} className={iconBtn}>
+              ✕
+            </button>
+          )}
+          <span title={note || (state === 'sending' ? 'Sending…' : 'Waiting for Claude…')} className="flex text-faint">
+            <Spinner />
+          </span>
+        </>
+      )}
+      <div
+        className={`max-w-[85%] rounded-xl bg-bubble px-3 py-2 text-[14px] leading-5 text-fg ${failed ? 'border border-red-500/50' : 'opacity-70'}`}
+      >
+        <MessageText text={text} />
       </div>
     </div>
   )
+}
+
+/** A slash command being typed into the TUI. */
+export function RunningCommand({ command }: { command: string }) {
+  return (
+    <div className="flex items-center gap-2 font-mono text-[12px] text-faint">
+      <Spinner /> Running {command}…
+    </div>
+  )
+}
+
+export function Spinner({ className = '' }: { className?: string }) {
+  return <span className={`inline-block h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent ${className}`} />
 }
 
 /** A command's output as a collapsed monospace card: `/context`, `/usage`. */

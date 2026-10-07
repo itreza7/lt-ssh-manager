@@ -103,6 +103,11 @@ interface ExecOpts {
    */
   input?: Buffer
   /**
+   * Someone is waiting on this one (a key typed into a chat): when every channel is
+   * busy, it takes the next free one ahead of the background polls queued before it.
+   */
+  priority?: boolean
+  /**
    * Nobody is at the keyboard for this call: refuse an unknown or changed host
    * key rather than raising the verification dialog.
    *
@@ -258,7 +263,7 @@ export class SshManager extends EventEmitter {
   // Exec channels open on each pooled connection, and the commands waiting for one.
   // sshd refuses a connection's channel past MaxSessions (10 by default), so a
   // burst of polls queues here instead of failing.
-  private chanSlots = new Map<string, { open: number; cap: number; wait: (() => void)[] }>()
+  private chanSlots = new Map<string, { open: number; cap: number; wait: (() => void)[]; urgent: number }>()
   // Live transcript streams on each stream connection (see execStream).
   private streamShards = new Map<string, number>()
   private pendingHostKeys = new Map<string, PendingHostKey>()
@@ -664,7 +669,8 @@ export class SshManager extends EventEmitter {
       return await this.execOnPooled(key, opts.command, {
         deadlineMs: opts.deadlineMs,
         maxBytes: opts.maxBytes,
-        input: opts.input
+        input: opts.input,
+        priority: opts.priority
       })
     } finally {
       this.closeSftp(key)
@@ -979,12 +985,12 @@ export class SshManager extends EventEmitter {
   private async execOnPooled(
     key: string,
     command: string,
-    opts?: { deadlineMs?: number; maxBytes?: number; input?: Buffer }
+    opts?: { deadlineMs?: number; maxBytes?: number; input?: Buffer; priority?: boolean }
   ): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
     for (let attempt = 1; ; attempt++) {
       const entry = this.sftpPool.get(key)
       if (!entry) throw new Error('SFTP session is not open')
-      const slots = await this.takeSlot(key)
+      const slots = await this.takeSlot(key, opts?.priority)
       try {
         return await this.execOnce(entry.client, command, opts)
       } catch (e) {
@@ -1004,20 +1010,24 @@ export class SshManager extends EventEmitter {
   /** Live transcript streams per stream connection, under the same MaxSessions. */
   private static readonly STREAMS_PER_CONN = 8
 
-  private takeSlot(key: string): Promise<{ open: number; cap: number }> {
+  private takeSlot(key: string, priority = false): Promise<{ open: number; cap: number }> {
     let s = this.chanSlots.get(key)
-    if (!s) this.chanSlots.set(key, (s = { open: 0, cap: SshManager.CHANNEL_CAP, wait: [] }))
+    if (!s) this.chanSlots.set(key, (s = { open: 0, cap: SshManager.CHANNEL_CAP, wait: [], urgent: 0 }))
     const slots = s
     if (slots.open < slots.cap) {
       slots.open++
       return Promise.resolve(slots)
     }
-    return new Promise((resolve) =>
-      slots.wait.push(() => {
+    return new Promise((resolve) => {
+      const go = (): void => {
+        if (priority) slots.urgent--
         slots.open++
         resolve(slots)
-      })
-    )
+      }
+      // Priority waiters queue among themselves, in order, ahead of the rest.
+      if (priority) slots.wait.splice(slots.urgent++, 0, go)
+      else slots.wait.push(go)
+    })
   }
 
   private freeSlot(key: string): void {

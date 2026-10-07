@@ -1,6 +1,9 @@
 import type { ChatMode, ChatSession } from '../../../../shared/chatProtocol'
 
 /** Last path segment: the folder name that identifies the work. */
+/** Window event: the live chat list changed (a /clear moved a session), so lists re-read it now. */
+export const CHATS_CHANGED = 'ssh-manager:chats-changed'
+
 export const leaf = (p: string): string => p.split('/').filter(Boolean).pop() ?? p
 
 export function ago(ms: number): string {
@@ -62,5 +65,6 @@ export const MODE_LABEL: Record<ChatMode, string> = {
   bypassPermissions: "Don't ask",
   default: 'Ask first',
   acceptEdits: 'Auto-accept edits',
-  plan: 'Plan'
+  plan: 'Plan',
+  auto: 'Auto'
 }

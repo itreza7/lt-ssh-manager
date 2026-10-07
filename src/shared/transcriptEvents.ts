@@ -16,11 +16,13 @@ export const TOOL_RESULT_CAP = 20_000
 /** Assistant messages kept for merging block-per-record; older ones never get another block. */
 const MAX_MESSAGES = 200
 
-const MODES: ReadonlySet<string> = new Set<ChatMode>(['bypassPermissions', 'default', 'acceptEdits', 'plan'])
+const MODES: ReadonlySet<string> = new Set<ChatMode>(['bypassPermissions', 'default', 'acceptEdits', 'plan', 'auto'])
 const REQUEST_KIND: Record<string, 'question' | 'plan'> = { AskUserQuestion: 'question', ExitPlanMode: 'plan' }
 
 // Text Claude Code injects into user turns that the user never typed (the same
 // set claudeTranscript.ts skips).
+// What `! cmd` typed in the TUI is stored as (the text after the `!`, spaces kept).
+const BASH_INPUT = /^\s*<bash-input>([\s\S]*?)<\/bash-input>\s*$/
 const SYNTHETIC_USER = /^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|system-reminder|bash-input|bash-stdout|bash-stderr|task-notification)>/
 
 /** What a background Workflow or Agent call said it was, kept to merge into its tool_result. */
@@ -277,6 +279,8 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
         else if (said) out.push({ t: 'note', id: String(r.uuid ?? `${prefix}n${++anon}`), title: lastCommand ?? 'Command output', text: said.slice(0, NOTE_CAP) })
         // An interrupted turn writes no turn_duration; this marker is what ends it.
         else if (INTERRUPTED.test(b.text)) interrupted = true
+        // A `!` shell command: shown as typed, so its sent bubble finds its echo.
+        else if (BASH_INPUT.test(b.text)) texts.push('!' + BASH_INPUT.exec(b.text)![1])
         else if (!SYNTHETIC_USER.test(b.text)) texts.push(b.text)
       } else if (b?.type === 'image' && b.source?.type === 'base64' && typeof b.source.data === 'string') {
         images.push({ mediaType: String(b.source.media_type ?? 'image/png'), data: b.source.data })
@@ -289,14 +293,24 @@ export function createTranscriptMapper(prefix = ''): TranscriptMapper {
   }
 
   // A message typed while Claude is busy is stored as a queued_command attachment (checked in
-  // the 2.1.289 binary), not a user record. Anything not from the user (a task
-  // notification, say) carries another origin kind and stays out.
+  // the 2.1.289 binary), not a user record. A task notification that lands mid-turn is
+  // stored the same way (2.1.292): it ends its task, and is never shown. Anything else
+  // not from the user carries another origin kind and stays out.
   function queued(r: Loose, out: ChatEvent[]): void {
     const a = (r.attachment ?? {}) as Loose
     if (a.type !== 'queued_command') return
-    if (a.origin?.kind && a.origin.kind !== 'human') return
     const p = a.prompt
     const text = typeof p === 'string' ? p : Array.isArray(p) ? p.map((b: Loose) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).filter(Boolean).join('\n') : ''
+    if (/^\s*<task-notification>/.test(text)) {
+      notification(text, out)
+      return
+    }
+    if (a.origin?.kind && a.origin.kind !== 'human') return
+    const bash = BASH_INPUT.exec(text)
+    if (bash) {
+      out.push({ t: 'user', id: String(r.uuid ?? `${prefix}u${++anon}`), text: '!' + bash[1] })
+      return
+    }
     if (!text.trim() || SYNTHETIC_USER.test(text)) return
     out.push({ t: 'user', id: String(r.uuid ?? `${prefix}u${++anon}`), text })
   }

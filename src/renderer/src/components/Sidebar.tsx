@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import type { ChatSession } from '../../../shared/chatProtocol'
 import type { AgentHostScan, Connection, SplitDirection, TmuxSession } from '../../../shared/types'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import { isMac } from '../lib/platform'
-import { COMPOSE_ACCEL } from '../lib/xtermAttach'
-import { CHAT_DOT, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { CHAT_DOT, CHATS_CHANGED, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { MenuItem, PromptDialog } from './Modal'
 import { STATUS_DOT, STATUS_LABEL } from './SummaryView'
 
 /** One entry of the "Open" list — a view (a tab, or a split that is itself a tab). */
@@ -22,6 +22,8 @@ export interface SidebarOpenRow {
   closable: boolean
   /** Set when the view is one chat tab: its row is the chat's own, under its folder. */
   chatSessionId?: string
+  /** The ids that chat tab had before /clear or /resume moved it. */
+  chatFormerIds?: string[]
   /** Set when the view is one terminal on a tmux session: its row is the session's own. */
   tmuxSession?: string
   /** Summary and Settings: not listed, their icons at the bottom light up instead. */
@@ -51,12 +53,13 @@ interface Props {
   activeTmuxName: string | null
   onOpenChat: (chat: ChatSession) => void
   onOpenTmux: (name: string) => void
+  /** Create (and open) a tmux session; a name the user typed. */
+  onNewTmux: (name: string) => void
+  onRenameTmux: (from: string, to: string) => Promise<void>
+  onKillTmux: (name: string) => Promise<void>
   agentHosts: AgentHostScan[] | null
 
   onOpenSettings: () => void
-  onToggleComposer: () => void
-  composerEnabled: boolean
-  composerOpen: boolean
 
   fullScreen: boolean
   /** The split-screen buttons, at the right of the top row (stacked in the rail). */
@@ -65,8 +68,17 @@ interface Props {
   onCollapsedChange?: (collapsed: boolean) => void
 }
 
+/** One row of the right-click menu. */
+interface MenuEntry {
+  label: string
+  run: () => void
+  danger?: boolean
+}
+
 const COLLAPSED_KEY = 'sidebar.collapsed'
 const POLL_MS = 10000
+// How long a chat that left the list is still treated as live (see `live`).
+const MOVE_GRACE_MS = 15000
 
 function readCollapsed(): boolean {
   try {
@@ -122,11 +134,13 @@ function usePolled<T>(fetcher: () => Promise<T[]>, key: string | null): T[] {
     const timer = setInterval(() => void run(false), POLL_MS)
     const onWake = (): void => void run(true)
     window.addEventListener('focus', onWake)
+    window.addEventListener(CHATS_CHANGED, onWake)
     document.addEventListener('visibilitychange', onWake)
     return () => {
       dead = true
       clearInterval(timer)
       window.removeEventListener('focus', onWake)
+      window.removeEventListener(CHATS_CHANGED, onWake)
       document.removeEventListener('visibilitychange', onWake)
     }
   }, [key])
@@ -137,8 +151,8 @@ function usePolled<T>(fetcher: () => Promise<T[]>, key: string | null): T[] {
 interface ChatGroup {
   /** Repo path — the group's key, its header tooltip, and where its + starts a chat. */
   repo: string
-  /** `wt` is the worktree name when the chat runs in `<repo>/.claude/worktrees/<wt>`. */
-  rows: { chat: ChatSession; wt: string | null }[]
+  /** `wt` is the worktree name when the chat runs in `<repo>/.claude/worktrees/<wt>`; `label` is what the row says (chatLabels). */
+  rows: { chat: ChatSession; wt: string | null; label: string }[]
 }
 
 /**
@@ -153,28 +167,36 @@ function groupChats(chats: ChatSession[]): ChatGroup[] {
     const repo = wt ? wt[1] : chat.cwd
     let g = byRepo.get(repo)
     if (!g) byRepo.set(repo, (g = { repo, rows: [] }))
-    g.rows.push({ chat, wt: wt ? wt[2] : null })
+    g.rows.push({ chat, wt: wt ? wt[2] : null, label: '' })
   }
   const cmp = (a: string, b: string): number =>
     a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
   const groups = [...byRepo.values()].sort((a, b) => cmp(leaf(a.repo), leaf(b.repo)))
   for (const g of groups) {
-    g.rows.sort((a, b) =>
-      a.wt === b.wt
-        ? cmp(a.chat.name ?? '', b.chat.name ?? '')
-        : a.wt === null
-          ? -1
-          : b.wt === null
-            ? 1
-            : cmp(a.wt, b.wt)
-    )
+    chatLabels(g)
+    g.rows.sort((a, b) => cmp(a.label, b.label))
   }
   return groups
 }
 
-/** What a chat row says: Claude's own title when it has one, else the folder; a worktree adds " · name". */
-const chatRowText = (repo: string, chat: ChatSession, wt: string | null): string =>
-  `${chat.name || leaf(repo)}${wt ? ` · ${wt}` : ''}`
+/**
+ * What each row of a group says: its worktree; else (no worktree, or one shared with
+ * another row) its tmux session; else Claude's title, else the folder. A name still
+ * shared gets the start of the session id.
+ */
+function chatLabels(g: ChatGroup): void {
+  const count = (names: (string | null)[]): Map<string, number> => {
+    const m = new Map<string, number>()
+    for (const n of names) if (n) m.set(n, (m.get(n) ?? 0) + 1)
+    return m
+  }
+  const wts = count(g.rows.map((r) => r.wt))
+  for (const r of g.rows) {
+    r.label = r.wt && wts.get(r.wt) === 1 ? r.wt : r.chat.tmux?.session || r.chat.name || leaf(r.chat.cwd)
+  }
+  const labels = count(g.rows.map((r) => r.label))
+  for (const r of g.rows) if ((labels.get(r.label) ?? 0) > 1) r.label = `${r.label} · ${r.chat.sessionId.slice(0, 4)}`
+}
 
 /** Two letters for the server badge: first letters of its first two words, else its first two characters. */
 function initials(name: string | undefined): string {
@@ -258,11 +280,6 @@ const SettingsIcon = () => (
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </Icon>
 )
-const ComposerIcon = () => (
-  <Icon>
-    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-  </Icon>
-)
 /** Panel glyph for the collapse / expand button. */
 const PanelIcon = () => (
   <Icon>
@@ -284,7 +301,8 @@ function GroupHeader({
   open,
   onToggle,
   onAdd,
-  addTitle
+  addTitle,
+  onMenu
 }: {
   title: string
   tooltip?: string
@@ -292,9 +310,10 @@ function GroupHeader({
   onToggle: () => void
   onAdd?: () => void
   addTitle?: string
+  onMenu?: (e: ReactMouseEvent) => void
 }) {
   return (
-    <div className="flex h-7 items-center pl-[9px] pr-1 text-[13px] text-faint">
+    <div onContextMenu={onMenu} className="flex h-7 items-center pl-[9px] pr-1 text-[13px] text-faint">
       <button
         onClick={onToggle}
         title={tooltip}
@@ -339,11 +358,11 @@ export function Sidebar({
   activeTmuxName,
   onOpenChat,
   onOpenTmux,
+  onNewTmux,
+  onRenameTmux,
+  onKillTmux,
   agentHosts,
   onOpenSettings,
-  onToggleComposer,
-  composerEnabled,
-  composerOpen,
   fullScreen,
   splitControls,
   onCollapsedChange
@@ -363,6 +382,63 @@ export function Sidebar({
   const [query, setQuery] = useState('')
   const serverRef = useRef<HTMLDivElement>(null)
 
+  // The right-click menu (null entries are separators), and the name it may ask for.
+  const [menu, setMenu] = useState<{ x: number; y: number; items: (MenuEntry | null)[] } | null>(null)
+  const [ask, setAsk] = useState<{ title: string; label: string; initial: string; confirmLabel: string; run: (v: string) => void } | null>(null)
+  const openMenu = (e: ReactMouseEvent, items: (MenuEntry | null)[]): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ x: e.clientX, y: e.clientY, items })
+  }
+  useEffect(() => {
+    if (!menu) return
+    const close = (): void => setMenu(null)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
+
+  // tmux changes: both lists are read again at once (they listen for CHATS_CHANGED).
+  const tmuxAction = async (fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      window.dispatchEvent(new Event(CHATS_CHANGED))
+    }
+  }
+  const renameTmux = (name: string): void =>
+    setAsk({
+      title: 'Rename tmux session',
+      label: 'New name',
+      initial: name,
+      confirmLabel: 'Rename',
+      run: (to) => to !== name && void tmuxAction(() => onRenameTmux(name, to))
+    })
+  const killTmux = (name: string, claude: boolean): void => {
+    const what = claude ? 'The Claude running in it stops too.' : 'Running programs are terminated.'
+    if (confirm(`Kill tmux session “${name}”? ${what}`)) void tmuxAction(() => onKillTmux(name))
+  }
+  const newTmux = (): void =>
+    setAsk({ title: 'New tmux session', label: 'Session name', initial: 'main', confirmLabel: 'Create', run: (name) => {
+        onNewTmux(name)
+        // The session exists once its tab has dialed in.
+        setTimeout(() => window.dispatchEvent(new Event(CHATS_CHANGED)), 1500)
+      }
+    })
+  const copy = (text: string): void => void navigator.clipboard.writeText(text).catch(() => {})
+
   // Tab drag-to-reorder state (operates on views).
   const dragViewId = useRef<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
@@ -375,7 +451,7 @@ export function Sidebar({
   useEffect(() => onCollapsedChange?.(collapsed), [collapsed, onCollapsedChange])
 
   // ⌘B on macOS. Elsewhere Ctrl+B is tmux's prefix and has to reach the terminal,
-  // so the chord takes Shift like the app's other non-mac chords (find, composer).
+  // so the chord takes Shift like the app's other non-mac chords (find).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key.toLowerCase() !== 'b' || e.altKey) return
@@ -426,8 +502,8 @@ export function Sidebar({
     return all
       .map((g) => ({
         ...g,
-        rows: g.rows.filter(({ chat, wt }) =>
-          [chatRowText(g.repo, chat, wt), chat.cwd].some((p) => p.toLowerCase().includes(needle))
+        rows: g.rows.filter(({ chat, label }) =>
+          [label, chat.name ?? '', chat.cwd].some((p) => p.toLowerCase().includes(needle))
         )
       }))
       .filter((g) => g.rows.length > 0)
@@ -437,12 +513,22 @@ export function Sidebar({
   const settingsActive = openRows.some((r) => r.special === 'settings' && r.active)
   // A live chat's tab is already its row under the folder, and a tmux terminal its row
   // under tmux, so only the rest are listed.
-  const live = new Set(chats.map((c) => c.sessionId))
+  // A chat that was live a moment ago is moving to a new session id (/clear, /resume):
+  // its tab learns the new id a little after this list does, so it is not listed meanwhile.
+  const seenAt = useRef(new Map<string, number>())
+  const now = Date.now()
+  for (const c of chats) seenAt.current.set(c.sessionId, now)
+  const live = new Set([...seenAt.current].filter(([, at]) => now - at < MOVE_GRACE_MS).map(([id]) => id))
   const liveTmux = new Set(tmux.map((s) => s.name))
+  // Chats whose open tab has news you haven't seen.
+  const idsOf = (r: SidebarOpenRow): string[] => (r.chatSessionId ? [r.chatSessionId, ...(r.chatFormerIds ?? [])] : [])
+  const unread = new Set(openRows.filter((r) => r.waiting.length > 0).flatMap(idsOf))
+  // The open tab's row may still carry an id it has moved away from.
+  const activeIds = new Set(openRows.filter((r) => r.active).flatMap(idsOf))
   const shownOpenRows = openRows.filter(
     (r) =>
       !r.special &&
-      !(r.chatSessionId && live.has(r.chatSessionId)) &&
+      !idsOf(r).some((id) => live.has(id)) &&
       !(r.tmuxSession && liveTmux.has(r.tmuxSession)) &&
       hit(r.label)
   )
@@ -487,15 +573,6 @@ export function Sidebar({
         </button>
         <div className="mt-2 [&_div]:flex-col [&_div]:ml-0 [&_div]:border-l-0 [&_div]:pl-0">{splitControls}</div>
         <div className="flex-1" />
-        <button
-          onClick={onToggleComposer}
-          disabled={!composerEnabled}
-          title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
-          aria-label="Toggle prompt composer"
-          className={`${iconBtn(composerOpen)} mb-1`}
-        >
-          <ComposerIcon />
-        </button>
         <button onClick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings" className={`${iconBtn()} mb-2`}>
           <SettingsIcon />
         </button>
@@ -568,6 +645,12 @@ export function Sidebar({
                   key={row.id}
                   draggable
                   onClick={() => onSelectView(row.id)}
+                  onContextMenu={(e) =>
+                    openMenu(e, [
+                      { label: 'Show', run: () => onSelectView(row.id) },
+                      row.closable ? { label: row.split ? 'Close split' : 'Close tab', run: () => onCloseView(row.id) } : null
+                    ])
+                  }
                   onDragStart={(e) => {
                     dragViewId.current = row.id
                     e.dataTransfer.effectAllowed = 'move'
@@ -655,25 +738,49 @@ export function Sidebar({
                 onToggle={() => toggleGroup(g.repo)}
                 onAdd={() => onNewChatIn(g.repo)}
                 addTitle={`New chat in ${leaf(g.repo)}`}
+                onMenu={(e) =>
+                  openMenu(e, [
+                    { label: 'New chat here', run: () => onNewChatIn(g.repo) },
+                    { label: open ? 'Collapse' : 'Expand', run: () => toggleGroup(g.repo) },
+                    null,
+                    { label: 'Copy path', run: () => copy(g.repo) }
+                  ])
+                }
               />
               {open &&
-                g.rows.map(({ chat, wt }) => {
+                g.rows.map(({ chat, label }) => {
                   const st = chatStatusOf(chat)
                   return (
                     <button
                       key={chat.sessionId}
                       onClick={() => onOpenChat(chat)}
-                      title={`${chat.cwd}\n${statusLabel(st, chat.waitingFor)}`}
+                      onContextMenu={(e) => {
+                        const t = chat.tmux?.session
+                        openMenu(e, [
+                          { label: 'Open chat', run: () => onOpenChat(chat) },
+                          t ? { label: 'Open terminal', run: () => onOpenTmux(t) } : null,
+                          { label: `New chat in ${leaf(chat.cwd)}`, run: () => onNewChatIn(chat.cwd) },
+                          null,
+                          t ? { label: 'Rename tmux session…', run: () => renameTmux(t) } : null,
+                          { label: 'Copy folder path', run: () => copy(chat.cwd) },
+                          { label: 'Copy session id', run: () => copy(chat.sessionId) },
+                          ...(t ? [null, { label: 'Kill tmux session…', danger: true, run: () => killTmux(t, true) }] : [])
+                        ])
+                      }}
+                      title={`${chat.name ? `${chat.name}\n` : ''}${chat.cwd}\n${statusLabel(st, chat.waitingFor)}${
+                        chat.drivable ? '' : chat.tmux ? '\nRead only: not a TUI' : '\nRead only: not in tmux'
+                      }`}
                       className={rowCls(
-                        chat.sessionId === activeChatSessionId || (!!chat.tmux && chat.tmux.session === activeTmuxName)
+                        chat.sessionId === activeChatSessionId || activeIds.has(chat.sessionId) || (!!chat.tmux && chat.tmux.session === activeTmuxName)
                       )}
                     >
                       <Slot>
                         <ChatDot status={st} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate" dir="auto">
-                        {chatRowText(g.repo, chat, wt)}
+                        {label}
                       </span>
+                      {unread.has(chat.sessionId) && <span className="h-2 w-2 shrink-0 rounded-full bg-amber" title="New since you last looked" />}
                     </button>
                   )
                 })}
@@ -682,12 +789,20 @@ export function Sidebar({
         })}
 
         {/* tmux — this server's sessions, with the agent status the Summary shows */}
-        {(shownTmux.length > 0 || (!searching && activeConnection && tmux.length === 0)) && (
+        {(shownTmux.length > 0 || (!searching && activeConnection)) && (
           <div className="mt-[7px]">
             <GroupHeader
               title="tmux"
               open={sections.tmux || searching}
               onToggle={() => toggleSection('tmux')}
+              onAdd={newTmux}
+              addTitle="New tmux session"
+              onMenu={(e) =>
+                openMenu(e, [
+                  { label: 'New tmux session…', run: newTmux },
+                  { label: sections.tmux ? 'Collapse' : 'Expand', run: () => toggleSection('tmux') }
+                ])
+              }
             />
             {(sections.tmux || searching) && (
               <>
@@ -698,7 +813,23 @@ export function Sidebar({
                     <button
                       key={s.name}
                       onClick={() => onOpenTmux(s.name)}
-                      title={status ? `${s.name} · ${STATUS_LABEL[status]}` : s.name}
+                      onContextMenu={(e) =>
+                        openMenu(e, [
+                          { label: 'Open', run: () => onOpenTmux(s.name) },
+                          { label: 'Rename…', run: () => renameTmux(s.name) },
+                          { label: 'Copy name', run: () => copy(s.name) },
+                          null,
+                          { label: 'Kill session…', danger: true, run: () => killTmux(s.name, false) }
+                        ])
+                      }
+                      title={[
+                        s.name,
+                        `${s.windows} window${s.windows === 1 ? '' : 's'}`,
+                        s.attached ? 'attached' : '',
+                        status ? STATUS_LABEL[status] : ''
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
                       className={rowCls(s.name === activeTmuxName)}
                     >
                       <Slot>
@@ -718,7 +849,41 @@ export function Sidebar({
         {nothingFound && <p className="mt-3 px-[9px] text-[13px] text-faint">No matches.</p>}
       </div>
 
-      {/* bottom — the server, like Claude's account row; settings and the composer toggle on the right */}
+      {menu && (
+        <div
+          className="panel fixed z-40 min-w-44 overflow-hidden py-1 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.8)]"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 220),
+            top: Math.min(menu.y, window.innerHeight - 16 - menu.items.length * 32)
+          }}
+        >
+          {menu.items.map((it, k) =>
+            it ? (
+              <MenuItem key={k} danger={it.danger} onClick={it.run}>
+                {it.label}
+              </MenuItem>
+            ) : (
+              // A separator, unless it would lead, trail or double up.
+              k > 0 && k < menu.items.length - 1 && menu.items[k - 1] && <div key={k} className="my-1 border-t border-line-soft" />
+            )
+          )}
+        </div>
+      )}
+      {ask && (
+        <PromptDialog
+          title={ask.title}
+          label={ask.label}
+          initial={ask.initial}
+          confirmLabel={ask.confirmLabel}
+          onCancel={() => setAsk(null)}
+          onConfirm={(v) => {
+            setAsk(null)
+            ask.run(v)
+          }}
+        />
+      )}
+
+      {/* bottom — the server, like Claude's account row; settings on the right */}
       <div ref={serverRef} className="relative flex h-11 shrink-0 items-center gap-1 border-t border-line-soft px-1.5">
         <button
           onClick={() => setServerOpen((o) => !o)}
@@ -741,15 +906,6 @@ export function Sidebar({
         </button>
         <button onClick={onOpenSummary} title="Summary" aria-label="Summary" className={iconBtn(summaryActive)}>
           <SummaryIcon />
-        </button>
-        <button
-          onClick={onToggleComposer}
-          disabled={!composerEnabled}
-          title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
-          aria-label="Toggle prompt composer"
-          className={iconBtn(composerOpen)}
-        >
-          <ComposerIcon />
         </button>
         <button onClick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings" className={iconBtn(settingsActive)}>
           <SettingsIcon />

@@ -261,6 +261,10 @@ html.mac body::before {
 .md-body > :first-child {
   margin-top: 0;
 }
+/* The chat list spaces its rows; a trailing margin would make some gaps wider than others. */
+.md-body > :last-child {
+  margin-bottom: 0;
+}
 .md-body h1,
 .md-body h2,
 .md-body h3,

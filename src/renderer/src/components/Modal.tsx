@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 interface Props {
   title: string
@@ -52,6 +52,81 @@ export function Button({
     <button
       {...props}
       className={`rounded-lg px-3.5 py-1.5 text-sm transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${styles} ${props.className ?? ''}`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** Asks for one line of text: a name, a path. Enter or the button confirms a non-blank value. */
+export function PromptDialog({
+  title,
+  label,
+  initial,
+  confirmLabel,
+  onCancel,
+  onConfirm
+}: {
+  title: string
+  label: string
+  initial: string
+  confirmLabel: string
+  onCancel: () => void
+  onConfirm: (value: string) => void
+}) {
+  const [value, setValue] = useState(initial)
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+    ref.current?.select()
+  }, [])
+  const submit = (): void => {
+    const v = value.trim()
+    if (v) onConfirm(v)
+  }
+  return (
+    <Modal
+      title={title}
+      onClose={onCancel}
+      footer={
+        <>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button variant="primary" onClick={submit}>
+            {confirmLabel}
+          </Button>
+        </>
+      }
+    >
+      <label className="eyebrow mb-2 block">{label}</label>
+      <input
+        ref={ref}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit()
+        }}
+        className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent/60"
+      />
+    </Modal>
+  )
+}
+
+/** One row of a right-click menu. */
+export function MenuItem({
+  children,
+  onClick,
+  danger
+}: {
+  children: ReactNode
+  onClick: () => void
+  danger?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`block w-full px-3.5 py-1.5 text-left text-sm transition-colors hover:bg-elevated ${
+        danger ? 'text-danger hover:bg-danger/15' : 'text-fg/85'
+      }`}
     >
       {children}
     </button>

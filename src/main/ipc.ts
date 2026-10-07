@@ -13,6 +13,7 @@ import {
 } from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdir, rm, stat, writeFile, readFile, readdir, rename, chmod } from 'node:fs/promises'
 import { existsSync, type Dirent } from 'node:fs'
 import { randomBytes } from 'node:crypto'
@@ -43,7 +44,6 @@ import type {
 } from '../shared/types'
 import { connectionStore } from './store/connections'
 import { draftStore } from './store/drafts'
-import { promptHistoryStore } from './store/promptHistory'
 import { secrets } from './store/secrets'
 import { settingsStore } from './store/settings'
 import { tunnelsStore } from './store/tunnels'
@@ -88,7 +88,8 @@ import type {
   ChatStreamData,
   ChatStreamEnd,
   ChatTarget,
-  WorkflowAgent
+  WorkflowAgent,
+  WorkflowJournal
 } from '../shared/chatProtocol'
 import {
   CHAT_LIST_SCRIPT,
@@ -107,11 +108,22 @@ import {
   MODE_FOOTER,
   MODE_MAX_PRESSES,
   inputHasDraft,
+  inputRows,
+  inputSuggestion,
   parseDialogText,
   parseFooter,
   parsePrompt,
-  promptHasOption
+  parseScreen,
+  promptHasOption,
+  queuedRows,
+  screenItemKey,
+  stripSgr,
+  PLAN_FILE_RE,
+  footerTasks,
+  taskRowIs,
+  type ScreenModel
 } from '../shared/tuiKeys'
+import { DENIED_COMMANDS, SCREEN_COMMANDS } from '../shared/slashCommands'
 import { claudeResumeSessionName, claudeScript, claudeSessionName } from '../shared/claude'
 import type { WorktreeInspect, WorktreeStart } from '../shared/worktrees'
 import {
@@ -374,13 +386,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('secrets:available', () => secrets.available())
   ipcMain.handle('secrets:has', (_e, id: string) => secrets.get(id) !== null)
 
-  // ---- prompt composer drafts (local autosave — survives disconnects, restarts, crashes) ----
+  // ---- chat composer drafts (local autosave — survives disconnects, restarts, crashes) ----
   ipcMain.handle('drafts:all', () => draftStore.all())
   ipcMain.handle('drafts:set', (_e, key: string, value: string) => draftStore.set(key, value))
-
-  // ---- composer prompt history (persisted, never cleared, capped at 1000) ----
-  ipcMain.handle('promptHistory:all', () => promptHistoryStore.all())
-  ipcMain.handle('promptHistory:add', (_e, text: string) => promptHistoryStore.add(text))
 
   // ---- settings (persisted to userData/settings.json) ----
   ipcMain.handle('settings:get', () => settingsStore.getAll())
@@ -1860,6 +1868,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // into the tmux pane the Claude is in. See shared/chatProtocol.ts, shared/tuiKeys.ts
   // and shared/claudeSessions.ts.
 
+  // Set while a chatKeys job runs: its commands are someone's typing, ahead of the polls.
+  const chatKeysScope = new AsyncLocalStorage<boolean>()
   const chatExec = (
     t: ChatTarget,
     script: string,
@@ -1873,20 +1883,45 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       timeoutMs: 15000,
       deadlineMs: opts?.deadlineMs ?? 30000,
       maxBytes: opts?.maxBytes ?? 1_000_000,
-      input: opts?.input
+      input: opts?.input,
+      priority: chatKeysScope.getStore() === true
     })
   }
 
   const chatWait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+  const UNQUEUE_SETTLE_MS = 400
+  // Footer task rows: ↓ presses to look through them, and the wait after each key.
+  const STOP_TASK_MAX_PRESSES = 12
+  const STOP_TASK_SETTLE_MS = 500
+  // A plan is a page or two; this is far past any real one.
+  const PLAN_FILE_CAP = 512 * 1024
+  const PASTED_ROW_RE = /^\[Pasted text #\d+ \+\d+ lines\]$/
 
   /** How far back a first open of a transcript looks: small, so the chat paints fast. */
   const CHAT_TAIL_MAX = 512 * 1024
   /** Most one chat:older read pulls, as the user scrolls up into earlier history. */
   const CHAT_OLDER_MAX = 1024 * 1024
 
-  const chatSessionsOf = async (t: ChatTarget): Promise<ChatSession[]> => {
-    const res = await chatExec(t, CHAT_LIST_SCRIPT, { maxBytes: 8 * 1024 * 1024 })
-    return parseChatSessions(res.stdout.toString('utf-8'))
+  // Every open chat asks for its status, and each ask lists every Claude on the host (a
+  // few seconds of SSH). One run serves them all: the one in flight, or one just done.
+  const CHAT_LIST_FRESH_MS = 1500
+  const chatListRuns = new Map<string, { at: number; run: Promise<ChatSession[]> }>()
+  const chatSessionsOf = (t: ChatTarget): Promise<ChatSession[]> => {
+    const last = chatListRuns.get(t.connectionId)
+    if (last && (last.at === 0 || Date.now() - last.at < CHAT_LIST_FRESH_MS)) return last.run
+    const entry = { at: 0, run: Promise.resolve<ChatSession[]>([]) }
+    entry.run = chatExec(t, CHAT_LIST_SCRIPT, { maxBytes: 8 * 1024 * 1024 }).then(
+      (res) => {
+        entry.at = Date.now()
+        return parseChatSessions(res.stdout.toString('utf-8'))
+      },
+      (err) => {
+        if (chatListRuns.get(t.connectionId) === entry) chatListRuns.delete(t.connectionId)
+        throw err
+      }
+    )
+    chatListRuns.set(t.connectionId, entry)
+    return entry.run
   }
 
   /** Every live Claude on the host, newest first. */
@@ -2090,7 +2125,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       super(result.message ?? result.reason)
     }
   }
-  const chatFail = (reason: 'draft' | 'screen' | 'no-pane' | 'error', message?: string): ChatKeysError =>
+  const chatFail = (reason: Extract<ChatKeysResult, { ok: false }>['reason'], message?: string): ChatKeysError =>
     new ChatKeysError({ ok: false, reason, ...(message ? { message } : {}) })
 
   const chatPaneOf = (v: unknown): string => {
@@ -2105,7 +2140,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     const key = `${t.connectionId}\0${pane}`
     const go = async (): Promise<ChatKeysResult> => {
       try {
-        await run()
+        await chatKeysScope.run(true, run)
         return { ok: true }
       } catch (err) {
         if (err instanceof ChatKeysError) return err.result
@@ -2146,8 +2181,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (isDialogOpen(await chatScreen(t, pane))) throw chatFail('screen')
   }
 
-  const chatRefuseDraft = async (t: ChatTarget, pane: string): Promise<void> => {
-    if (inputHasDraft(await chatScreen(t, pane, true))) throw chatFail('draft')
+  /** chatRefuseDialog (or chatRefuseAnyDialog), and unsent text in the input, from one capture: one round trip. */
+  const chatRefuseBusy = async (t: ChatTarget, pane: string, anyDialog = false): Promise<void> => {
+    const raw = await chatScreen(t, pane, true)
+    const screen = stripSgr(raw)
+    if ([MARK.question, MARK.plan, MARK.permission, MARK.review].some((m) => screen.includes(m))) throw chatFail('screen')
+    if (anyDialog && isDialogOpen(screen)) throw chatFail('screen')
+    if (inputHasDraft(raw)) throw chatFail('draft')
   }
 
   /** Literal characters (a digit, or the text of a command) typed into the pane. */
@@ -2174,13 +2214,71 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return chatTmux(t, script, Buffer.from(text, 'utf-8'))
   }
 
-  ipcMain.handle('chat:send', (_e, args: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> => {
+  // Sends called off while they wait their turn in chatKeys: their sendId, until they run.
+  const cancelledSends = new Set<string>()
+  const SEND_CANCEL_TTL_MS = 60_000
+
+  ipcMain.handle('chat:send', (_e, args: ChatTarget & { pane: string; text: string; sendId?: string }): Promise<ChatKeysResult> => {
     const pane = chatPaneOf(args.pane)
+    const cancelled = (): boolean => typeof args.sendId === 'string' && cancelledSends.delete(args.sendId)
     return chatKeys(args, pane, async () => {
       if (typeof args.text !== 'string') throw chatFail('error', 'Nothing to send')
-      await chatRefuseDialog(args, pane)
-      await chatRefuseDraft(args, pane)
+      if (cancelled()) throw chatFail('cancelled')
+      await chatRefuseBusy(args, pane)
+      if (cancelled()) throw chatFail('cancelled')
       await chatPaste(args, pane, args.text, true, true)
+    })
+  })
+
+  /** Call off a chat:send that has not been typed yet. Its result then says `cancelled`. */
+  ipcMain.handle('chat:cancelSend', (_e, args: { sendId: string }): void => {
+    if (typeof args.sendId !== 'string') return
+    cancelledSends.add(args.sendId)
+    setTimeout(() => cancelledSends.delete(args.sendId), SEND_CANCEL_TTL_MS)
+  })
+
+  /**
+   * Take one message back out of Claude's queue (typed while a turn runs). ↑ pulls every
+   * queued message into the input, one or more rows each; the message's rows are deleted
+   * from the bottom up (Ctrl+U a row, Backspace the break before it), and Enter queues
+   * the rest again.
+   */
+  ipcMain.handle('chat:unqueue', (_e, args: ChatTarget & { pane: string; text: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    return chatKeys(args, pane, async () => {
+      if (typeof args.text !== 'string' || !args.text.trim()) throw chatFail('error', 'Nothing to cancel')
+      await chatRefuseBusy(args, pane)
+      // Checked and pressed in one script: once the queue has gone in, ↑ recalls history instead.
+      const pulled = await chatTmux(
+        args,
+        `if tmux capture-pane -p -t ${pane} | grep -qF ${shQuote(MARK.queued)}; then tmux send-keys -t ${pane} Up && echo pulled; fi`
+      )
+      if (!pulled.includes('pulled')) throw chatFail('gone')
+      await chatWait(UNQUEUE_SETTLE_MS)
+      const rows = inputRows(await chatScreen(args, pane))
+      const at = rows && queuedRows(rows, args.text)
+      if (!rows || !at) {
+        // Queue it all again, as it was.
+        await chatNamed(args, pane, KEY.enter)
+        throw chatFail('error', "Couldn't find it in Claude's queue")
+      }
+      const keys: string[] = []
+      for (let r = rows.length - 1; r > at.end; r--) keys.push('Up')
+      keys.push('C-e')
+      for (let r = at.end; r >= at.start; r--) {
+        // A "[Pasted text …]" row goes with one Backspace.
+        keys.push(PASTED_ROW_RE.test(rows[r].trim()) ? 'BSpace' : 'C-u')
+        if (r > at.start || at.start > 0) keys.push('BSpace')
+      }
+      // The first message: the break after it instead.
+      if (at.start === 0 && at.end < rows.length - 1) keys.push('DC')
+      await chatTmux(args, keys.map((k) => `tmux send-keys -t ${pane} ${k}`).join(`${SEP}sleep 0.05${SEP}`))
+      await chatWait(UNQUEUE_SETTLE_MS)
+      const left = rows.filter((_, r) => r < at.start || r > at.end)
+      const now = inputRows(await chatScreen(args, pane)) ?? []
+      const squash = (r: string[]): string => r.join(' ').replace(/\s+/g, ' ').trim()
+      if (squash(now) !== squash(left)) throw chatFail('error', 'Taking it back went wrong; check the input in the terminal')
+      if (squash(left)) await chatNamed(args, pane, KEY.enter)
     })
   })
 
@@ -2197,8 +2295,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if (typeof args.model !== 'string' || !/^[A-Za-z0-9._\-\[\]]+$/.test(args.model)) {
         throw chatFail('error', 'Invalid model')
       }
-      await chatRefuseDialog(args, pane)
-      await chatRefuseDraft(args, pane)
+      await chatRefuseBusy(args, pane)
       await chatLiteral(args, pane, `/model ${args.model}`)
       await chatNamed(args, pane, KEY.enter)
       await chatWait(1000)
@@ -2210,8 +2307,61 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   /** The dialog on screen and the footer under the input box, from one capture. */
   ipcMain.handle('chat:prompt', async (_e, args: ChatTarget & { pane: string }): Promise<ChatScreenInfo> => {
     const pane = chatPaneOf(args.pane)
-    const screen = await chatScreen(args, pane)
-    return { prompt: parsePrompt(screen), footer: parseFooter(screen) }
+    const raw = await chatScreen(args, pane, true)
+    const screen = stripSgr(raw)
+    return { prompt: parsePrompt(screen), footer: parseFooter(screen), suggestion: inputSuggestion(raw) }
+  })
+
+  /**
+   * Stop one background workflow by name, the way the TUI does it: ↓ from the empty
+   * input selects the task rows under the footer, ↓ walks them, x stops the selected
+   * one ("x to clear" on it then), Esc goes back to the input.
+   */
+  ipcMain.handle('chat:stopTask', (_e, args: ChatTarget & { pane: string; name: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    const name = args.name
+    return chatKeys(args, pane, async () => {
+      if (typeof name !== 'string' || !name.trim() || name.length > 300) throw chatFail('error', 'Invalid task name')
+      await chatRefuseBusy(args, pane, true)
+      let tasks: ReturnType<typeof footerTasks> = null
+      let found = false
+      for (let i = 0; i < STOP_TASK_MAX_PRESSES && !found; i++) {
+        await chatNamed(args, pane, 'Down')
+        await chatWait(STOP_TASK_SETTLE_MS)
+        tasks = footerTasks(await chatScreen(args, pane))
+        const sel = tasks?.rows.find((r) => r.selected)
+        found = !!sel && taskRowIs(sel.label, name)
+        // Past the last row the selection stays put: no need to keep pressing.
+        if (tasks && !found && tasks.rows[tasks.rows.length - 1]?.selected) break
+      }
+      if (!found || !tasks) {
+        await chatNamed(args, pane, KEY.escape)
+        throw chatFail('error', 'Claude does not list this workflow as running.')
+      }
+      if (!tasks.selectedDone) {
+        await chatLiteral(args, pane, 'x')
+        await chatWait(STOP_TASK_SETTLE_MS * 2)
+        const after = footerTasks(await chatScreen(args, pane))
+        const sel = after?.rows.find((r) => r.selected)
+        if (!after || !sel || !taskRowIs(sel.label, name) || !after.selectedDone) {
+          await chatNamed(args, pane, KEY.escape)
+          throw chatFail('error', 'Could not confirm the workflow stopped. Check it in the terminal.')
+        }
+      }
+      await chatNamed(args, pane, KEY.escape)
+    })
+  })
+
+  /** The plan file a plan dialog names (TuiPrompt.planFile), as text. */
+  ipcMain.handle('chat:planFile', async (_e, args: ChatTarget & { path: string }): Promise<string> => {
+    const path = args.path
+    const m = typeof path === 'string' ? PLAN_FILE_RE.exec(path) : null
+    if (!m || m[1] !== path || path.includes('..')) throw new Error('Invalid plan file')
+    // `~/` is left to the shell; the rest is quoted.
+    const target = path.startsWith('~/') ? `"$HOME"/${shQuote(path.slice(2))}` : shQuote(path)
+    const res = await chatExec(args, `head -c ${PLAN_FILE_CAP} ${target}`, { maxBytes: PLAN_FILE_CAP + 1024 })
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'Could not read the plan')
+    return res.stdout.toString('utf-8')
   })
 
   /** Shift+Tab until the footer's mode line names `mode`. */
@@ -2221,6 +2371,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       if (typeof args.mode !== 'string' || !Object.prototype.hasOwnProperty.call(MODE_FOOTER, args.mode)) {
         throw chatFail('error', 'Invalid mode')
       }
+      const notOffered =
+        args.mode === 'bypassPermissions'
+          ? 'This Claude was not started with bypass permissions allowed.'
+          : 'This Claude does not offer that mode.'
       // Shift+Tab inside a dialog moves its selection; only press it on the plain screen.
       await chatRefuseAnyDialog(args, pane)
       let start: string | undefined
@@ -2229,9 +2383,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         if (footer?.mode === args.mode) return
         if (presses === 0) start = footer?.mode
         // Back at the first mode after a full cycle: this Claude does not offer that one.
-        else if (footer?.mode === start) throw chatFail('error', 'This Claude does not offer that mode')
-        // No mode line to read, or the cycle has not reached it (this Claude may not allow that mode).
-        if (!footer?.mode || presses >= MODE_MAX_PRESSES) throw chatFail('screen')
+        else if (footer?.mode === start) throw chatFail('error', notOffered)
+        if (!footer?.mode) throw chatFail('error', 'Could not read the mode in the terminal.')
+        if (presses >= MODE_MAX_PRESSES) throw chatFail('error', notOffered)
         await chatNamed(args, pane, KEY.shiftTab)
         await chatWait(800)
       }
@@ -2243,6 +2397,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const COMMAND_NAME_RE = /^[A-Za-z0-9._:-]+$/
   // A tall dialog (/usage) is read a screen at a time: this many Down presses, at most this many times.
   const DIALOG_SCROLL_LINES = 15
+  // After a command's Enter: long enough for its screen to open, if it has one.
+  const COMMAND_SETTLE_MS = 1500
   const DIALOG_SCROLLS = 8
   const COMMAND_SOURCE_CAP = 1500
 
@@ -2314,54 +2470,53 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('chat:commands', (_e, args: ChatTarget & { cwd: string }): Promise<ChatCommandInfo[]> => chatCommandsOf(args, args.cwd))
 
   /**
-   * A slash command typed into the pane. Only what the chat offers: /compact (with
-   * optional instructions), /clear, /context, /usage, /effort <level>, and a skill or
-   * command the host lists for `cwd`. /usage opens a dialog: its text is read off the
-   * screen, then it is closed with Escape, and the text comes back for the chat to show.
+   * Any slash command typed into the pane, but those in DENIED_COMMANDS. One that opens no
+   * screen is done: what it prints comes through the transcript. A read-only screen
+   * (SCREEN_COMMANDS: /usage) is read off the pane, scrolled when taller than it, closed
+   * with Escape, and its text comes back. Any other screen stays open and the answer says
+   * `live`: the chat shows it as app UI and drives it with chat:screen, chat:screenPick,
+   * chat:screenTab and chat:dialogKeys.
    */
   ipcMain.handle(
     'chat:command',
-    async (_e, args: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string }> => {
+    async (_e, args: ChatTarget & { pane: string; command: string; cwd?: string }): Promise<ChatKeysResult & { text?: string; live?: boolean }> => {
       const pane = chatPaneOf(args.pane)
       let text: string | undefined
+      let live = false
       const res = await chatKeys(args, pane, async () => {
         const command = typeof args.command === 'string' ? args.command.trim() : ''
         if (!command.startsWith('/') || command.length > 4000 || /[\0\r\n]/.test(command)) throw chatFail('error', 'Invalid command')
         const [name, ...rest] = command.slice(1).split(/\s+/)
         const tail = rest.join(' ')
-        let dialog = false
-        if (name === 'compact') {
-          // Trailing text is instructions for the summary.
-        } else if (name === 'clear' || name === 'context') {
-          if (tail) throw chatFail('error', 'Invalid command')
-        } else if (name === 'usage') {
-          if (tail) throw chatFail('error', 'Invalid command')
-          dialog = true
-        } else if (name === 'effort') {
-          if (!(EFFORT_LEVELS as readonly string[]).includes(tail)) throw chatFail('error', 'Invalid effort level')
-        } else {
-          if (!COMMAND_NAME_RE.test(name) || !(await chatCommandsOf(args, args.cwd)).some((c) => c.name === name)) {
-            throw chatFail('error', 'Unknown command')
-          }
-        }
-        await chatRefuseAnyDialog(args, pane)
-        await chatRefuseDraft(args, pane)
-        await chatLiteral(args, pane, `/${name}${tail ? ' ' + tail : ''}`)
-        await chatNamed(args, pane, KEY.enter)
-        if (!dialog) return
-        await chatWait(2500)
+        if (!COMMAND_NAME_RE.test(name)) throw chatFail('error', 'Invalid command')
+        const denied = Object.prototype.hasOwnProperty.call(DENIED_COMMANDS, name) ? DENIED_COMMANDS[name] : undefined
+        if (denied) throw chatFail('error', `/${name} is not available from the chat: ${denied}.`)
+        await chatRefuseBusy(args, pane, true)
+        // Typed and entered in one round trip; the pause lets the command menu catch up.
+        await chatTmux(
+          args,
+          `tmux send-keys -t ${pane} -l ${shQuote(`/${name}${tail ? ' ' + tail : ''}`)}${SEP}sleep 0.2${SEP}tmux send-keys -t ${pane} ${KEY.enter}`
+        )
+        const readOnly = SCREEN_COMMANDS.has(name) && !tail
+        await chatWait(readOnly ? 2500 : COMMAND_SETTLE_MS)
         let screen = await chatScreen(args, pane)
-        let body = parseDialogText(screen)
-        if (!body) {
+        if (!isDialogOpen(screen) && readOnly) {
           await chatWait(1500)
           screen = await chatScreen(args, pane)
-          body = parseDialogText(screen)
         }
-        // Escape only closes a dialog that is there: on the plain screen it would interrupt a turn.
+        if (!isDialogOpen(screen)) {
+          if (readOnly) throw chatFail('error', `The /${name} screen did not open. Try again.`)
+          return
+        }
+        if (!readOnly) {
+          live = true
+          return
+        }
+        let body = parseDialogText(screen)
         if (!body) {
-          // A slow render may still open it; leave nothing open for the next command to type into.
+          // Escape only closes a screen that is there: on the plain screen it would interrupt a turn.
           if (isDialogOpen(await chatScreen(args, pane))) await chatNamed(args, pane, KEY.escape)
-          throw chatFail('screen', 'The dialog did not open')
+          throw chatFail('error', `The /${name} screen could not be read.`)
         }
         // Taller than the pane: scroll down and read the rest.
         for (let i = 0; i < DIALOG_SCROLLS && dialogHasMore(screen); i++) {
@@ -2375,7 +2530,99 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         if (isDialogOpen(await chatScreen(args, pane))) await chatNamed(args, pane, KEY.escape)
         text = body
       })
-      return res.ok && text !== undefined ? { ...res, text } : res
+      if (!res.ok) return res
+      return { ...res, ...(text !== undefined ? { text } : {}), ...(live ? { live } : {}) }
+    }
+  )
+
+  /** The open screen's text (a command's dialog), or null once it is closed. */
+  // The open screen: its text, and its parts for a native view when they can be read.
+  ipcMain.handle('chat:screen', async (_e, args: ChatTarget & { pane: string }): Promise<{ text: string; screen: ScreenModel | null } | null> => {
+    const raw = await chatScreen(args, chatPaneOf(args.pane), true)
+    const plain = stripSgr(raw)
+    if (!isDialogOpen(plain)) return null
+    return { text: parseDialogText(plain) ?? '', screen: parseScreen(raw) }
+  })
+
+  // Moves the open screen's selection onto one row (by screenItemKey), then presses `press`.
+  // Rows that are headings are not counted, and a list scrolls as it moves, so it reads
+  // the screen again after each move instead of trusting a count.
+  const SCREEN_STEPS = 14
+  const SCREEN_STEP_MS = 120
+  ipcMain.handle(
+    'chat:screenPick',
+    (_e, args: ChatTarget & { pane: string; key: string; press?: 'Enter' | 'Space' }): Promise<ChatKeysResult> => {
+      const pane = chatPaneOf(args.pane)
+      if (typeof args.key !== 'string' || (args.press && args.press !== 'Enter' && args.press !== 'Space')) throw new Error('Invalid row')
+      return chatKeys(args, pane, async () => {
+        for (let step = 0; step < SCREEN_STEPS; step++) {
+          const raw = await chatScreen(args, pane, true)
+          if (!isDialogOpen(stripSgr(raw))) throw chatFail('screen')
+          const m = parseScreen(raw)
+          const at = m ? m.items.findIndex((i) => screenItemKey(i) === args.key) : -1
+          if (!m || at < 0) throw chatFail('error', 'That row is no longer on the screen.')
+          const sel = m.items.findIndex((i) => i.selected)
+          if (sel === at) {
+            if (args.press) await chatNamed(args, pane, args.press)
+            return
+          }
+          // Nothing selected: the search box has the focus, and Down enters the list at its top.
+          const d = sel < 0 ? at + 1 : at - sel
+          const n = step === 0 ? Math.min(Math.abs(d), 20) : 1
+          await chatNamed(args, pane, ...Array<string>(n).fill(d > 0 ? 'Down' : 'Up'))
+          await chatWait(SCREEN_STEP_MS)
+        }
+        throw chatFail('error', 'Could not reach that row.')
+      })
+    }
+  )
+
+  // Switches the open screen to another tab. /config's tabs take ←/→ only while the tab
+  // row has the focus, which its hint says ("←/→/tab to switch"); until then Up climbs there.
+  ipcMain.handle('chat:screenTab', (_e, args: ChatTarget & { pane: string; label: string }): Promise<ChatKeysResult> => {
+    const pane = chatPaneOf(args.pane)
+    if (typeof args.label !== 'string') throw new Error('Invalid tab')
+    return chatKeys(args, pane, async () => {
+      for (let step = 0; step < SCREEN_STEPS; step++) {
+        const raw = await chatScreen(args, pane, true)
+        if (!isDialogOpen(stripSgr(raw))) throw chatFail('screen')
+        const m = parseScreen(raw)
+        const tabs = m?.tabs ?? []
+        const at = tabs.findIndex((t) => t.label === args.label)
+        const now = tabs.findIndex((t) => t.active)
+        if (!m || at < 0 || now < 0) throw chatFail('error', 'That tab is no longer on the screen.')
+        if (now === at) return
+        // A tab with no rows (/status) leaves ←/→ to the tabs.
+        if (/to switch/i.test(m.hint) || (!m.items.length && m.search === null)) await chatNamed(args, pane, ...Array<string>(Math.abs(at - now)).fill(at > now ? 'Right' : 'Left'))
+        else {
+          // Up from the selected row, past the search box, to the tab row.
+          const sel = Math.max(0, m.items.findIndex((i) => i.selected))
+          await chatNamed(args, pane, ...Array<string>(Math.min(sel + 2, 20)).fill('Up'))
+        }
+        await chatWait(SCREEN_STEP_MS)
+      }
+      throw chatFail('error', 'Could not switch to that tab.')
+    })
+  })
+
+  // What the live screen card may press. Only while a screen is open: on the plain
+  // screen Escape interrupts a turn and Enter sends what is in the input.
+  const DIALOG_KEYS: ReadonlySet<string> = new Set(['Up', 'Down', 'Left', 'Right', 'Enter', 'Escape', 'Tab', 'BTab', 'BSpace', 'Space', 'PPage', 'NPage', 'Home', 'End'])
+  ipcMain.handle(
+    'chat:dialogKeys',
+    (_e, args: ChatTarget & { pane: string; keys?: string[]; text?: string }): Promise<ChatKeysResult> => {
+      const pane = chatPaneOf(args.pane)
+      return chatKeys(args, pane, async () => {
+        const keys = Array.isArray(args.keys) ? args.keys : []
+        if (keys.length > 20 || keys.some((k) => typeof k !== 'string' || !DIALOG_KEYS.has(k))) throw chatFail('error', 'Invalid key')
+        const text = typeof args.text === 'string' ? args.text : ''
+        // eslint-disable-next-line no-control-regex
+        if (text.length > 200 || /[\x00-\x1f\x7f]/.test(text)) throw chatFail('error', 'Invalid text')
+        if (!keys.length && !text) return
+        if (!isDialogOpen(await chatScreen(args, pane))) throw chatFail('screen')
+        if (text) await chatLiteral(args, pane, text)
+        if (keys.length) await chatNamed(args, pane, ...keys)
+      })
     }
   )
 
@@ -2469,7 +2716,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   }
 
   /** The agents of one workflow, from its journal.jsonl and agent-*.meta.json, read in one exec. */
-  ipcMain.handle('chat:journal', async (_e, args: ChatTarget & { dir: string }): Promise<WorkflowAgent[]> => {
+  ipcMain.handle('chat:journal', async (_e, args: ChatTarget & { dir: string }): Promise<WorkflowJournal> => {
     const dir = args.dir
     if (
       typeof dir !== 'string' ||
@@ -2484,12 +2731,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       `d=${shQuote(dir)}${SEP}case "$d" in "$HOME"/.claude/projects/*) ;; *) exit 4;; esac${SEP}` +
       `cd "$d" 2>/dev/null && [ -f journal.jsonl ] || exit 3${SEP}` +
       `cut -c1-${JOURNAL_LINE_CAP} journal.jsonl | head -c ${JOURNAL_CAP}${SEP}printf '\\n'${SEP}` +
-      `for f in agent-*.meta.json; do [ -f "$f" ] || continue; printf '\\001%s\\002' "$f"; head -c ${JOURNAL_META_CAP} "$f"; printf '\\n'; done`
+      `for f in agent-*.meta.json; do [ -f "$f" ] || continue; printf '\\001%s\\002' "$f"; head -c ${JOURNAL_META_CAP} "$f"; printf '\\n'; done${SEP}` +
+      // The run's state file, written when it ends: the only record of a stop ("killed").
+      `printf '\\003'${SEP}head -c 65536 ../../../workflows/"$(basename "$d")".json 2>/dev/null | grep -o '"status":"[a-z_]*"' | head -1`
     const res = await chatExec(args, script, { maxBytes: 1_100_000 })
-    if (res.code === 3) return []
+    if (res.code === 3) return { agents: [] }
     if (res.code === 4) throw new Error('Invalid workflow directory')
     if (res.code !== 0) throw new Error(res.stderr.trim() || 'Failed to read the workflow journal')
-    return parseJournal(res.stdout.toString('utf-8'))
+    const out = res.stdout.toString('utf-8')
+    const cut = out.lastIndexOf('\x03')
+    const status = cut < 0 ? undefined : /"status":"([a-z_]+)"/.exec(out.slice(cut))?.[1]
+    return { agents: parseJournal(cut < 0 ? out : out.slice(0, cut)), ...(status ? { status } : {}) }
   })
 
   ipcMain.handle('chat:answer', (_e, args: ChatTarget & { pane: string; answer: ChatAnswer }): Promise<ChatKeysResult> => {
@@ -2512,6 +2764,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       } else if (answer?.kind === 'tab') {
         if (!prompt?.canTab) throw chatFail('screen')
         await chatNamed(args, pane, KEY.tab)
+      } else if (answer?.kind === 'back') {
+        if (!prompt?.canBack) throw chatFail('screen')
+        await chatNamed(args, pane, KEY.left)
       } else {
         throw chatFail('error', 'Invalid answer')
       }

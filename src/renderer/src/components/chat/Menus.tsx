@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ChatMode } from '../../../../shared/chatProtocol'
+import { SLASH_COMMANDS } from '../../../../shared/slashCommands'
 
 /** A slash command Claude Code offers: a skill, a custom command, or one of the few built-ins this chat knows. */
 export interface CommandInfo {
@@ -10,19 +11,14 @@ export interface CommandInfo {
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** The built-ins the chat can run (the rest of the TUI's commands are better used in the terminal). */
-export const BUILTIN_COMMANDS: CommandInfo[] = [
-  { name: 'compact', description: 'Summarize the conversation to free context', source: 'built-in' },
-  { name: 'clear', description: 'Start a fresh session in this terminal', source: 'built-in' },
-  { name: 'context', description: 'Show what fills the context window', source: 'built-in' },
-  { name: 'usage', description: 'Show session cost and limits', source: 'built-in' },
-  { name: 'effort', description: 'Set reasoning effort: low, medium, high, xhigh, max', source: 'built-in' }
-]
+/** Claude Code's own commands (and its bundled skills), offered after "/": the chat runs them all. */
+export const BUILTIN_COMMANDS: CommandInfo[] = SLASH_COMMANDS.map((c) => ({ name: c.name, description: c.description, source: 'built-in' }))
 
 export const MODE_ITEMS: { value: ChatMode; label: string }[] = [
   { value: 'default', label: 'Manual' },
   { value: 'acceptEdits', label: 'Accept edits' },
   { value: 'plan', label: 'Plan' },
+  { value: 'auto', label: 'Auto' },
   { value: 'bypassPermissions', label: 'Bypass permissions' }
 ]
 
@@ -123,7 +119,8 @@ export function PickMenu({
   options,
   placeholder,
   disabled,
-  onPick
+  onPick,
+  openSignal
 }: {
   title: string
   value: string
@@ -132,8 +129,14 @@ export function PickMenu({
   placeholder?: string
   disabled?: boolean
   onPick: (value: string) => void
+  /** A new value opens the menu (a bare /model or /effort typed in the composer). */
+  openSignal?: number
 }) {
   const { open, setOpen, ref } = usePopover()
+  useEffect(() => {
+    if (openSignal) setOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openSignal])
   const current = options.find((o) => o.value === value)
   return (
     <div ref={ref} className="no-drag relative">
@@ -276,8 +279,8 @@ export function ActionsMenu(p: ActionsProps) {
   }
 
   const list = useMemo(() => {
-    // The built-ins have their own rows; this list is the user's skills and commands.
-    const all = (p.commands ?? []).filter((c) => c.source !== 'built-in')
+    // Every command the chat can run: Claude Code's own, then the host's skills and commands.
+    const all = p.commands ?? []
     const needle = q.trim().toLowerCase()
     return needle ? all.filter((c) => c.name.toLowerCase().includes(needle) || c.description.toLowerCase().includes(needle)) : all
   }, [p.commands, q])

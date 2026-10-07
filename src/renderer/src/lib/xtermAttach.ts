@@ -27,12 +27,7 @@ export interface TerminalAttachOptions {
    * are many panes per tab and tmux already reports window names itself.
    */
   onTitle?: (title: string) => void
-  /**
-   * The user asked for the prompt composer (see COMPOSE_ACCEL). Only the chord
-   * is owned here; the caller owns the drafting UI and what it sends.
-   */
-  onCompose?: () => void
-  /** The user asked to search this terminal (see FIND_ACCEL). As onCompose. */
+  /** The user asked to search this terminal (see FIND_ACCEL). Only the chord is owned here; the caller owns the UI. */
   onFind?: () => void
   /**
    * OS files are hovering over this terminal (`true`), or have left it / been
@@ -49,27 +44,6 @@ export interface TerminalAttachOptions {
 
 /** Longest remote-set title we'll surface — a tab is not a billboard. */
 const TITLE_MAX = 80
-
-/**
- * What a pane exposes to a header-level composer-toggle button, via `ref` —
- * the pane owns the drafting state, the button just needs a way to reach it
- * without becoming the thing that owns it.
- */
-export interface ComposerHandle {
-  toggleComposer: () => void
-  /** Whether the drafting panel is currently open — lets a header button reflect it. */
-  isOpen: boolean
-}
-
-/**
- * The chord that opens the prompt composer.
- *
- * ⌘↩ on macOS: nothing in a terminal claims it, and ⌘ chords never reach the
- * remote anyway. Elsewhere it has to be Ctrl+Shift+↩ — plain Ctrl+key belongs to
- * readline, and Ctrl+Shift is already this app's namespace for its own keys
- * (copy and paste live there).
- */
-export const COMPOSE_ACCEL = isMac ? fmtAccel('Cmd+Enter') : 'Ctrl+Shift+Enter'
 
 /**
  * The chord that uploads whatever's on the clipboard — a screenshot or a file
@@ -92,40 +66,6 @@ export const PASTE_UPLOAD_ACCEL = isMac ? fmtAccel('Cmd+Shift+V') : 'Ctrl+Shift+
  * since bare Ctrl+F is readline's forward-char.
  */
 export const FIND_ACCEL = isMac ? fmtAccel('Cmd+F') : 'Ctrl+Shift+F'
-
-const isComposeChord = (e: KeyboardEvent): boolean =>
-  isMac
-    ? e.metaKey && !e.ctrlKey && !e.altKey
-    : e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey
-
-/** DEC bracketed-paste start/end markers (CSI 200~ / CSI 201~). */
-const BRACKET_START = '\x1b[200~'
-const BRACKET_END = '\x1b[201~'
-
-/**
- * Put a composed body on the remote's input as one unit, then submit it.
- *
- * `term.paste()` only wraps in the bracketed-paste markers when the terminal's
- * own negotiated `bracketedPasteMode` happens to be on at the moment of the
- * call — which is exactly the wrong thing for a composer send: the whole point
- * is a program's *own* prompt gets to see embedded newlines as line breaks
- * rather than as N separate submitted commands, and that has nothing to do
- * with whether some intermediate shell in front of it ever asked for the mode.
- * So this wraps unconditionally and sends via `term.input()`, which — unlike
- * `term.paste()` — puts raw bytes on the wire with no conditional in the way.
- * A program that never asked for bracketed paste just sees (and ignores) the
- * marker bytes, same as it would for a real terminal-emulator paste it wasn't
- * expecting; one that did asked for exactly this.
- *
- * The submitting CR goes through `term.input()` *afterwards*, never inside the
- * bracketed region — inside it, it would be literal text and nothing would be
- * submitted at all.
- */
-export function sendComposed(term: XTerm, body: string, submit = true): void {
-  const normalized = body.replace(/\r\n|\r/g, '\n').replace(/\n/g, '\r')
-  term.input(BRACKET_START + normalized + BRACKET_END, true)
-  if (submit) term.input('\r', true)
-}
 
 /**
  * Put a remote path on the terminal's input line, with one trailing space and
@@ -278,13 +218,6 @@ export function attachTerminal(term: XTerm, el: HTMLElement, opts: TerminalAttac
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
     const k = e.key.toLowerCase()
-    // The prompt composer, claimed ahead of the Shift+Enter branch so the
-    // non-mac chord can't be mistaken for a bare Shift+Enter.
-    if (k === 'enter' && opts.onCompose && isComposeChord(e)) {
-      e.preventDefault()
-      opts.onCompose()
-      return false
-    }
     // The find bar — see FIND_ACCEL. preventDefault for the usual reason (the
     // keypress would otherwise still reach the remote), and because Chromium
     // would run its own find-in-page against the app's chrome.

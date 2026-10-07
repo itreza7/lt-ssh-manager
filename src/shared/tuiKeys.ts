@@ -13,7 +13,8 @@ export const KEY = {
   enter: 'Enter',
   escape: 'Escape',
   tab: 'Tab',
-  shiftTab: 'BTab'
+  shiftTab: 'BTab',
+  left: 'Left'
 } as const
 
 /**
@@ -49,6 +50,110 @@ export function inputHasDraft(screenWithEscapes: string): boolean {
 }
 
 /**
+ * The input box's rows (plain `capture-pane -p`), without the prompt and the two-space
+ * indent; null if there is no input box. A long line wraps into several rows.
+ */
+export function inputRows(screen: string): string[] | null {
+  const lines = screen.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].startsWith(PROMPT_CHAR)) continue
+    const rows = [lines[i].slice(PROMPT_CHAR.length)]
+    for (let j = i + 1; j < lines.length && !lines[j].startsWith('─'); j++) rows.push(lines[j])
+    return rows.map((r) => r.replace(/\u00a0/g, ' ').replace(/^ {1,2}/, '').trimEnd())
+  }
+  return null
+}
+
+const squash = (s: string): string => s.replace(/\s+/g, ' ').trim()
+const PASTED_ROW = /^\[Pasted text #\d+ \+(\d+) lines\]$/
+
+/**
+ * Where `text` sits in queued messages pulled back into the input (`inputRows`): its first
+ * and last row. A multi-line one may show as its "[Pasted text #1 +3 lines]" row. Null
+ * unless it is there exactly once.
+ */
+export function queuedRows(rows: string[], text: string): { start: number; end: number } | null {
+  const want = squash(text)
+  const lineCount = text.trim().split('\n').length
+  const hits: { start: number; end: number }[] = []
+  for (let s = 0; s < rows.length; s++) {
+    const m = PASTED_ROW.exec(rows[s].trim())
+    if (m && lineCount > 1 && Number(m[1]) === lineCount - 1) hits.push({ start: s, end: s })
+    let joined = ''
+    for (let e = s; e < rows.length; e++) {
+      joined = squash(`${joined} ${rows[e]}`)
+      if (joined === want) hits.push({ start: s, end: e })
+      if (joined.length >= want.length) break
+    }
+  }
+  return hits.length === 1 ? hits[0] : null
+}
+
+/** The dim suggested prompt in an empty input line (from `capture-pane -e -p`), or null. */
+export function inputSuggestion(screenWithEscapes: string): string | null {
+  const lines = screenWithEscapes.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const plain = lines[i].replace(/\x1b\[[0-9;]*m/g, '')
+    const at = plain.indexOf(PROMPT_CHAR)
+    if (at < 0 || plain.slice(0, at).trim() !== '') continue
+    const raw = lines[i].slice(lines[i].indexOf(PROMPT_CHAR) + PROMPT_CHAR.length).replace(/^[ \u00a0]/, '')
+    const visible = raw.replace(/\x1b\[[0-9;]*m/g, '').replace(/\u00a0/g, ' ').trim()
+    if (!visible || !/^(\x1b\[[0-9;]*m)*\x1b\[2m/.test(raw.replace(/^\x1b\[(?:39|0)m/, ''))) return null
+    // The welcome screen's hint is not a suggestion to send.
+    return /^Try "/.test(visible) ? null : visible
+  }
+  return null
+}
+
+/**
+ * The background-task rows under the footer while one is selected (↓ from an empty
+ * input): a hint line "Enter to view · x to stop" (or "x to clear" on a finished
+ * one), then one row per task, the selected one starting with ❯:
+ *
+ *     ❯ ◯ alpha-probe                   ▱▱▱▱  0/2 · 44s · ↓ 61.9k tokens
+ *       ◯ beta-probe-with-a-rather-lo…  ▱▱▱▱  0/2 · 44s · ↓ 61.9k tokens
+ *
+ * Null when no row is selected. Names longer than the column end in "…".
+ */
+export interface FooterTasks {
+  /** The selected row is stopped or done already ("x to clear"). */
+  selectedDone: boolean
+  rows: { label: string; selected: boolean }[]
+}
+const TASK_HINT_RE = /Enter to view · x to (stop|clear)/
+const TASK_ROW_RE = /^(❯| )[ \u00a0]\S[ \u00a0](.+?)(?:\s{2,}|$)/
+export function footerTasks(screen: string): FooterTasks | null {
+  const lines = screen.split('\n').map((l) => l.trimEnd())
+  let at = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (TASK_HINT_RE.test(lines[i])) {
+      at = i
+      break
+    }
+  }
+  if (at < 0) return null
+  const rows: FooterTasks['rows'] = []
+  for (const l of lines.slice(at + 1)) {
+    // A blank line can sit between the hint and the rows.
+    if (!l.trim() && !rows.length) continue
+    const m = TASK_ROW_RE.exec(l)
+    if (!m) break
+    rows.push({ label: m[2].trim(), selected: m[1] === '❯' })
+  }
+  if (!rows.some((r) => r.selected)) return null
+  return { selectedDone: TASK_HINT_RE.exec(lines[at])![1] === 'clear', rows }
+}
+
+/** A footer task row's label is this task: the same name, or its start cut with "…". */
+export function taskRowIs(label: string, name: string): boolean {
+  const n = name.trim()
+  return label.endsWith('…') ? n.startsWith(label.slice(0, -1).trimEnd()) && label.length > 1 : label === n
+}
+
+/** SGR escapes off a `capture-pane -e -p` screen: what plain `capture-pane -p` gives. */
+export const stripSgr = (screen: string): string => screen.replace(/\x1b\[[0-9;]*m/g, '')
+
+/**
  * AskUserQuestion. Options are numbered from 1; the option after the last one is
  * "Type something" (free text). Marker: MARK.question plus the question's text.
  *
@@ -71,7 +176,9 @@ export const MARK = {
   /** Claude's first start in a folder it was not told to trust. */
   trust: 'Yes, I trust this folder',
   /** `/model x` asks this when the conversation is cached; digit 1 confirms. */
-  modelConfirm: 'Switch model?'
+  modelConfirm: 'Switch model?',
+  /** The empty input while messages wait for the running turn; ↑ pulls them all back into it. */
+  queued: 'Press up to edit queued messages'
 } as const
 
 /** Interrupt a running turn (only while the status file says busy). */
@@ -81,12 +188,14 @@ export const INTERRUPT = KEY.escape
  * Permission mode: Shift+Tab cycles it, and the footer's last line names it. To
  * set a mode, press Shift+Tab until that line contains the mode's text (give up
  * after MODE_MAX_PRESSES). Which modes are in the cycle depends on how Claude
- * was started — "bypass" only when it was launched with that allowed.
+ * was started — "bypass" only when it was launched with that allowed (in 2.1.292:
+ * manual → accept edits → plan → bypass → auto).
  */
 export const MODE_FOOTER = {
   bypassPermissions: 'bypass permissions on',
   acceptEdits: 'accept edits on',
   plan: 'plan mode on',
+  auto: 'auto mode on',
   default: 'manual mode on'
 } as const
 export type TuiMode = keyof typeof MODE_FOOTER
@@ -157,7 +266,8 @@ export function parseFooter(screen: string): TuiFooter | null {
     ...(autoCompactLeft !== undefined ? { autoCompactLeft } : {})
   }
 }
-export const MODE_MAX_PRESSES = 4
+// Manual, accept edits, plan, bypass (only when allowed), auto: checked in 2.1.292.
+export const MODE_MAX_PRESSES = 5
 
 /** One numbered option of a dialog, as read off the screen. */
 export interface TuiPromptOption {
@@ -179,6 +289,14 @@ export interface TuiPrompt {
   multi: boolean
   /** Tab does something: a multi-select, or a header with several questions. */
   canTab: boolean
+  /** A header with several questions (← tabs →): ← goes back to the one before. */
+  canBack: boolean
+  /**
+   * A plan's file, from the footer ("ctrl+g to edit in Vim · ~/.claude/plans/x.md"). The
+   * screen holds only the plan's end, and its ExitPlanMode record is not in the
+   * transcript until it is answered, so the file is where the whole plan is.
+   */
+  planFile?: string
 }
 
 const OPTION_RE = /^\s*(?:❯\s*)?(\d+)\.\s+(?:\[( |✔|x)\]\s*)?(.*)$/
@@ -186,6 +304,8 @@ const SOLID_RULE_RE = /^[\s─━═]{5,}$/
 const DASH_RULE_RE = /^[\s╌╍┄┅]{3,}$/
 const FOOTER_RE = /(Esc to cancel|Enter to select|Tab to amend|ctrl\+g|ctrl-g)/i
 const FREE_TEXT_RE = /^(Type something|Tell Claude what to change)/i
+/** A plan file Claude Code names in a plan dialog's footer: ~/.claude/plans/<name>.md or its absolute form. */
+export const PLAN_FILE_RE = /((?:~|\/[\w.\/-]*?)\/\.claude\/plans\/[\w.-]+\.md)\b/
 const BODY_CAP = { plan: 150, permission: 60, question: 20, review: 20 } as const
 
 /**
@@ -266,7 +386,8 @@ export function parsePrompt(screen: string): TuiPrompt | null {
 
   const body = above.slice(-BODY_CAP[kind]).join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
   const tabHeader = above.some((l) => l.includes('←') && l.includes('→'))
-  return { kind, body, options, multi, canTab: multi || tabHeader }
+  const planFile = kind === 'plan' ? PLAN_FILE_RE.exec(footer)?.[1] : undefined
+  return { kind, body, options, multi, canTab: multi || tabHeader, canBack: tabHeader, ...(planFile ? { planFile } : {}) }
 }
 
 /** The effort levels `/effort <level>` takes silently (plain `/effort` opens a slider dialog). */
@@ -350,6 +471,212 @@ export function joinScrolled(a: string, b: string): string {
     if (x.slice(-k).join('\n') === y.slice(0, k).join('\n')) return [...x, ...y.slice(k)].join('\n')
   }
   return [...x, ...y].join('\n')
+}
+
+/** One row of an open TUI screen (/config, /mcp, /resume…), as `parseScreen` reads it. */
+export interface ScreenItem {
+  label: string
+  /** The text right of the label: a setting's value, a server's tool count. */
+  value?: string
+  /** A dim line under the row (/resume's "4 minutes ago · main"). */
+  detail?: string
+  /** A leading "[User]" style tag (/hooks). */
+  tag?: string
+  /** ✔ / ✘ / ⚠ in front of the row (/mcp). */
+  mark?: 'ok' | 'error' | 'warn'
+  /** The bold heading the row sits under. */
+  section?: string
+  /** A numbered row's digit (/model). */
+  digit?: string
+  /** Ends in ›: opens a further screen. */
+  sub?: boolean
+  selected: boolean
+}
+
+/** An open TUI screen in parts, for a native view of it. */
+export interface ScreenModel {
+  title: string
+  tabs: { label: string; active: boolean }[]
+  /** Lines above the rows: a description, or /status's "Key: value" lines. */
+  intro: string[]
+  /** The search box's placeholder, when the screen has one. */
+  search: string | null
+  items: ScreenItem[]
+  /** Rows scrolled out of view above and below ("↓ 20 more"). */
+  above: number
+  below: number
+  outro: string[]
+  /** The key hint at the bottom ("Enter to confirm · Esc to cancel"). */
+  hint: string
+}
+
+/** Identifies a row across reads: its value can change (a toggle), its place can scroll. */
+export const screenItemKey = (i: Pick<ScreenItem, 'section' | 'label' | 'tag'>): string => `${i.section ?? ''}\u0000${i.tag ?? ''}\u0000${i.label}`
+
+interface Run {
+  text: string
+  bold: boolean
+  fg: number | null
+  /** Reverse video or a background colour: the active tab. */
+  lit: boolean
+}
+
+/** One screen line with escapes, as styled runs. */
+function styleRuns(raw: string): Run[] {
+  const runs: Run[] = []
+  let bold = false
+  let fg: number | null = null
+  let inv = false
+  let bg = false
+  const parts = raw.split(/\x1b\[([0-9;]*)m/)
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      if (parts[i]) runs.push({ text: parts[i], bold, fg, lit: inv || bg })
+      continue
+    }
+    const codes = parts[i] === '' ? [0] : parts[i].split(';').map(Number)
+    for (let k = 0; k < codes.length; k++) {
+      const c = codes[k]
+      if (c === 0) [bold, fg, inv, bg] = [false, null, false, false]
+      else if (c === 1) bold = true
+      else if (c === 22) bold = false
+      else if (c === 7) inv = true
+      else if (c === 27) inv = false
+      else if (c === 39) fg = null
+      else if (c === 49) bg = false
+      else if (c === 38 && codes[k + 1] === 5) {
+        fg = codes[k + 2]
+        k += 2
+      } else if (c === 48 && codes[k + 1] === 5) {
+        bg = true
+        k += 2
+      } else if (c >= 30 && c <= 37) fg = c - 30
+      else if (c >= 40 && c <= 47) bg = true
+    }
+  }
+  return runs
+}
+
+// Claude Code's grey: hints, descriptions, counts.
+const DIM_FG = 246
+const SCREEN_HINT_RE = /(Esc to|to cancel|to close|to go back|to navigate|to confirm)/i
+const MORE_RE = /^\s*([↑↓])\s*(\d+)\s+more\b/
+const MORE_TAIL_RE = /^\s*…\s*\+(\d+)/
+const MARKS: Record<string, ScreenItem['mark']> = { '✔': 'ok', '✘': 'error', '⚠': 'warn' }
+
+/**
+ * An open screen read off a `capture-pane -e -p` capture: title, tabs, rows and hint. Null
+ * when no screen is open, or it has nothing a native view can show (then the text is).
+ */
+export function parseScreen(screenWithEscapes: string): ScreenModel | null {
+  // Links (OSC 8) wrap their text in escapes stripSgr does not take out.
+  const raws = screenWithEscapes.replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, '').split('\n')
+  const plains = raws.map((l) => stripSgr(l).trimEnd())
+  if (!isDialogOpen(plains.join('\n'))) return null
+  let start = -1
+  for (let i = plains.length - 1; i >= 0; i--) {
+    if (DIALOG_EDGE_RE.test(plains[i])) {
+      start = i + 1
+      break
+    }
+  }
+  if (start < 0) return null
+  const m: ScreenModel = { title: '', tabs: [], intro: [], search: null, items: [], above: 0, below: 0, outro: [], hint: '' }
+  let end = plains.length
+  for (let i = plains.length - 1; i >= start; i--) {
+    if (!plains[i].trim()) continue
+    if (SCREEN_HINT_RE.test(plains[i])) {
+      m.hint = plains[i].trim()
+      end = i
+      // A long hint wraps: its first half is the line above.
+      if (i - 1 >= start && plains[i - 1].trim() && !/^\s*(❯|\d+\.)/.test(plains[i - 1].trim()) && /·/.test(plains[i - 1]) && plains[i - 1].length > 100) {
+        m.hint = `${plains[i - 1].trim()} ${m.hint}`
+        end = i - 1
+      }
+    }
+    break
+  }
+  let section: string | undefined
+  for (let i = start; i < end; i++) {
+    const plain = plains[i]
+    const text = plain.trim()
+    if (!text) continue
+    const runs = styleRuns(raws[i]).filter((r) => r.text.trim())
+    const indent = plain.length - plain.trimStart().length
+    const bold = runs.length > 0 && runs[0].bold
+    const dim = runs.length > 0 && runs.every((r) => r.fg === DIM_FG)
+    if (/^[╭╰]/.test(text)) continue
+    if (/^│/.test(text)) {
+      m.search = text.replace(/^│\s*⌕?\s*/, '').replace(/\s*│$/, '').trim() || 'Search…'
+      continue
+    }
+    if (!m.title) {
+      const chunks = text.split(/\s{2,}/)
+      if (chunks.length >= 3 && runs.some((r) => r.lit)) {
+        m.title = chunks[0]
+        m.tabs = chunks.slice(1).map((label) => ({ label, active: runs.some((r) => r.lit && r.text.trim() === label) }))
+      } else m.title = text
+      continue
+    }
+    const more = MORE_RE.exec(plain)
+    if (more && /^\s*[↑↓]\s*\d+\s+more\s*$/.test(plain)) {
+      if (more[1] === '↑') m.above = Number(more[2])
+      else m.below = Number(more[2])
+      continue
+    }
+    const tail = MORE_TAIL_RE.exec(plain)
+    if (tail) {
+      m.below = Math.max(m.below, Number(tail[1]))
+      continue
+    }
+    const selected = /^\s*❯\s/.test(plain)
+    const arrow = /^\s*[↑↓]\s/.test(plain)
+    if (!selected && !arrow && indent < 5) {
+      ;(m.items.length ? m.outro : m.intro).push(text)
+      continue
+    }
+    if (!selected && dim) {
+      const last = m.items[m.items.length - 1]
+      if (last && !last.detail) last.detail = text
+      else (m.items.length ? m.outro : m.intro).push(text)
+      continue
+    }
+    if (!selected && bold) {
+      section = text.split(/\s{2,}/)[0].replace(/\s*\(.*\)$/, '')
+      continue
+    }
+    let body = text.replace(/^[❯↑↓]\s*/, '')
+    const item: ScreenItem = { label: '', selected }
+    const digit = /^(\d+)\.\s+/.exec(body)
+    if (digit) {
+      item.digit = digit[1]
+      body = body.slice(digit[0].length)
+    }
+    const mark = MARKS[body[0]]
+    if (mark) {
+      item.mark = mark
+      body = body.slice(1).trim()
+    }
+    let parts = body.split(/\s{2,}/)
+    const tag = /^\[([^\]]+)\]\s*(.*)$/.exec(parts[0])
+    if (tag && (tag[2] || parts.length > 1)) {
+      item.tag = tag[1]
+      parts = tag[2] ? [tag[2], ...parts.slice(1)] : parts.slice(1)
+    }
+    item.label = parts[0]
+    if (parts.length > 1) item.value = parts.slice(1).join(' · ')
+    for (const k of ['value', 'label'] as const) {
+      const v = item[k]
+      if (v && /\s*›$/.test(v)) {
+        item.sub = true
+        item[k] = v.replace(/\s*›$/, '')
+      }
+    }
+    if (section) item.section = section
+    m.items.push(item)
+  }
+  if (!m.title) return null
+  return m
 }
 
 /** One plan limit from the /usage text: "Current session", "22% used", "Resets 11pm (UTC)". */

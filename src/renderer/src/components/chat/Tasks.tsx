@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChatTarget, WorkflowAgent } from '../../../../shared/chatProtocol'
 import type { TaskState } from '../../lib/chatState'
+import { renderMarkdown } from '../MarkdownPreview'
+import { Button, Modal } from '../Modal'
 
 interface Props {
   /** Tasks the panel may list: the caller has dropped the hidden ones. */
@@ -12,6 +14,14 @@ interface Props {
   side?: boolean
   /** The × : the caller hides the panel until a new task starts. */
   onClose?: () => void
+  /** Stops a running workflow in the TUI. Resolves false when it could not (the caller says why). */
+  onStop?: (task: TaskState) => Promise<boolean>
+  /** The workflow's run file says it was stopped (from the TUI, or from here). */
+  onKilled?: (toolUseId: string) => void
+  /** The plan waiting for approval (markdown): a row at the top, opened in the panel itself. */
+  plan?: string
+  planOpen?: boolean
+  onPlanOpen?: (open: boolean) => void
 }
 
 // How often a running workflow's journal is read: each read is an ssh exec.
@@ -136,9 +146,27 @@ function Meta({ kind, task, now }: { kind: string; task: TaskState; now: number 
   )
 }
 
-function WorkflowRow({ task, target, active, now }: { task: TaskState; target: ChatTarget; active: boolean; now: number }) {
+function WorkflowRow({
+  task,
+  target,
+  active,
+  now,
+  onStop,
+  onKilled
+}: {
+  task: TaskState
+  target: ChatTarget
+  active: boolean
+  now: number
+  onStop?: (task: TaskState) => Promise<boolean>
+  onKilled?: (toolUseId: string) => void
+}) {
   const [agents, setAgents] = useState<WorkflowAgent[]>([])
   const running = task.state === 'running'
+  const [asking, setAsking] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const killedRef = useRef(onKilled)
+  killedRef.current = onKilled
   const [open, setOpen] = useState(running)
   // Only a workflow seen running gets the closing read: a finished one loaded from the transcript stays one line.
   const sawRunning = useRef(running)
@@ -153,9 +181,11 @@ function WorkflowRow({ task, target, active, now }: { task: TaskState; target: C
     let settled = 0
     const poll = async (): Promise<void> => {
       try {
-        const a = await window.api.chatJournal({ ...target, dir })
+        const { agents: a, status } = await window.api.chatJournal({ ...target, dir })
         if (off) return
         setAgents((prev) => (JSON.stringify(prev) === JSON.stringify(a) ? prev : a))
+        // A stop writes no notification to the transcript; the run file is the only record.
+        if (status === 'killed') killedRef.current?.(task.toolUseId)
         settled = a.length > 0 && a.every((x) => x.state === 'done') ? settled + 1 : 0
         if (settled >= 2 && t) {
           clearInterval(t)
@@ -195,10 +225,54 @@ function WorkflowRow({ task, target, active, now }: { task: TaskState; target: C
           <span dir="auto" className={`min-w-0 flex-1 truncate text-[14px] leading-5 ${running ? 'text-fg' : 'text-faint'}`}>
             {task.name}
           </span>
+          {running && onStop && (
+            <span
+              role="button"
+              title="Stop this workflow"
+              onClick={(e) => {
+                e.stopPropagation()
+                if (!stopping) setAsking(true)
+              }}
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-danger"
+            >
+              {stopping ? (
+                <Spinner />
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                </svg>
+              )}
+            </span>
+          )}
           {hasDetail && <span className="shrink-0 text-faint"><Caret open={open} /></span>}
         </div>
         <Meta kind="Workflow" task={task} now={now} />
       </button>
+      {asking && onStop && (
+        <Modal
+          title="Stop workflow"
+          onClose={() => setAsking(false)}
+          footer={
+            <>
+              <Button onClick={() => setAsking(false)}>Cancel</Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setAsking(false)
+                  setStopping(true)
+                  void onStop(task).finally(() => setStopping(false))
+                }}
+              >
+                Stop
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-fg/85">
+            Stop workflow “{task.name}”? Its agents stop too.
+          </p>
+        </Modal>
+      )}
       {open && (
         <div className="mt-2 space-y-1">
           {task.summary && (
@@ -244,7 +318,7 @@ function AgentTaskRow({ task, now }: { task: TaskState; now: number }) {
  * A running Workflow shows its phases and agents live, read from its journal. A finished task is one
  * card; the reducer hides it once the next user message arrives.
  */
-export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
+export function TasksPanel({ tasks, target, active, side, onClose, onStop, onKilled, plan, planOpen, onPlanOpen }: Props) {
   const [finishedOpen, setFinishedOpen] = useState(true)
   const [wider, setWider] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -260,11 +334,12 @@ export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
     return () => clearInterval(t)
   }, [ticking])
 
-  if (!tasks.length) return null
+  if (!tasks.length && !plan) return null
+  const showingPlan = !!plan && !!planOpen
 
   const render = (t: TaskState) =>
     t.kind === 'workflow' ? (
-      <WorkflowRow key={t.toolUseId} task={t} target={target} active={active} now={now} />
+      <WorkflowRow key={t.toolUseId} task={t} target={target} active={active} now={now} onStop={onStop} onKilled={onKilled} />
     ) : (
       <AgentTaskRow key={t.toolUseId} task={t} now={now} />
     )
@@ -272,7 +347,16 @@ export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
   const body = (
     <>
       <div className="flex h-10 shrink-0 items-center gap-1 pl-4 pr-2">
-        <span className="min-w-0 flex-1 truncate text-[14px] text-muted">Background tasks</span>
+        {showingPlan ? (
+          <button onClick={() => onPlanOpen?.(false)} title="Back to the list" className="flex min-w-0 flex-1 items-center gap-1.5 text-[14px] text-muted transition-colors hover:text-title">
+            <Icon>
+              <path d="m15 18-6-6 6-6" />
+            </Icon>
+            <span className="truncate">Plan</span>
+          </button>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[14px] text-muted">{tasks.length ? 'Background tasks' : 'Plan'}</span>
+        )}
         {side && (
           <button onClick={() => setWider((w) => !w)} title={wider ? 'Narrower' : 'Wider'} className={iconBtn}>
             {wider ? (
@@ -294,10 +378,25 @@ export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
           </button>
         )}
       </div>
+      {showingPlan ? (
+        <div dir="auto" className="md-body min-h-0 flex-1 overflow-y-auto px-4 pb-4" dangerouslySetInnerHTML={{ __html: renderMarkdown(plan) }} />
+      ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2.5">
+        {plan && (
+          <>
+            <div className="px-2 pb-1.5 pt-1 text-[13px] text-faint">Waiting for you</div>
+            <button onClick={() => onPlanOpen?.(true)} className={`${card} flex w-full items-center gap-2 text-left transition-colors hover:bg-white/[0.06]`}>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[14px] leading-5 text-fg">Plan</span>
+                <span className="block text-[12.5px] text-faint">Ready for approval</span>
+              </span>
+              <Caret open={false} />
+            </button>
+          </>
+        )}
         {running.length > 0 && (
           <>
-            <div className="px-2 pb-1.5 pt-1 text-[13px] text-faint">Running {running.length}</div>
+            <div className={`px-2 pb-1.5 text-[13px] text-faint ${plan ? 'pt-3' : 'pt-1'}`}>Running {running.length}</div>
             <div className="space-y-1">{running.map(render)}</div>
           </>
         )}
@@ -305,7 +404,7 @@ export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
           <>
             <button
               onClick={() => setFinishedOpen((o) => !o)}
-              className={`flex items-center gap-1 px-2 pb-1.5 text-[13px] text-faint transition-colors hover:text-muted ${running.length ? 'pt-3' : 'pt-1'}`}
+              className={`flex items-center gap-1 px-2 pb-1.5 text-[13px] text-faint transition-colors hover:text-muted ${running.length || plan ? 'pt-3' : 'pt-1'}`}
             >
               Finished {finished.length}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={`transition-transform ${finishedOpen ? '' : '-rotate-90'}`}>
@@ -316,6 +415,7 @@ export function TasksPanel({ tasks, target, active, side, onClose }: Props) {
           </>
         )}
       </div>
+      )}
     </>
   )
 

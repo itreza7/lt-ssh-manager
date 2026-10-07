@@ -1,17 +1,16 @@
-import { useCallback, useEffect, useImperativeHandle, useReducer, useRef, useState, type Ref } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { CloseReason, SessionStatus, TmuxIntent } from '../../../shared/types'
 import { clampOverscroll, type TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
-import { attachTerminal, sendComposed, type ComposerHandle } from '../lib/xtermAttach'
+import { attachTerminal } from '../lib/xtermAttach'
 import type { TerminalSearch } from '../lib/xtermSearch'
 import { applyTerminalSettings, createTerminal, LINE_HEIGHT, measureCell } from '../lib/xtermSetup'
 import { useTerminalFind } from '../lib/useTerminalFind'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { useDropUpload } from '../lib/useDropUpload'
 import { DropUploadLayer } from './DropUploadLayer'
-import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 import { TerminalFindBar } from './TerminalFindBar'
 
@@ -34,16 +33,6 @@ interface Props {
    * is showing, so is the thing that rang.
    */
   onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
-  /** Stable across a reconnect *and* a restart — keys the persisted draft on disk. */
-  draftKey: string
-  /** The draft last persisted for this tab, loaded before mount so it isn't lost on restart. */
-  initialDraft?: string
-  /** Open the transcript reader beside this terminal — offered in the composer. */
-  onOpenReader?: () => void
-  /** Open the chat view of the Claude running in this tmux session — offered in the composer. */
-  onOpenChat?: () => void
-  /** Lets a header button trigger this pane's composer without owning its state. */
-  ref?: Ref<ComposerHandle>
 }
 
 export function TerminalView({
@@ -57,12 +46,7 @@ export function TerminalView({
   settings,
   onStatus,
   onTitle,
-  onAgentSignal,
-  draftKey,
-  initialDraft,
-  onOpenReader,
-  onOpenChat,
-  ref
+  onAgentSignal
 }: Props) {
   // The outer host owns the scroll in overscroll mode; the inner host is where
   // xterm mounts and is sized to overscroll× the visible height.
@@ -91,39 +75,6 @@ export function TerminalView({
   } | null>(null)
   // Read from event handlers that must not re-subscribe when it changes.
   const reattachingRef = useRef(false)
-
-  // Prompt composer. The draft lives here — nothing reaches the remote until
-  // it's sent — and survives closing the panel, so a half-written prompt isn't
-  // lost to a stray Esc.
-  // Starts already open when the setting says so, not flipped open by a later
-  // effect: the composer panel animates its height in over 200ms via CSS
-  // transition, and that transition only fires on a value *change* after
-  // mount. Opening it post-mount means the terminal below has already
-  // measured/connected at the composer-closed height, and only a later
-  // ResizeObserver firing (not guaranteed to land cleanly) claws it back —
-  // that's the mechanism behind the "opens broken until you resize" bug.
-  // Starting open avoids the animation (and the race) entirely: the
-  // composer's final height is what layout ever sees.
-  const [composing, setComposing] = useState(() => settings.composerDefaultOpen)
-  const [draft, setDraft] = useState(initialDraft ?? '')
-
-  // Local autosave, independent of the SSH connection: survives disconnects,
-  // crashes, and restarts. Cleared naturally when draft goes back to '' on
-  // send/discard (see sendDraft/onDiscard below) or on explicit tab close
-  // (handled by the caller via draftsSet(draftKey, '')).
-  useEffect(() => {
-    const t = setTimeout(() => {
-      void window.api.draftsSet(draftKey, draft)
-    }, 300)
-    return () => clearTimeout(t)
-  }, [draft, draftKey])
-  // Every request to compose bumps this, so the textarea is re-focused even when
-  // the panel was already open. useReducer because its dispatch is guaranteed
-  // stable, and it's captured by a mount-once effect (composerDefaultOpen).
-  const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
-  // Read by the focus effect, which must not re-run when the composer opens.
-  const composingRef = useRef(false)
-  composingRef.current = composing
 
   // Drop-to-upload. Behind a ref for the same reason as the connect args: the
   // mount-once effect below hands these to attachTerminal and would otherwise
@@ -310,61 +261,6 @@ export function TerminalView({
     [sessionId]
   )
 
-  const openComposer = useCallback(() => {
-    setComposing(true)
-    bumpFocus()
-  }, [])
-
-  const closeComposer = useCallback(() => {
-    setComposing(false)
-    termRef.current?.focus()
-  }, [])
-
-  // What the compose chord does: open when closed, close when already open —
-  // the keyboard way to turn the composer "off" the user asked for, alongside
-  // openComposer/closeComposer which the strip's own buttons still use directly.
-  const toggleComposer = useCallback(() => {
-    setComposing((c) => {
-      if (c) {
-        termRef.current?.focus()
-        return false
-      }
-      bumpFocus()
-      return true
-    })
-  }, [])
-
-  useImperativeHandle(ref, () => ({ toggleComposer, isOpen: composing }), [toggleComposer, composing])
-
-  // Focus follows a composer that starts open (see the composing initializer
-  // above for why it no longer opens itself here) — read once at mount so a
-  // later settings change never re-focuses a composer the user closed.
-  useEffect(() => {
-    if (settingsRef.current.composerDefaultOpen) bumpFocus()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Raw key chords from the composer's quick-actions row (Shift+Tab, Esc) —
-  // straight to the remote, unbracketed, no draft involved.
-  const sendKey = useCallback((data: string) => {
-    termRef.current?.input(data, true)
-  }, [])
-
-  const sendDraft = useCallback((submit: boolean, body: string) => {
-    const term = termRef.current
-    if (!term || !body) return
-    sendComposed(term, body, submit)
-    setDraft('')
-    if (settingsRef.current.composerStayOpen) {
-      // Stay open, drafting the next message — just get focus back onto the
-      // (now empty) textarea.
-      bumpFocus()
-    } else {
-      setComposing(false)
-      term.focus()
-    }
-  }, [])
-
   // Create the terminal + SSH session exactly once per sessionId.
   useEffect(() => {
     const scroll = scrollRef.current!
@@ -394,14 +290,12 @@ export function TerminalView({
     term.onData(send)
     const offRender = term.onRender(() => stickToBottom())
 
-    // Clipboard, Shift+Enter encoding, remote-set title, composer chord, file
-    // drops. `send` is shared with onData above so synthesized keys take the
+    // Clipboard, Shift+Enter encoding, remote-set title, file drops. `send` is shared with onData above so synthesized keys take the
     // same path as typed ones.
     const detachTerminal = attachTerminal(term, host, {
       sendData: send,
       settings: () => settingsRef.current,
       onTitle: (t) => onTitle?.(sessionId, t),
-      onCompose: toggleComposer,
       onFind: startFind,
       onDragFiles: (o) => uploadRef.current.setOver(o),
       onDropFiles: (paths) => uploadRef.current.drop(paths, termRef.current),
@@ -551,18 +445,14 @@ export function TerminalView({
     layout
   ])
 
-  // Re-fit and focus when this tab becomes the active one. Clicking a pane goes
-  // through App's focusPane, so this also fires on a click *inside* the open
-  // composer — hence the branch, or the terminal would steal focus mid-sentence.
-  // A parked tab is `display: none`, which drops focus entirely, so coming back
-  // has to restore it to *something*: the composer if one is open, else the find
-  // bar if that is, else the terminal as before.
+  // Re-fit and focus when this tab becomes the active one. A parked tab is
+  // `display: none`, which drops focus entirely, so coming back has to restore it
+  // to *something*: the find bar if it is open, else the terminal.
   useEffect(() => {
     if (!active) return
     requestAnimationFrame(() => {
       layout()
-      if (composingRef.current) bumpFocus()
-      else if (findingRef.current) startFind()
+      if (findingRef.current) startFind()
       else termRef.current?.focus()
     })
   }, [active, sessionId, layout, startFind])
@@ -656,25 +546,6 @@ export function TerminalView({
           />
         )}
       </div>
-      {/* Docked below the terminal, not overlaid on it — a real flex sibling, so
-          opening it shrinks the scroll host's box above and the ResizeObserver
-          turns that into a PTY resize (under tmux, a reflow for every attached
-          client). Accepted trade-off for a composer that never hides terminal
-          rows; see PromptComposer's own doc comment for the animated collapse. */}
-      <PromptComposer
-        open={composing}
-        focusKey={focusKey}
-        draft={draft}
-        onDraft={setDraft}
-        onSend={sendDraft}
-        sendMode={settings.composerSendMode}
-        onOpen={openComposer}
-        onClose={closeComposer}
-        onDiscard={() => setDraft('')}
-        onSendKey={sendKey}
-        onOpenReader={onOpenReader}
-        onOpenChat={onOpenChat}
-      />
     </div>
   )
 }

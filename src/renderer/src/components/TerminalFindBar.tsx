@@ -23,12 +23,10 @@ interface Props {
 /**
  * Find-in-terminal, overlaid on the top-right of a terminal.
  *
- * Like the prompt composer, this is an **overlay** rather than a sibling in the
- * pane's layout: a docked bar changes the terminal host's box, the ResizeObserver
+ * This is an **overlay** rather than a sibling in the pane's layout: a docked bar changes the terminal host's box, the ResizeObserver
  * turns that into a PTY resize, and under tmux that reflows the session for every
- * attached client. Top-right rather than the composer's bottom edge, so both can
- * be open at once and neither covers the other — and because the bottom rows are
- * where a terminal keeps the thing you are usually reading.
+ * attached client. Top-right rather than the bottom edge, because the bottom rows
+ * are where a terminal keeps the thing you are usually reading.
  */
 export function TerminalFindBar({
   focusKey,

@@ -22,12 +22,16 @@ interface Props {
   /** Resolves true once the text was typed into the TUI; the draft is kept otherwise. */
   onSend: (text: string) => Promise<boolean>
   onInterrupt: () => void
+  /** The Stop button (Esc still calls onInterrupt): may ask first. Defaults to onInterrupt. */
+  onStop?: () => void
   /** Built-ins, skills and commands offered when the text starts with "/". */
   commands: CommandInfo[]
   /** Called when the box first starts with "/": the parent loads the list then. */
   onNeedCommands: () => void
   /** A new `id` puts `text` in the box and focuses it (an Actions menu pick). */
   insert: { id: number; text: string } | null
+  /** Claude Code's suggested next prompt: shown in the empty box, Tab takes it. */
+  suggestion?: string | null
   /** The bottom row, after the "+": the mode. */
   leftControls?: ReactNode
   /** The bottom row, at the right: model and effort. */
@@ -150,23 +154,30 @@ function ContextButton(p: {
               {p.usage?.state === 'loading' ? 'Reading /usage…' : p.usage?.state === 'failed' ? 'Could not read /usage right now.' : 'No usage data yet.'}
             </div>
           ) : (
-            <div className="mt-2 flex flex-col gap-2.5">
-              {limits.map((l) => (
-                <div key={l.label}>
-                  <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
-                    <span className="truncate">{l.label}</span>
-                    <span className="shrink-0 text-faint">{Math.round(l.percent)}%</span>
-                  </div>
-                  <div className="mt-1">
-                    <Bar frac={l.percent / 100} danger={l.percent >= 90} />
-                  </div>
-                  {l.resets && <div className="mt-0.5 text-[11px] text-faint">Resets {l.resets}</div>}
-                </div>
-              ))}
-            </div>
+            <UsageList limits={limits} className="mt-2" />
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/** The plan's usage limits as bars: in the context popover and the /usage card. */
+export function UsageList({ limits, className = '' }: { limits: UsageLimit[]; className?: string }) {
+  return (
+    <div className={`flex flex-col gap-2.5 ${className}`}>
+      {limits.map((l) => (
+        <div key={l.label}>
+          <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+            <span className="truncate">{l.label}</span>
+            <span className="shrink-0 text-faint">{Math.round(l.percent)}%</span>
+          </div>
+          <div className="mt-1">
+            <Bar frac={l.percent / 100} danger={l.percent >= 90} />
+          </div>
+          {l.resets && <div className="mt-0.5 text-[11px] text-faint">Resets {l.resets}</div>}
+        </div>
+      ))}
     </div>
   )
 }
@@ -176,13 +187,12 @@ function ContextButton(p: {
  * line. The text is pasted into the Claude Code TUI in tmux; if that refuses (it
  * holds unsent text of its own), the draft stays here.
  */
-export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, commands, onNeedCommands, insert, leftControls, rightControls, chips, ctx, autoCompactLeft, usage, usageFallback, onContextOpen, onCompact, compactBusy, folder, branch }: Props) {
+export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, onSend, onInterrupt, onStop, commands, onNeedCommands, insert, suggestion, leftControls, rightControls, chips, ctx, autoCompactLeft, usage, usageFallback, onContextOpen, onCompact, compactBusy, folder, branch }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState('')
   // Nothing is saved until the stored draft has been read: the empty initial
   // value would otherwise overwrite it.
   const [loaded, setLoaded] = useState(false)
-  const [sending, setSending] = useState(false)
   const [sel, setSel] = useState(0)
   // Esc closes the suggestions until the text changes.
   const [dismissed, setDismissed] = useState(false)
@@ -232,6 +242,8 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
     return [...starts, ...has].slice(0, 30)
   }, [query, commands])
   const showing = !disabled && !dismissed && matches.length > 0
+  // The suggestion, while the box is empty.
+  const offer = !disabled && !draft && suggestion ? suggestion : null
   const at = Math.min(sel, Math.max(matches.length - 1, 0))
 
   const pick = (c: CommandInfo): void => {
@@ -255,13 +267,10 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
 
   const send = async (): Promise<void> => {
     const text = draft.trim()
-    if (!text || disabled || sending) return
-    setSending(true)
-    try {
-      if (await onSend(text)) setDraft((d) => (d.trim() === text ? '' : d))
-    } finally {
-      setSending(false)
-    }
+    if (!text || disabled) return
+    // The box empties at once; the chat shows the message as sending.
+    setDraft('')
+    if (!(await onSend(text))) setDraft((d) => d || text)
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -283,6 +292,13 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
         setDismissed(true)
         return
       }
+    }
+    if (e.key === 'Tab' && !e.shiftKey && offer) {
+      e.preventDefault()
+      setDraft(offer)
+      // The cursor at the end, once the text is in.
+      requestAnimationFrame(() => ref.current?.setSelectionRange(offer.length, offer.length))
+      return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -344,12 +360,17 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
                 setDismissed(false)
               }}
               onKeyDown={onKeyDown}
-              placeholder={disabled ? disabledHint : 'Message Claude…'}
+              placeholder={disabled ? disabledHint : (offer ?? 'Message Claude…')}
               className="min-h-[38px] min-w-0 flex-1 resize-none bg-transparent px-3 py-[9px] text-[14px] leading-5 text-fg outline-none placeholder:text-faint"
             />
+            {offer && (
+              <span className="mb-[9px] mr-1 shrink-0 rounded border border-sel px-1 text-[11px] leading-4 text-faint" title="Tab puts the suggestion in the box">
+                Tab
+              </span>
+            )}
             {busy && !disabled && !draft.trim() ? (
               <button
-                onClick={onInterrupt}
+                onClick={onStop ?? onInterrupt}
                 title="Stop the current turn (Esc)"
                 className="mb-1 mr-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-title"
               >
@@ -360,7 +381,7 @@ export function ChatComposer({ draftKey, active, disabled, disabledHint, busy, o
             ) : (
               <button
                 onClick={() => void send()}
-                disabled={disabled || sending || !draft.trim()}
+                disabled={disabled || !draft.trim()}
                 title="Send (Enter)"
                 className="mb-1 mr-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-md text-fg transition-colors hover:bg-white/[0.06] disabled:text-faint disabled:hover:bg-transparent"
               >

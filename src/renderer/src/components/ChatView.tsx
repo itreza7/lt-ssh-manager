@@ -11,14 +11,18 @@ import type {
   TuiPrompt
 } from '../../../shared/chatProtocol'
 import { createTranscriptMapper, type TranscriptMapper } from '../../../shared/transcriptEvents'
+import { SLASH_COMMANDS } from '../../../shared/slashCommands'
 import { EFFORT_LEVELS, parseUsage, type UsageLimit } from '../../../shared/tuiKeys'
-import { initialChatState, prependState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type ToolResult, type UiBlock } from '../lib/chatState'
+import { initialChatState, prependState, reduceEvents, type AssistantItem, type ChatItem, type ChatUiState, type TaskState, type ToolResult, type UiBlock } from '../lib/chatState'
+import type { AgentSignal } from '../lib/xtermAgentSignal'
 import { ChatComposer, type UsageInfo } from './ChatComposer'
 import { ModeSwitch } from './ModeSwitch'
 import { Button, Modal } from './Modal'
-import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, ToolGroup, UserMessage } from './chat/Blocks'
-import { chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { AssistantBlocks, NoteLine, OutputCard, QueuedMessage, RunningCommand, ToolGroup, UserMessage, type PendingState } from './chat/Blocks'
+import { CHATS_CHANGED, chatLabel, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
 import { ActionsMenu, BUILTIN_COMMANDS, ModeMenu, PickMenu, type CommandInfo } from './chat/Menus'
+import { LiveScreen } from './chat/LiveScreen'
+import { HelpCard, UsageCard } from './chat/CommandViews'
 import { PromptCard } from './chat/Requests'
 import { TasksPanel } from './chat/Tasks'
 
@@ -39,6 +43,8 @@ interface Props {
   onResumed: (sessionId: string) => void
   /** The header is the window's title bar (the app bar is hidden): it drags the window. */
   titleBar?: boolean
+  /** A turn ended or a prompt is waiting: the app dots the chat when it is not in front. */
+  onAgentSignal?: (signal: AgentSignal) => void
 }
 
 // Closer to the bottom than this and a new message keeps the view pinned there.
@@ -59,6 +65,12 @@ const STATUS_MS = 2000
 const STATUS_HIDDEN_MS = 10_000
 // After sending, how long an idle status may still be "about to go busy".
 const SEND_GRACE_MS = 8000
+// Replies that arrive this soon after mount are history, not news (no unread dot).
+const HISTORY_GRACE_MS = 5000
+// Busy to idle with no turn-end record counts as finished once idle this long.
+const REPLY_SETTLE_MS = 3000
+// Waits between looks for the new session after /clear or /resume.
+const MOVE_CHECKS_MS = [300, 700, 1500, 3000]
 // How long a fresh start may take to show up as a live Claude.
 const START_GRACE_MS = 30_000
 
@@ -141,9 +153,10 @@ function segmentsOf(items: ChatItem[], results: Record<string, ToolResult>, live
 /** What is said above the composer after typing into the pane did not go through. */
 type Notice = { kind: 'draft' } | { kind: 'screen' } | { kind: 'text'; text: string }
 
-// Typed from the composer, these run through chatCommand (the first four, and /effort with a level, for sure).
+// Typed from the composer, a one-line "/name …" runs through chatCommand.
 const BUILTIN_NAMES = new Set(BUILTIN_COMMANDS.map((c) => c.name))
-const EFFORT_ARG = /^\s*(low|medium|high|xhigh|max)\s*$/
+// Built-ins that run in the TUI without starting a turn; anything else (a skill) starts one.
+const LOCAL_NAMES = new Set(SLASH_COMMANDS.filter((c) => c.local).map((c) => c.name))
 const SLASH = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/
 
 // The plan limits are the account's, not the chat's: one /usage read per connection serves every chat for a minute.
@@ -151,6 +164,8 @@ const USAGE_FRESH_MS = 60_000
 const usageCache = new Map<string, { at: number; limits: UsageLimit[] }>()
 
 const itemKey = (it: ChatItem): string => (it.kind === 'assistant' ? it.msgId : it.id)
+
+const DIALOG_OPEN = "A dialog is open in Claude's terminal. Answer or close it first."
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -160,12 +175,17 @@ function modelValue(model: string | null): string {
   return MODELS.find((m) => m.value !== 'default' && model.includes(m.value))?.value ?? model
 }
 
-export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed, titleBar }: Props) {
+export function ChatView({ connectionId, password, sessionId, cwd, active, starting, onStarted, onOpenTerminal, onResumed, titleBar, onAgentSignal }: Props) {
   const [state, setState] = useState<ChatUiState>(initialChatState)
   const [link, setLink] = useState<Link>('connecting')
   // From chatStatus: the live Claude. Undefined until asked (or while a fresh start boots), null = none.
   const [session, setSession] = useState<ChatSession | null | undefined>(undefined)
-  const [pending, setPending] = useState<{ id: string; text: string }[]>([])
+  // Messages on their way. `cancelling`: a cancel is running; `late`: too late to cancel.
+  const [pending, setPending] = useState<{ id: string; text: string; state: PendingState; note?: string; cancelling?: boolean; late?: boolean }[]>([])
+  // Cancels asked for while the send was still running: taken back out of the queue once it lands.
+  const cancelAsked = useRef(new Set<string>())
+  // The slash command being typed, shown as a running line.
+  const [running, setRunning] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [resuming, setResuming] = useState(false)
   // The first load has painted. Until then its events wait in `bootEvents`, so the chat
@@ -191,8 +211,16 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const commandsAsked = useRef(false)
   // Text a dialog command (/usage) read off the screen, shown until dismissed.
   const [snapshot, setSnapshot] = useState<{ title: string; text: string } | null>(null)
+  const snapshotUsage = useMemo(() => (snapshot?.title === '/usage' ? parseUsage(snapshot.text) : []), [snapshot])
   const [insert, setInsert] = useState<{ id: number; text: string } | null>(null)
+  // /help shown in the app, and a bare /model or /effort opening its picker.
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [openPicker, setOpenPicker] = useState<{ name: 'model' | 'effort'; at: number } | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
+  // The Stop button's question; and workflows stopped from here or the TUI (tool_use ids),
+  // since a stop writes nothing to the transcript.
+  const [askStop, setAskStop] = useState(false)
+  const [stoppedTasks, setStoppedTasks] = useState<string[]>([])
   // A command or mode change is typing into the pane: the screen poll waits, so it does not read a half-finished screen.
   const cmdBusy = useRef(false)
   const [cmdRunning, setCmdRunning] = useState(false)
@@ -202,7 +230,19 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   const [wide, setWide] = useState(true)
   // Tasks the user closed the panel on: it comes back when one that is not in here shows up.
   const [closedTasks, setClosedTasks] = useState<string[]>([])
+  // The plan the user hid the panel on (its file path or request id).
+  const [closedPlan, setClosedPlan] = useState<string | null>(null)
+  // The right panel shows the plan itself, not the task list (a new plan opens it).
+  const [planView, setPlanView] = useState(true)
+  // The plan file the open plan dialog names, read once each time a plan dialog appears.
+  const [planFile, setPlanFile] = useState<{ path: string; text: string } | null>(null)
   const [usage, setUsage] = useState<UsageInfo>({ state: 'idle', limits: [] })
+  // A screen a command opened in the TUI (/config, /model…), shown and driven in the chat until it closes.
+  const [live, setLive] = useState<string | null>(null)
+  const liveRef = useRef(false)
+  liveRef.current = live !== null
+  // Claude Code's suggested next prompt (dim in its input), which Tab takes into the composer.
+  const [suggestion, setSuggestion] = useState<string | null>(null)
   const root = useRef<HTMLDivElement>(null)
 
   // Byte offset after the last whole record applied — where a reconnect resumes.
@@ -223,6 +263,19 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   onStartedRef.current = onStarted
   onResumedRef.current = onResumed
   const [, setTick] = useState(0)
+  // Bumped by the reload button. The terminal and Claude Code's files are the truth: the
+  // transcript, the status file and the screen are all read again, and what the chat
+  // kept on its own (sent bubbles, workflows it marked stopped) is dropped.
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = (): void => {
+    offset.current = -1
+    setState(initialChatState)
+    setLoaded(false)
+    // A sent message whose echo was missed would spin for ever; the fresh read shows it if it landed.
+    setPending((p) => p.filter((x) => x.state !== 'sent'))
+    setStoppedTasks([])
+    setReloadKey((k) => k + 1)
+  }
 
   // The transcript stream. Everything about it lives in this one effect so cleanup
   // is total: the timer, the subscriptions and the main-side stream all end with it.
@@ -325,7 +378,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       offEnd()
       if (streamId !== null) void window.api.chatUnstream({ streamId })
     }
-  }, [connectionId, password, sessionId])
+  }, [connectionId, password, sessionId, reloadKey])
 
   useEffect(() => {
     const el = root.current
@@ -392,7 +445,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       off = true
       clearInterval(t)
     }
-  }, [connectionId, password, sessionId, active])
+  }, [connectionId, password, sessionId, active, reloadKey])
 
   const pane = session?.tmux?.pane
   const tmuxSession = session?.tmux?.session
@@ -401,6 +454,76 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   // An idle status can lag a send by a moment: only then does an open turn count as busy.
   const busy = state.status === 'busy' || (state.turn && state.status === 'idle' && Date.now() - sentAt.current < SEND_GRACE_MS)
   const waiting = state.status === 'waiting'
+
+  // Only what needs you raises a dot: a turn that ended, or Claude waiting on an answer.
+  // A reply in the middle of a turn is not news.
+  const signalRef = useRef(onAgentSignal)
+  signalRef.current = onAgentSignal
+  const chatName = session?.name?.trim() || cwd.split('/').filter(Boolean).pop() || 'Claude'
+  const nameRef = useRef(chatName)
+  nameRef.current = chatName
+  const doneRef = useRef(state.turnsDone)
+  doneRef.current = state.turnsDone
+  // The turn count when Claude last went busy: a turn end since then was already news.
+  const busyFrom = useRef(state.turnsDone)
+  const statusRef = useRef(state.status)
+  statusRef.current = state.status
+  // The turn count when we last said "finished", so the turn end and the idle status
+  // that follows it make one signal, not two.
+  const signaledAt = useRef(state.turnsDone)
+  const finished = (): void => {
+    signaledAt.current = state.turnsDone
+    signalRef.current?.({ kind: 'message', title: nameRef.current, body: 'Claude finished' })
+  }
+  useEffect(() => {
+    // The history loading in at mount is not news.
+    if (Date.now() - mountedAt.current < HISTORY_GRACE_MS) {
+      signaledAt.current = state.turnsDone
+      return
+    }
+    if (state.turnsDone > signaledAt.current) finished()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.turnsDone])
+  const lastSignalStatus = useRef<ChatStatus | null>(null)
+  useEffect(() => {
+    const prev = lastSignalStatus.current
+    lastSignalStatus.current = state.status
+    if (state.status === 'busy') busyFrom.current = state.turnsDone
+    if (prev === null || prev === state.status) return
+    if (state.status === 'waiting') {
+      signalRef.current?.({ kind: 'message', title: nameRef.current, body: 'Claude needs your answer' })
+      return
+    }
+    // A turn that wrote no end record (interrupted, or a local command): only once it
+    // has stayed idle a while, so a gap between tool calls is not taken for the end.
+    if (prev !== 'busy' || state.status !== 'idle') return
+    const t = setTimeout(() => {
+      if (statusRef.current === 'idle' && doneRef.current === busyFrom.current) finished()
+    }, REPLY_SETTLE_MS)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.status])
+
+  // A plan dialog names its file: read it each time one opens (a revised plan reuses the file).
+  const planPath = waiting && prompt?.kind === 'plan' ? prompt.planFile : undefined
+  useEffect(() => {
+    if (!planPath) {
+      setPlanFile(null)
+      return
+    }
+    setPlanView(true)
+    let off = false
+    window.api
+      .chatPlanFile({ connectionId, password, path: planPath })
+      .then((text) => !off && setPlanFile({ path: planPath, text }))
+      .catch(() => {
+        /* the card still shows what the screen holds */
+      })
+    return () => {
+      off = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planPath])
 
   // Read the screen while the tab is on screen: the open dialog (shown as a card
   // only while Claude waits) and the footer chips. Once at once, then every 2 s.
@@ -419,6 +542,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         setPrompt((prev) => (JSON.stringify(prev) === JSON.stringify(r.prompt) ? prev : r.prompt))
         // A screen with no footer (a dialog is open) says nothing about the footer: keep the last.
         if (r.footer) setFooter((prev) => (JSON.stringify(prev) === JSON.stringify(r.footer) ? prev : r.footer))
+        setSuggestion(r.suggestion ?? null)
       } catch {
         /* keep what we knew */
       }
@@ -429,10 +553,11 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       off = true
       clearInterval(t)
     }
-  }, [polling, pane, connectionId, password])
+  }, [polling, pane, connectionId, password, reloadKey])
 
   // Types into the pane; says why when it did not go through.
-  const keys = async (send: (pane: string) => Promise<ChatKeysResult>): Promise<boolean> => {
+  // `busyText`: said instead of "not showing that prompt" when a command or mode change finds a dialog open.
+  const keys = async (send: (pane: string) => Promise<ChatKeysResult>, busyText?: string): Promise<boolean> => {
     if (!pane) {
       setNotice({ kind: 'text', text: 'Claude is not in a tmux pane.' })
       return false
@@ -447,6 +572,10 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
     if (r.ok) {
       setNotice(null)
       return true
+    }
+    if (r.reason === 'screen' && busyText) {
+      setNotice({ kind: 'text', text: busyText })
+      return false
     }
     setNotice(
       r.reason === 'draft' || r.reason === 'screen'
@@ -471,6 +600,16 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   // One command or mode change at a time: they type into the same pane.
   const exclusive = async (fn: () => Promise<boolean>): Promise<boolean> => {
+    if (liveRef.current) {
+      // The card closes a moment after its screen does; ask the pane before refusing.
+      const open = pane ? await window.api.chatScreen({ ...target, pane }).catch(() => '') : ''
+      if (open !== null) {
+        setNotice({ kind: 'text', text: 'Close the open screen first (Esc on its card).' })
+        return false
+      }
+      liveRef.current = false
+      setLive(null)
+    }
     if (cmdBusy.current) return false
     cmdBusy.current = true
     setCmdRunning(true)
@@ -485,40 +624,107 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   // A slash command: typed for us, and when it opens a dialog (/usage), its text comes back.
   const runCommand = (command: string): Promise<boolean> =>
     exclusive(async () => {
-      const out: { r?: ChatKeysResult & { text?: string } } = {}
-      const ok = await keys(async (p) => (out.r = await window.api.chatCommand({ ...target, pane: p, command, cwd })))
+      const out: { r?: ChatKeysResult & { text?: string; live?: boolean } } = {}
+      setRunning(command)
+      const ok = await keys(async (p) => (out.r = await window.api.chatCommand({ ...target, pane: p, command, cwd })), DIALOG_OPEN).finally(() =>
+        setRunning(null)
+      )
       if (ok && out.r?.ok && out.r.text) setSnapshot({ title: command, text: out.r.text })
+      if (ok && out.r?.ok && out.r.live) setLive(command)
+      if (ok && /^\/(clear|resume)\b/.test(command)) void followMove()
       return ok
     })
 
+  // /clear and /resume start a new session id in the same Claude: follow it now, rather
+  // than on the next status poll, so the sidebar never shows this chat out of its folder.
+  const followMove = async (): Promise<void> => {
+    const known = lastSession.current
+    if (!known) return
+    for (const wait of MOVE_CHECKS_MS) {
+      await new Promise((r) => setTimeout(r, wait))
+      const live = await window.api.chatList({ connectionId, password }).catch(() => [])
+      const moved = live.find((c) => c.pid === known.pid && c.sessionId !== sessionId)
+      if (moved) {
+        window.dispatchEvent(new Event(CHATS_CHANGED))
+        onResumedRef.current(moved.sessionId)
+        return
+      }
+    }
+  }
+
   const sendText = async (text: string): Promise<boolean> => {
+    // These have app UI of their own: nothing is typed into the terminal.
+    const bare = /^\/(help|model|effort)\s*$/.exec(text)
+    if (bare) {
+      if (bare[1] === 'help') {
+        loadCommands()
+        setHelpOpen(true)
+      } else setOpenPicker({ name: bare[1] as 'model' | 'effort', at: Date.now() })
+      return true
+    }
     const m = SLASH.exec(text)
-    if (m) {
-      const [, name, arg] = m
-      const known =
-        !/[\r\n]/.test(text) &&
-        (name === 'effort' ? EFFORT_ARG.test(arg ?? '') : BUILTIN_NAMES.has(name) || !!commands?.some((c) => c.name === name))
-      if (known) {
-        // A skill starts a turn; the built-ins do not.
-        if (!BUILTIN_NAMES.has(name)) {
-          sentAt.current = Date.now()
-          setTimeout(() => setTick((n) => n + 1), SEND_GRACE_MS + 100)
-        }
-        return runCommand(text)
+    // A screen it opens is shown live in the chat. A multi-line one is a prompt, pasted as is.
+    if (m && !/[\r\n]/.test(text)) {
+      // A skill starts a turn; the built-ins do not.
+      if (!LOCAL_NAMES.has(m[1])) {
+        sentAt.current = Date.now()
+        setTimeout(() => setTick((n) => n + 1), SEND_GRACE_MS + 100)
       }
-      // A bare /effort would open the TUI's slider, which the chat cannot close.
-      if (name === 'effort') {
-        setNotice({ kind: 'text', text: 'Pick a level: /effort low|medium|high|xhigh|max' })
-        return false
-      }
+      return runCommand(text)
     }
     sentAt.current = Date.now()
     // Re-render once the grace is over, or an idle status would keep showing "Working…".
     setTimeout(() => setTick((n) => n + 1), SEND_GRACE_MS + 100)
-    const ok = await keys((p) => window.api.chatSend({ ...target, pane: p, text }))
-    // Shown dimmed until the transcript echoes it back. A slash command never does.
-    if (ok && !text.startsWith('/')) setPending((p) => [...p, { id: crypto.randomUUID(), text }])
-    return ok
+    // Shown at once, dimmed until the transcript echoes it back.
+    const id = crypto.randomUUID()
+    setPending((p) => [...p, { id, text, state: 'sending' }])
+    let res: ChatKeysResult | undefined
+    // A cancelled send is no failure: it says nothing.
+    const ok = await keys(async (p) => {
+      res = await window.api.chatSend({ ...target, pane: p, text, sendId: id })
+      return !res.ok && res.reason === 'cancelled' ? { ok: true } : res
+    })
+    if (res && !res.ok && res.reason === 'cancelled') {
+      cancelAsked.current.delete(id)
+      dropPending(id)
+      return true
+    }
+    patchPending(id, { state: ok ? 'sent' : 'failed' })
+    // Typed before the cancel reached it: take it back out of Claude's queue.
+    if (ok && cancelAsked.current.delete(id)) void unqueue(id, text)
+    // A failed message stays in the chat with Retry, so the composer need not get it back.
+    return true
+  }
+  const dropPending = (id: string): void => setPending((p) => p.filter((x) => x.id !== id))
+  const patchPending = (id: string, patch: Partial<(typeof pending)[number]>): void =>
+    setPending((p) => p.map((x) => (x.id === id ? { ...x, ...patch } : x)))
+  const unqueue = async (id: string, text: string): Promise<void> => {
+    const r: ChatKeysResult = pane
+      ? await window.api.chatUnqueue({ ...target, pane, text }).catch((e) => ({ ok: false, reason: 'error', message: errText(e) }) as const)
+      : { ok: false, reason: 'no-pane' }
+    if (r.ok) return dropPending(id)
+    const note =
+      r.reason === 'gone'
+        ? 'Already sent to Claude'
+        : r.reason === 'draft'
+          ? 'Clear the input in the terminal first'
+          : r.reason === 'screen'
+            ? 'Answer the open prompt first'
+            : r.message || 'Could not cancel'
+    patchPending(id, { cancelling: false, note, late: r.reason === 'gone' })
+  }
+  const cancelPending = (id: string): void => {
+    const item = pending.find((x) => x.id === id)
+    if (!item || item.cancelling) return
+    patchPending(id, { cancelling: true, note: undefined })
+    if (item.state === 'sending') {
+      cancelAsked.current.add(id)
+      void window.api.chatCancelSend({ sendId: id })
+    } else void unqueue(id, item.text)
+  }
+  const retryPending = (id: string, text: string): void => {
+    dropPending(id)
+    void sendText(text)
   }
 
   const pollPrompt = async (): Promise<void> => {
@@ -540,10 +746,27 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       if (r && !r.ok && r.reason === 'screen') void pollPrompt()
       throw new Error('not sent')
     }
-    setTimeout(() => void pollPrompt(), 400)
+    // Read the screen again soon, so the card goes as soon as the TUI moved on.
+    void pollPrompt()
+    setTimeout(() => void pollPrompt(), 600)
   }
 
   const interrupt = (): void => void keys((p) => window.api.chatInterrupt({ ...target, pane: p }))
+  const markStopped = (id: string): void => setStoppedTasks((s) => (s.includes(id) ? s : [...s, id]))
+  const stopTask = async (t: TaskState): Promise<boolean> => {
+    const ok = await keys((p) => window.api.chatStopTask({ ...target, pane: p, name: t.name }))
+    if (ok) markStopped(t.toolUseId)
+    return ok
+  }
+  // Stop Claude's turn, then (when asked) each running workflow, one after the other:
+  // they share the footer's task rows.
+  const stopAll = async (flows: TaskState[]): Promise<void> => {
+    if (!(await keys((p) => window.api.chatInterrupt({ ...target, pane: p })))) return
+    if (!flows.length) return
+    // The turn's interrupt settles before the task rows take keys.
+    await new Promise((r) => setTimeout(r, 800))
+    for (const t of flows) if (!(await stopTask(t))) return
+  }
   // The transcript names the new model only with Claude's next reply; show it now.
   const setModel = async (m: string): Promise<void> => {
     if (await keys((p) => window.api.chatModel({ ...target, pane: p, model: m })))
@@ -551,7 +774,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   }
   const setMode = (m: ChatMode): Promise<boolean> =>
     exclusive(async () => {
-      const ok = await keys((p) => window.api.chatMode({ ...target, pane: p, mode: m }))
+      const ok = await keys((p) => window.api.chatMode({ ...target, pane: p, mode: m }), DIALOG_OPEN)
       if (ok) {
         setFooter((f) => (f ? { ...f, mode: m } : f))
         setState((prev) => reduceEvents(prev, [{ t: 'mode', mode: m }]))
@@ -608,18 +831,20 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
 
   // Queued messages leave the dim list once the transcript has echoed them. Echoes
   // are recent, so only the tail is searched.
+  // Claude may join queued messages into one, and wraps a paste in tags: a message
+  // counts as echoed when its lines sit whole inside a recent one.
   const echoed = useMemo(() => {
-    const texts = new Set<string>()
+    const texts: string[] = []
     for (let i = state.items.length - 1, n = 0; i >= 0 && n < 40; i--, n++) {
       const it = state.items[i]
-      if (it.kind === 'user') texts.add(it.text.trim())
+      if (it.kind === 'user') texts.push(`\n${it.text.trim()}\n`)
     }
-    return texts
+    return (text: string): boolean => texts.some((t) => t.includes(`\n${text.trim()}\n`))
   }, [state.items])
-  const queued = pending.filter((p) => !echoed.has(p.text.trim()))
+  const queued = pending.filter((p) => p.state === 'failed' || !echoed(p.text))
   useEffect(() => {
     setPending((p) => {
-      const rest = p.filter((x) => !echoed.has(x.text.trim()))
+      const rest = p.filter((x) => x.state === 'failed' || !echoed(x.text))
       return rest.length === p.length ? p : rest
     })
   }, [echoed])
@@ -628,7 +853,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   useLayoutEffect(() => {
     const el = scroller.current
     if (el && nearBottom.current) el.scrollTop = el.scrollHeight
-  }, [state.items, state.children, prompt, state.status, queued.length, notice, snapshot])
+  }, [state.items, state.children, prompt, state.status, queued.length, running, notice, snapshot, live, helpOpen])
 
   // A tab that was hidden may have lost its scroll position.
   useEffect(() => {
@@ -759,9 +984,31 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
       showEarlier()
     } else if (short && (hidden || hasOlder)) showEarlier()
   })
-  const tasks = Object.values(state.tasks).filter((t) => !t.hidden)
-  const showTasks = !ended && tasks.some((t) => !closedTasks.includes(t.toolUseId))
-  const closeTasks = (): void => setClosedTasks(tasks.map((t) => t.toolUseId))
+  // The plan waiting for approval, read in full in the right column: from the plan file the
+  // dialog names, else ExitPlanMode's input once the transcript has it.
+  const planReq = [...state.requests].reverse().find((r) => r.kind === 'plan')
+  const planInput = planReq?.input as { plan?: unknown } | undefined
+  const planOnScreen = waiting && prompt?.kind === 'plan'
+  const plan = ended
+    ? null
+    : planOnScreen && planFile && planFile.path === prompt.planFile && planFile.text.trim()
+      ? { id: planFile.path, text: planFile.text }
+      : planReq && typeof planInput?.plan === 'string' && planInput.plan.trim()
+        ? { id: planReq.reqId, text: planInput.plan }
+        : null
+  // Wide: the plan is a row in the right panel, opened there by default.
+  const showPlan = !!plan && wide && closedPlan !== plan.id
+  const tasks = Object.values(state.tasks)
+    .filter((t) => !t.hidden)
+    .map((t) => (t.state === 'running' && stoppedTasks.includes(t.toolUseId) ? { ...t, state: 'done' as const, status: 'stopped' } : t))
+  const runningFlows = tasks.filter((t) => t.kind === 'workflow' && t.state === 'running')
+  // One column on the right: the plan takes it while it waits for you.
+  const showTasks = !ended && (showPlan || tasks.some((t) => !closedTasks.includes(t.toolUseId)))
+  const planAside = showPlan && planView
+  const closeTasks = (): void => {
+    setClosedTasks(tasks.map((t) => t.toolUseId))
+    if (plan) setClosedPlan(plan.id)
+  }
   const title = session?.name?.trim() || folder
 
   const lastAssistant = (() => {
@@ -815,15 +1062,28 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           <span className="animate-glow shrink-0 rounded-full bg-sky-400/15 px-2.5 py-0.5 text-[11px] text-sky-400">Reconnecting…</span>
         )}
         <div className="ml-auto flex items-center gap-0.5">
-          {tasks.length > 0 && !showTasks && !ended && (
+          {(tasks.length > 0 || (plan && wide)) && !showTasks && !ended && (
             <button
-              onClick={() => setClosedTasks([])}
+              onClick={() => {
+                setClosedTasks([])
+                setClosedPlan(null)
+                setPlanView(false)
+              }}
               title="Show the Background tasks panel"
               className="no-drag mr-1 shrink-0 rounded-lg bg-elevated px-2 py-1 text-[12.5px] leading-4 text-muted transition-colors hover:text-title"
             >
-              Tasks {tasks.length}
+              {tasks.length ? `Tasks ${tasks.length}` : 'Plan'}
             </button>
           )}
+          <button
+            onClick={reload}
+            title="Reload the chat from the transcript"
+            className="no-drag mr-1 grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-title"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={loaded ? '' : 'animate-spin'}>
+              <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+            </svg>
+          </button>
           {openTerminal && <ModeSwitch mode="chat" onTerminal={openTerminal} className="mr-1" />}
           {actions('dots')}
         </div>
@@ -846,7 +1106,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           className="min-h-0 flex-1 overflow-y-auto px-6 py-6"
           style={{ fontFamily: 'var(--font-sans)' }}
         >
-          <div className="mx-auto flex max-w-[740px] flex-col gap-6">
+          <div className="mx-auto flex max-w-[740px] flex-col gap-3">
             {loadingOlder && <div className="animate-glow text-center text-[12px] text-faint">Loading earlier messages…</div>}
             {empty && (
               <div className="py-16 text-center text-sm text-faint">
@@ -871,15 +1131,55 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
               )
             )}
             {queued.map((p) => (
-              <QueuedMessage key={p.id} text={p.text} />
+              <QueuedMessage
+                key={p.id}
+                text={p.text}
+                state={p.state}
+                note={p.note}
+                onCancel={p.cancelling || p.late ? undefined : () => cancelPending(p.id)}
+                onRetry={() => retryPending(p.id, p.text)}
+                onDismiss={() => dropPending(p.id)}
+              />
             ))}
-            {snapshot && <OutputCard title={snapshot.title} text={snapshot.text} onDismiss={() => setSnapshot(null)} />}
-            {waiting && polling && prompt && <PromptCard key={`${prompt.kind}\0${prompt.body}`} prompt={prompt} onAnswer={answer} onTerminal={openTerminal} />}
+            {running && <RunningCommand command={running} />}
+            {snapshot &&
+              (snapshot.title === '/usage' && snapshotUsage.length ? (
+                <UsageCard limits={snapshotUsage} onDismiss={() => setSnapshot(null)} />
+              ) : (
+                <OutputCard title={snapshot.title} text={snapshot.text} onDismiss={() => setSnapshot(null)} />
+              ))}
+            {helpOpen && (
+              <HelpCard
+                commands={commands ?? BUILTIN_COMMANDS}
+                onPick={(name) => {
+                  setHelpOpen(false)
+                  setInsert({ id: Date.now(), text: `/${name} ` })
+                }}
+                onDismiss={() => setHelpOpen(false)}
+              />
+            )}
+            {live && pane && <LiveScreen title={live} target={target} pane={pane} active={active} onClose={() => setLive(null)} />}
+            {waiting && polling && prompt && <PromptCard
+                key={`${prompt.kind}\0${prompt.body}`}
+                prompt={prompt}
+                plan={prompt.kind === 'plan' && !wide ? plan?.text : undefined}
+                planAside={prompt.kind === 'plan' && planAside}
+                onShowPlan={
+                  prompt.kind === 'plan' && plan && wide && !planAside
+                    ? () => {
+                        setClosedPlan(null)
+                        setPlanView(true)
+                      }
+                    : undefined
+                }
+                onAnswer={answer}
+                onTerminal={openTerminal}
+              />}
             {busy && !waiting && <div className="animate-glow text-sm text-faint">Working…</div>}
           </div>
         </div>
 
-        {showTasks && !wide && <TasksPanel tasks={tasks} target={target} active={active} onClose={closeTasks} />}
+        {showTasks && !wide && tasks.length > 0 && <TasksPanel tasks={tasks} target={target} active={active} onClose={closeTasks} onStop={drivable ? stopTask : undefined} onKilled={markStopped} />}
 
         {notice && (
           <div className="flex shrink-0 items-center gap-3 bg-panel px-4 py-1.5 text-[12px] text-amber">
@@ -906,9 +1206,11 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           busy={busy}
           onSend={sendText}
           onInterrupt={interrupt}
+          onStop={() => setAskStop(true)}
           commands={commands ?? BUILTIN_COMMANDS}
           onNeedCommands={loadCommands}
           insert={insert}
+          suggestion={busy || live ? null : suggestion}
           leftControls={
             !ended && (footerMode ?? state.mode) ? (
               <ModeMenu up mode={footerMode ?? state.mode} disabled={!drivable || cmdRunning} onPick={(m) => void setMode(m)} />
@@ -917,7 +1219,13 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
           rightControls={
             !ended && drivable ? (
               <>
-                <PickMenu title="Model" value={model} options={modelOptions} onPick={(m) => void setModel(m)} />
+                <PickMenu
+                  title="Model"
+                  value={model}
+                  options={modelOptions}
+                  onPick={(m) => void setModel(m)}
+                  openSignal={openPicker?.name === 'model' ? openPicker.at : undefined}
+                />
                 <PickMenu
                   title="Effort"
                   value={shownEffort}
@@ -925,6 +1233,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
                   options={EFFORT_LEVELS.map((l) => ({ value: l, label: cap(l) }))}
                   disabled={cmdRunning}
                   onPick={(l) => void pickEffort(l)}
+                  openSignal={openPicker?.name === 'effort' ? openPicker.at : undefined}
                 />
               </>
             ) : null
@@ -942,8 +1251,47 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
         />
       </div>
       </div>
-      {showTasks && wide && <TasksPanel side tasks={tasks} target={target} active={active} onClose={closeTasks} />}
+      {showTasks && wide && <TasksPanel side tasks={tasks} target={target} active={active} onClose={closeTasks} onStop={drivable ? stopTask : undefined} onKilled={markStopped} plan={showPlan ? plan?.text : undefined} planOpen={planView} onPlanOpen={setPlanView} />}
 
+      {askStop && (
+        <Modal
+          title="Stop Claude"
+          onClose={() => setAskStop(false)}
+          footer={
+            <>
+              <Button onClick={() => setAskStop(false)}>Cancel</Button>
+              <Button
+                variant={runningFlows.length ? 'default' : 'danger'}
+                className="whitespace-nowrap"
+                onClick={() => {
+                  setAskStop(false)
+                  void stopAll([])
+                }}
+              >
+                {runningFlows.length ? 'Stop Claude only' : 'Stop'}
+              </Button>
+              {runningFlows.length > 0 && (
+                <Button
+                  variant="danger"
+                  className="whitespace-nowrap"
+                  onClick={() => {
+                    setAskStop(false)
+                    void stopAll(runningFlows)
+                  }}
+                >
+                  Stop Claude and {runningFlows.length === 1 ? 'the workflow' : `${runningFlows.length} workflows`}
+                </Button>
+              )}
+            </>
+          }
+        >
+          <p className="text-sm text-fg/85">
+            {runningFlows.length
+              ? `Stop Claude's turn? ${runningFlows.length === 1 ? 'A workflow is' : `${runningFlows.length} workflows are`} running in the background: ${runningFlows.map((t) => `“${t.name}”`).join(', ')}.`
+              : "Stop Claude's turn?"}
+          </p>
+        </Modal>
+      )}
       {confirmClear && (
         <Modal
           title="Clear conversation"

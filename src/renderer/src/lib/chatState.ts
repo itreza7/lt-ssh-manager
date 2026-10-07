@@ -84,6 +84,8 @@ export interface ChatUiState {
   waitingFor: string | null
   /** A turn is under way: set by a user message (not a slash command) or `busy`; cleared by `result`, `idle`, `ended`. */
   turn: boolean
+  /** Turns that ended (`result` events) so far: a change is "Claude finished". */
+  turnsDone: number
   mode: ChatMode | null
   model: string | null
   /** The git branch the session works on, once a record names it. */
@@ -105,6 +107,7 @@ export const initialChatState: ChatUiState = {
   status: 'idle',
   waitingFor: null,
   turn: false,
+  turnsDone: 0,
   mode: null,
   model: null,
   branch: null,
@@ -200,6 +203,7 @@ function apply(s: ChatUiState, e: ChatEvent, copied: Set<string>): void {
       // A finished turn has nothing left to ask.
       s.turn = false
       s.requests = []
+      s.turnsDone++
       return
     case 'task': {
       // Emitted twice (the launch, then its result with the task id and journal dir): merge.

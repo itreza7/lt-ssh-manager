@@ -12,7 +12,7 @@
 import type { TuiPrompt } from './tuiKeys'
 
 /** Permission mode as Claude Code records it (`permission-mode` records). */
-export type ChatMode = 'bypassPermissions' | 'default' | 'acceptEdits' | 'plan'
+export type ChatMode = 'bypassPermissions' | 'default' | 'acceptEdits' | 'plan' | 'auto'
 
 /** A live Claude, read from its status file and joined with `tmux list-panes -a`. */
 export interface ChatSession {
@@ -138,6 +138,8 @@ export interface TuiFooter {
 export interface ChatScreenInfo {
   prompt: TuiPrompt | null
   footer: TuiFooter | null
+  /** Claude Code's dim suggested prompt in the empty input, which Tab takes there. */
+  suggestion: string | null
 }
 
 /** One agent of a running workflow, from its journal.jsonl (chat:journal). */
@@ -149,6 +151,12 @@ export interface WorkflowAgent {
   /** First 200 characters of its result, once done. */
   preview?: string
   agentType?: string
+}
+
+/** chat:journal: a workflow's agents, and its end state once its run file says (`killed` after a stop). */
+export interface WorkflowJournal {
+  agents: WorkflowAgent[]
+  status?: string
 }
 
 /** A skill or custom command the host offers (chat:commands). */
@@ -163,11 +171,15 @@ export interface ChatCommandInfo {
  * are the option as the card showed it; main refuses it if the screen differs.
  * `text` is for a free-text option. `tab` moves on (multi-select, next question).
  */
-export type ChatAnswer = { kind: 'option'; digit: string; label: string; text?: string } | { kind: 'tab' }
+export type ChatAnswer = { kind: 'option'; digit: string; label: string; text?: string } | { kind: 'tab' } | { kind: 'back' }
 
 /**
  * Result of anything that types into the pane. `draft` = the TUI input holds
  * unsent text, so nothing was typed; `screen` = the expected prompt was not on
- * screen (answered elsewhere, or a layout this build does not know).
+ * screen (answered elsewhere, or a layout this build does not know). `cancelled` = a
+ * send called off before it was typed; `gone` = a message to take back had already
+ * left Claude's queue.
  */
-export type ChatKeysResult = { ok: true } | { ok: false; reason: 'draft' | 'screen' | 'no-pane' | 'error'; message?: string }
+export type ChatKeysResult =
+  | { ok: true }
+  | { ok: false; reason: 'draft' | 'screen' | 'no-pane' | 'error' | 'cancelled' | 'gone'; message?: string }
