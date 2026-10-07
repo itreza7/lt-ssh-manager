@@ -51,7 +51,7 @@ export interface TerminalFind {
 export function useTerminalFind(resolve: () => FindTarget | null, onFound?: () => void): TerminalFind {
   const [open, setOpen] = useState(false)
   // Bumped on every *request* to find, so pressing the chord with the bar
-  // already open re-focuses and re-selects it. See PromptComposer's focusKey.
+  // already open re-focuses and re-selects it.
   const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
   const [query, setQuery] = useState('')
   const [flags, setFlags] = useState<SearchFlags>(NO_FLAGS)

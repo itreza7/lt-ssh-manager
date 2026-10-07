@@ -3,7 +3,7 @@
 //
 // This is a sibling of xtermAttach rather than part of it because it is purely
 // inbound — nothing here sends bytes, and every terminal in the app wants it
-// whether or not it wants clipboard or composer behavior.
+// whether or not it wants clipboard behavior.
 import type { Terminal as XTerm } from '@xterm/xterm'
 
 /** Longest remote-set text we'll carry into app chrome or an OS notification. */

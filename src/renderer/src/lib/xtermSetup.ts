@@ -29,7 +29,7 @@ const THEME = {
 
 /**
  * Create + open a terminal in `container` with the app's options/theme, on
- * xterm's DOM renderer (see the character joiner below for why not WebGL). Pass
+ * xterm's DOM renderer (see enableRowBidi below for why not WebGL). Pass
  * `{ fit: true }` to also attach a FitAddon (returned for the caller to drive).
  *
  * Search is loaded for every terminal rather than on demand: the addon indexes
@@ -73,13 +73,7 @@ export function createTerminal(
   )
   const search = createSearch(term)
   term.open(container)
-  // xterm has no BiDi or Arabic-script shaping, so Persian/Arabic/Hebrew draws
-  // one isolated letter per cell, left to right. A joined range is drawn as one
-  // string, which the browser shapes and orders right-to-left itself —
-  // render-only, the buffer (and so copy, search, cursor) stays logical. This
-  // is also why the DOM renderer: WebGL rasterizes a joined range into a 512px
-  // atlas tile, which clips any run longer than ~30 cells.
-  term.registerCharacterJoiner(rtlJoiner)
+  enableRowBidi(term)
   // xterm measures its own character cell against whatever font is actually
   // available the moment term.open() runs, and only re-measures later if
   // fontFamily/fontSize change — never on its own once a pending web font
@@ -105,19 +99,62 @@ export function createTerminal(
   return { term, fit, search }
 }
 
-const RTL_CHAR = /[֐-ࣿיִ-﷿ﹰ-﻿]/
-// Spaces, punctuation and digits between RTL letters stay inside the run, so a
-// whole sentence is ordered as one unit rather than word by word.
-const RTL_RUN = /[֐-ࣿיִ-﷿ﹰ-﻿](?:[֐-ࣿיִ-﷿ﹰ-﻿‌‍\s\d۰-۹.,;:!?()«»\-_'"]*[֐-ࣿיִ-﷿ﹰ-﻿])?/g
+const RTL_LETTER = /[\u05d0-\u05ea\u0620-\u064a\u066e-\u06d3\u06fa-\u06ff\ufb1d-\ufdff\ufe70-\ufefc]/
+const FIRST_LETTER = /[\u05d0-\u05ea\u0620-\u064a\u066e-\u06d3\u06fa-\u06ff\ufb1d-\ufdff\ufe70-\ufefcA-Za-z\u00c0-\u024f]/
 
-/** Character joiner: string ranges [start, end) covering each multi-char RTL run. */
-function rtlJoiner(text: string): [number, number][] {
-  if (!RTL_CHAR.test(text)) return []
-  const ranges: [number, number][] = []
-  for (const m of text.matchAll(RTL_RUN)) {
-    if (m[0].length > 1) ranges.push([m.index, m.index + m[0].length])
+/**
+ * Right-to-left text (Persian, Arabic, Hebrew). xterm has no BiDi support, so it
+ * lays every row out left to right. On the DOM renderer the browser already
+ * shapes the letters, so what's missing is the row's direction: a Persian row
+ * is laid out as one right-to-left paragraph (ordered by the Unicode BiDi
+ * algorithm, right-aligned), and an English row with some RTL in it is still
+ * ordered as one paragraph, left to right. Two things xterm does have to
+ * be undone on those rows:
+ * - every span is `inline-block`, an atomic box the BiDi algorithm can't see
+ *   into — so the row was ordered box by box, left to right, and only the text
+ *   inside each box was reversed. Inline spans make the row one paragraph.
+ * - the per-span letter-spacing that pins glyphs to cells pulls joined Persian
+ *   letters apart.
+ *
+ * A row's direction is its first strong letter's — the Unicode BiDi rule
+ * (P2/P3), as VTE and the Reader panel's `dir="auto"` apply it; leading `●`,
+ * `-`, emoji and digits are neutral and skipped. A Persian sentence that opens
+ * with an English word therefore stays left to right here; the Reader panel,
+ * which sees whole paragraphs, is the place to read those.
+ *
+ * Render-only: the buffer stays logical, so copy, search and what is sent to
+ * the remote are untouched. The selection highlight is still drawn by cell, so
+ * on an RTL row it no longer lines up with the text. This is also why the app
+ * runs the DOM renderer rather than WebGL, whose glyph atlas can't shape text.
+ *
+ * Hooks xterm's private row factory (xterm 5.5); if that ever moves, rows just
+ * render as before.
+ */
+function enableRowBidi(term: XTerm): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const factory = (term as any)._core?._renderService?._renderer?.value?._rowFactory
+  const proto = factory && Object.getPrototypeOf(factory)
+  if (!proto || typeof proto.createRow !== 'function' || proto.__rowBidi) return
+  proto.__rowBidi = true
+  const createRow = proto.createRow
+  proto.createRow = function (
+    this: unknown,
+    lineData: { translateToString(trimRight?: boolean): string },
+    ...rest: unknown[]
+  ): HTMLElement[] {
+    const spans: HTMLElement[] = createRow.call(this, lineData, ...rest)
+    const text = lineData.translateToString(true)
+    if (!RTL_LETTER.test(text)) return spans
+    const row = document.createElement('span')
+    row.dir = RTL_LETTER.test(text.match(FIRST_LETTER)?.[0] ?? '') ? 'rtl' : 'ltr'
+    row.style.cssText = 'display:block;letter-spacing:0'
+    for (const span of spans) {
+      span.style.letterSpacing = ''
+      span.style.display = 'inline'
+      row.appendChild(span)
+    }
+    return [row]
   }
-  return ranges
 }
 
 /** Apply live setting changes (font, cursor, scrollback) to an existing terminal. */

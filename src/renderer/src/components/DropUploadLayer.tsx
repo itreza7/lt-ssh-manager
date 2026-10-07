@@ -6,11 +6,10 @@ import { PASTE_UPLOAD_ACCEL } from '../lib/xtermAttach'
  * in different places: the "let go here" affordance belongs to the one pane
  * under the pointer, while the status of a batch belongs to the tab.
  *
- * Both are absolutely positioned overlays, never docked siblings — the same
- * constraint the prompt composer documents. A docked element changes the
- * terminal host's box, the ResizeObserver turns that into a PTY resize, and
- * under tmux that reflows the session for *every* attached client. Hovering a
- * file over a pane must not reformat someone else's window.
+ * Both are absolutely positioned overlays, never docked siblings. A docked
+ * element changes the terminal host's box, the ResizeObserver turns that into a
+ * PTY resize, and under tmux that reflows the session for *every* attached
+ * client. Hovering a file over a pane must not reformat someone else's window.
  */
 
 /**
@@ -35,8 +34,8 @@ export function DropHint() {
 }
 
 /**
- * Progress and outcome for the last batch. Top edge, not bottom: the composer
- * owns the bottom, and the prompt is the last row anything should cover.
+ * Progress and outcome for the last batch. Top edge, not bottom: the prompt is
+ * the last row anything should cover.
  */
 export function DropStatusBar({
   status,

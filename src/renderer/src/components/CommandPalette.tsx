@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { ChatSession } from '../../../shared/chatProtocol'
 import type { AgentHostScan, AgentSession, Connection } from '../../../shared/types'
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import type { Tab } from '../App'
+import { CHAT_DOT, chatLabel, chatStatusOf } from './chat/format'
 
 interface Props {
   open: boolean
@@ -16,6 +18,11 @@ interface Props {
   showLeaf: (id: string) => void
   attachFromInbox: (connectionId: string, session: string) => void
   openSummary: () => void
+  openReader: () => void
+  /** The active host's live Claudes; must not prompt for anything. */
+  fetchChats: () => Promise<ChatSession[]>
+  openChat: (chat: ChatSession) => void
+  newChat: () => void
 }
 
 /** How many rows one section shows — a jump list, not the full inbox. */
@@ -54,10 +61,15 @@ export function CommandPalette({
   selectConnection,
   showLeaf,
   attachFromInbox,
-  openSummary
+  openSummary,
+  openReader,
+  fetchChats,
+  openChat,
+  newChat
 }: Props) {
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState(0)
+  const [chats, setChats] = useState<ChatSession[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const q = query.trim().toLowerCase()
@@ -67,6 +79,15 @@ export function CommandPalette({
     setQuery('')
     setCursor(0)
     inputRef.current?.focus()
+    // Read fresh each time the palette opens; a failure just means no chats listed.
+    let off = false
+    fetchChats()
+      .then((c) => !off && setChats(c))
+      .catch(() => !off && setChats([]))
+    return () => {
+      off = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   useEffect(() => {
@@ -125,6 +146,29 @@ export function CommandPalette({
     }))
   }, [agentHosts, q, attachFromInbox])
 
+  const chatResults = useMemo<ResultItem[]>(() => {
+    const list = chats.filter((c) => `${chatLabel(c)} ${c.name ?? ''} ${c.cwd}`.toLowerCase().includes(q))
+    return list.slice(0, MAX_RESULTS).map((c) => ({
+      key: `chat:${c.sessionId}`,
+      label: chatLabel(c),
+      sub: shortPath(c.cwd),
+      icon: <span className={`h-2 w-2 rounded-full ${CHAT_DOT[chatStatusOf(c)]}`} />,
+      run: () => openChat(c)
+    }))
+  }, [chats, q, openChat])
+
+  const newChatResult = useMemo<ResultItem | null>(() => {
+    const label = 'New chat…'
+    if (!label.toLowerCase().includes(q)) return null
+    return {
+      key: 'action:new-chat',
+      label,
+      sub: 'Talk to Claude Code on the active server',
+      icon: <span className="text-accent">✦</span>,
+      run: () => newChat()
+    }
+  }, [q, newChat])
+
   const summaryResult = useMemo<ResultItem | null>(() => {
     const label = 'Open Summary'
     if (!label.toLowerCase().includes(q)) return null
@@ -137,19 +181,37 @@ export function CommandPalette({
     }
   }, [q, openSummary])
 
+  const readerResult = useMemo<ResultItem | null>(() => {
+    const label = 'Claude reader'
+    if (!label.toLowerCase().includes(q)) return null
+    return {
+      key: 'action:reader',
+      label,
+      sub: 'Read a conversation with right-to-left text support',
+      icon: <span className="text-accent">¶</span>,
+      run: () => openReader()
+    }
+  }, [q, openReader])
+
+  const actionResults = useMemo(
+    () => [summaryResult, newChatResult, readerResult].filter((r): r is ResultItem => r !== null),
+    [summaryResult, newChatResult, readerResult]
+  )
+
   const sections = useMemo(
     () =>
       [
         { title: 'Hosts', items: hostResults },
         { title: 'Open Tabs', items: tabResults },
+        { title: 'Chats', items: chatResults },
         { title: 'Running Agents', items: agentResults }
       ].filter((s) => s.items.length > 0),
-    [hostResults, tabResults, agentResults]
+    [hostResults, tabResults, chatResults, agentResults]
   )
 
   const flatResults = useMemo(
-    () => [...sections.flatMap((s) => s.items), ...(summaryResult ? [summaryResult] : [])],
-    [sections, summaryResult]
+    () => [...sections.flatMap((s) => s.items), ...actionResults],
+    [sections, actionResults]
   )
 
   const resultIndex = useMemo(() => {
@@ -229,7 +291,9 @@ export function CommandPalette({
             </div>
           ))}
 
-          {summaryResult && <div className="mt-1 border-t border-line/70 pt-1">{row(summaryResult)}</div>}
+          {actionResults.length > 0 && (
+            <div className="mt-1 border-t border-line/70 pt-1">{actionResults.map(row)}</div>
+          )}
 
           {flatResults.length === 0 && (
             <p className="px-3 py-8 text-center text-xs text-faint">No matches.</p>

@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import '@fontsource-variable/hanken-grotesk'
 import '@fontsource-variable/jetbrains-mono'
 import '@fontsource-variable/fira-code'
+import '@fontsource-variable/vazirmatn'
 import App from './App'
 import { isMac } from './lib/platform'
 import './index.css'
@@ -20,7 +21,7 @@ document.documentElement.classList.toggle('mac', isMac)
 //
 // Text fields are the exception, and only for payloads that can't navigate:
 // cancelling in the capture phase runs before the field's own handling, so an
-// unconditional guard would silently break dragging text into the composer, a
+// unconditional guard would silently break dragging text into the chat composer, a
 // host field, or a rename box — including drag-to-move within one textarea.
 const editable = (t: EventTarget | null): boolean =>
   t instanceof HTMLElement &&

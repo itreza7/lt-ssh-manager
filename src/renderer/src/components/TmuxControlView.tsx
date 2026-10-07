@@ -1,13 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-  type Ref
-} from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import type {
   CloseReason,
@@ -18,14 +9,13 @@ import type {
 } from '../../../shared/types'
 import type { TerminalSettings } from '../lib/terminalSettings'
 import { attachAgentSignal, type AgentSignal } from '../lib/xtermAgentSignal'
-import { attachTerminal, sendComposed, type ComposerHandle } from '../lib/xtermAttach'
+import { attachTerminal } from '../lib/xtermAttach'
 import type { FindTarget } from '../lib/useTerminalFind'
 import { useTerminalFind } from '../lib/useTerminalFind'
 import { applyTerminalSettings, createTerminal, measureCell } from '../lib/xtermSetup'
 import { tmuxReattachCommand } from '../lib/tmux'
 import { useDropUpload } from '../lib/useDropUpload'
 import { DropHint, DropStatusBar } from './DropUploadLayer'
-import { PromptComposer } from './PromptComposer'
 import { ReattachBanner } from './ReattachBanner'
 import { TerminalFindBar } from './TerminalFindBar'
 
@@ -48,12 +38,6 @@ interface Props {
    * sits in a tmux window the user isn't currently looking at.
    */
   onAgentSignal?: (sessionId: string, signal: AgentSignal, onScreen?: boolean) => void
-  /** Stable across a reconnect *and* a restart — keys the persisted per-pane drafts on disk. */
-  draftKey: string
-  /** The per-pane drafts last persisted for this tab, loaded before mount so they aren't lost on restart. */
-  initialDrafts?: Record<string, string>
-  /** Lets a header button toggle the focused pane's composer without owning its state. */
-  ref?: Ref<ComposerHandle>
 }
 
 /** A registry that routes per-pane output, buffering until a pane mounts. */
@@ -61,9 +45,8 @@ type PaneWriter = (data: Uint8Array) => void
 
 /**
  * What a mounted pane hands back to the view. The terminal itself is part of it
- * because sending isn't only "write bytes to the wire": the composer sends
- * through the pane's own `term.input()` (see xtermAttach's `sendComposed`) and
- * hands focus back to it afterwards.
+ * because sending isn't only "write bytes to the wire": a dropped file's path
+ * is typed through the pane's own `term.input()`.
  */
 interface PaneHandle {
   write: PaneWriter
@@ -90,10 +73,7 @@ export function TmuxControlView({
   retries,
   settings,
   onStatus,
-  onAgentSignal,
-  draftKey,
-  initialDrafts,
-  ref
+  onAgentSignal
 }: Props) {
   const areaRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<TmuxControlState | null>(null)
@@ -115,29 +95,6 @@ export function TmuxControlView({
   const writers = useRef(new Map<string, PaneHandle>())
   const buffers = useRef(new Map<string, Uint8Array[]>())
 
-  // Prompt composer. `target` is the pane being drafted for and doubles as the
-  // open flag; drafts are kept per pane, so moving between panes never hands one
-  // pane's half-written prompt to another.
-  const [target, setTarget] = useState<string | null>(null)
-  const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts ?? {})
-
-  // Local autosave, independent of the SSH connection: all panes' drafts are
-  // serialized as one JSON blob under this tab's key (an empty record persists
-  // as '', which the store treats as "delete"). Survives disconnects, crashes,
-  // and restarts; cleared on send/discard (which empty a pane's entry) or on
-  // explicit tab close (handled by the caller via draftsSet(draftKey, '')).
-  useEffect(() => {
-    const t = setTimeout(() => {
-      const value = Object.keys(drafts).length ? JSON.stringify(drafts) : ''
-      void window.api.draftsSet(draftKey, value)
-    }, 300)
-    return () => clearTimeout(t)
-  }, [drafts, draftKey])
-  // See TerminalView: bumped on every request to compose so the textarea is
-  // re-focused even when the panel was already open. Stable dispatch, because
-  // openComposer is captured by each pane's mount-once effect.
-  const [focusKey, bumpFocus] = useReducer((n: number) => n + 1, 0)
-
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   const onScreenRef = useRef(onScreen)
@@ -156,32 +113,6 @@ export function TmuxControlView({
     return () => {
       if (writers.current.get(paneId) === handle) writers.current.delete(paneId)
     }
-  }, [])
-
-  const openComposer = useCallback((paneId: string) => {
-    setTarget(paneId)
-    bumpFocus()
-  }, [])
-
-  const closeComposer = useCallback((paneId: string | null) => {
-    setTarget(null)
-    if (paneId) writers.current.get(paneId)?.term.focus()
-  }, [])
-
-  // What the compose chord does for a given pane: open when nothing (or a
-  // different pane) is drafting, close when that same pane's composer is
-  // already open — the keyboard way to turn it "off". openComposer/closeComposer
-  // above are unchanged and still used by the strip's own buttons, which always
-  // mean what they say regardless of current state.
-  const toggleComposer = useCallback((paneId: string) => {
-    setTarget((cur) => {
-      if (cur === paneId) {
-        writers.current.get(paneId)?.term.focus()
-        return null
-      }
-      bumpFocus()
-      return paneId
-    })
   }, [])
 
   // Drop-to-upload. The status is per tab (one batch at a time), but the hover
@@ -420,18 +351,6 @@ export function TmuxControlView({
   // Read by onPaneAgentSignal, which is mount-stable and so can't close over this.
   shownPanesRef.current = new Set(activeWindow?.panes.map((p) => p.paneId) ?? [])
 
-  // For the header's composer-toggle button, which has no pane of its own to
-  // aim at — a no-op before the first attach reports which pane is focused.
-  const toggleComposerForActivePane = useCallback(() => {
-    if (focusedPane) toggleComposer(focusedPane)
-  }, [focusedPane, toggleComposer])
-
-  useImperativeHandle(
-    ref,
-    () => ({ toggleComposer: toggleComposerForActivePane, isOpen: !!target }),
-    [toggleComposerForActivePane, target]
-  )
-
   // Render every pane across every window (kept mounted so content persists), but
   // only the active window's panes are visible.
   const allPanes = useMemo(
@@ -439,73 +358,7 @@ export function TmuxControlView({
     [windows]
   )
 
-  // The composer is drafting for `target` when open, and shows the focused
-  // pane's saved draft as a strip when it isn't.
-  const draftPane = target ?? focusedPane ?? null
-  const draft = (draftPane && drafts[draftPane]) || ''
-
-  const setDraft = useCallback(
-    (v: string) => {
-      if (draftPane) setDrafts((d) => ({ ...d, [draftPane]: v }))
-    },
-    [draftPane]
-  )
-
-  // Raw key chords from the composer's quick-actions row (Shift+Tab, Esc) —
-  // straight to the focused pane's remote, unbracketed, no draft involved.
-  const sendKey = useCallback(
-    (data: string) => {
-      const term = target ? writers.current.get(target)?.term : undefined
-      term?.input(data, true)
-    },
-    [target]
-  )
-
-  const sendDraft = useCallback(
-    (submit: boolean, body: string) => {
-      const term = target ? writers.current.get(target)?.term : undefined
-      if (!target || !term || !body) return
-      sendComposed(term, body, submit)
-      setDrafts(({ [target]: _sent, ...rest }) => rest)
-      if (settingsRef.current.composerStayOpen) {
-        // Stay open, drafting the next message for the same pane — just get
-        // focus back onto the (now empty) textarea.
-        bumpFocus()
-      } else {
-        setTarget(null)
-        term.focus()
-      }
-    },
-    [target]
-  )
-
-  // A pane can be killed from the remote — by tmux itself, or from another
-  // client — while its composer is open. Close rather than leave a drafting
-  // panel pointed at a pane that no longer exists.
-  useEffect(() => {
-    if (target && !allPanes.some((p) => p.pane.paneId === target)) setTarget(null)
-  }, [target, allPanes])
-
-  // Coming back to a parked tab. App hides a leaf with `display: none`, which
-  // drops DOM focus altogether, and no pane will take it back while the composer
-  // is up (`focused` is false for all of them) — so the composer has to ask for
-  // it, or the user returns to a draft that swallows every keystroke.
-  useEffect(() => {
-    if (active && target) bumpFocus()
-  }, [active, target])
-
   const isReady = windows.length > 0
-
-  // Open the composer for the focused pane as soon as one is ready, if the
-  // setting asks for it. Guarded to run once: a later settings change, or the
-  // focused pane changing as the user navigates tmux, must never reopen a
-  // composer that was already closed on purpose.
-  const defaultOpenedRef = useRef(false)
-  useEffect(() => {
-    if (defaultOpenedRef.current || !isReady || !focusedPane) return
-    defaultOpenedRef.current = true
-    if (settingsRef.current.composerDefaultOpen) openComposer(focusedPane)
-  }, [isReady, focusedPane, openComposer])
 
   // See TerminalView: a session that is *gone* must not offer "Reattach", since
   // reattaching there means running the create-or-attach command again.
@@ -579,12 +432,9 @@ export function TmuxControlView({
                   paneId={pane.paneId}
                   cols={pane.w}
                   rows={pane.h}
-                  // Not focused while the composer is up, or the pane would take
-                  // keyboard focus back from the textarea on the next re-render.
-                  focused={active && isActivePane && !target}
+                  focused={active && isActivePane}
                   settings={settings}
                   register={registerPane}
-                  onCompose={toggleComposer}
                   onDragFiles={onPaneDragFiles}
                   onDropFiles={onPaneDropFiles}
                   onPasteUpload={onPanePasteUpload}
@@ -605,26 +455,6 @@ export function TmuxControlView({
         {reattach && <ReattachBanner sessionId={sessionId} {...reattach} />}
         <DropStatusBar status={upload.status} onDismiss={upload.dismiss} />
       </div>
-
-      {/* Docked below the pane area, not overlaid on it — a real flex sibling, so
-          opening it shrinks areaRef, and this view turns that box straight into
-          the tmux client size: every other client attached to the session sees
-          the windows reflow while it's open. Accepted trade-off for a composer
-          that never hides pane rows; see PromptComposer's own doc comment for
-          the animated collapse. */}
-      <PromptComposer
-        open={!!target}
-        focusKey={focusKey}
-        draft={draft}
-        onDraft={setDraft}
-        onSend={sendDraft}
-        sendMode={settings.composerSendMode}
-        onOpen={() => draftPane && openComposer(draftPane)}
-        onClose={() => closeComposer(draftPane)}
-        onDiscard={() => draftPane && setDrafts(({ [draftPane]: _dropped, ...rest }) => rest)}
-        target={activeWindow && activeWindow.panes.length > 1 ? (draftPane ?? undefined) : undefined}
-        onSendKey={sendKey}
-      />
 
       {overlay && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-ink/80 backdrop-blur-sm">
@@ -689,7 +519,6 @@ function TmuxPane({
   focused,
   settings,
   register,
-  onCompose,
   onDragFiles,
   onDropFiles,
   onPasteUpload,
@@ -704,8 +533,6 @@ function TmuxPane({
   settings: TerminalSettings
   register: (paneId: string, handle: PaneHandle) => () => void
   /** Stable across renders — the mount-once effect closes over it. */
-  onCompose: (paneId: string) => void
-  /** Stable across renders, as above. */
   onDragFiles: (paneId: string, over: boolean) => void
   /** Stable across renders, as above. */
   onDropFiles: (paneId: string, paths: string[]) => void
@@ -720,10 +547,9 @@ function TmuxPane({
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
-  // Find-in-pane. Per pane rather than per tab, unlike the composer above: a
-  // draft is a paragraph aimed at one pane you picked, but a search is tied to
-  // the buffer you are already reading, and a tab-level bar would have to keep
-  // asking which of four panes that is. No overscroll here — tmux owns the
+  // Find-in-pane. Per pane rather than per tab: a search is tied to the buffer
+  // you are already reading, and a tab-level bar would have to keep asking which
+  // of four panes that is. No overscroll here — tmux owns the
   // layout and each pane scrolls its own xterm viewport — so the addon's own
   // scroll-to-match is the whole story.
   const findRef = useRef<FindTarget | null>(null)
@@ -742,7 +568,6 @@ function TmuxPane({
     const detachTerminal = attachTerminal(term, containerRef.current!, {
       sendData: send,
       settings: () => settingsRef.current,
-      onCompose: () => onCompose(paneId),
       onFind: startFind,
       onDragFiles: (over) => onDragFiles(paneId, over),
       onDropFiles: (paths) => onDropFiles(paneId, paths),

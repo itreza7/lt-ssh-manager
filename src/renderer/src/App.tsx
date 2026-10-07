@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import type { ChatSession } from '../../shared/chatProtocol'
 import type {
   ClaudeHookStatus,
   ClaudeStatusLineStatus,
@@ -16,12 +17,14 @@ import type {
   SessionStatus,
   SplitDirection,
   TmuxIntent,
+  TmuxSession,
   Workspace
 } from '../../shared/types'
 import { DEFAULTS, type AppSettings, type SettingsPatch } from './lib/terminalSettings'
 import { MenuBar } from './components/MenuBar'
 import { WindowControls } from './components/WindowControls'
 import { SummaryView } from './components/SummaryView'
+import { Sidebar, type SidebarOpenRow } from './components/Sidebar'
 import { SettingsPage } from './components/SettingsPage'
 import { CommandPalette } from './components/CommandPalette'
 import { ConnectionDialog } from './components/ConnectionDialog'
@@ -32,15 +35,19 @@ import { TmuxControlView } from './components/TmuxControlView'
 import { FileManager } from './components/FileManager'
 import { EditorView } from './components/EditorView'
 import { WorktreeView } from './components/WorktreeView'
+import { ReaderView } from './components/ReaderView'
+import { ChatView } from './components/ChatView'
+import { NewChatModal } from './components/chat/NewChatModal'
+import { chatTabTitle, leaf, sortChats } from './components/chat/format'
 import { TunnelManager } from './components/TunnelManager'
 import { SplitControls } from './components/SplitControls'
 import { PaneDividers } from './components/PaneDividers'
+import { ModeSwitch } from './components/ModeSwitch'
 import { PaneTools } from './components/PaneTools'
 import { PanePicker } from './components/PanePicker'
 import { parseTmuxIntent, tmuxCreateCommand, tmuxSessionName } from './lib/tmux'
 import { claudeSessionName, claudeTabCommand } from './lib/claude'
 import type { AgentSignal } from './lib/xtermAgentSignal'
-import { COMPOSE_ACCEL, type ComposerHandle } from './lib/xtermAttach'
 import { TERMINAL_BG } from './lib/xtermSetup'
 import { useAgentSessions } from './hooks/useAgentSessions'
 import { isMac } from './lib/platform'
@@ -137,6 +144,36 @@ interface WorktreeTab {
   password?: string
 }
 
+/** A Claude conversation read from the server's transcript files, as HTML. */
+interface ReaderTab {
+  kind: 'reader'
+  id: string // `rd:${connectionId}:${dir ?? ''}`
+  connectionId: string
+  /** Show only this project directory's transcripts; without it, every project's. */
+  dir?: string
+  title: string
+  password?: string
+}
+
+/** A rich second view of a Claude Code session running in tmux on the server (see chatProtocol.ts). */
+// How many earlier session ids a chat tab remembers (see ChatTab.formerIds).
+const MAX_FORMER_IDS = 5
+
+interface ChatTab {
+  kind: 'chat'
+  id: string // `chat:${sessionId it was opened with}`; kept when a resume moves the tab to a new session
+  connectionId: string
+  sessionId: string
+  cwd: string
+  title: string
+  password?: string
+  /** Just started or resumed: the live Claude may not be visible yet. Not persisted. */
+  starting?: boolean
+  /** Session ids this tab had before /clear or /resume moved it, newest last. The sidebar's
+   *  list can still name one of them for a moment. Not persisted. */
+  formerIds?: string[]
+}
+
 // A "leaf" — one unit of content. Leaves live inside views (see below).
 export type Tab =
   | SummaryTab
@@ -147,9 +184,11 @@ export type Tab =
   | EditorTab
   | TunnelTab
   | WorktreeTab
+  | ReaderTab
+  | ChatTab
 
 /**
- * A tab-bar entry. A view with one pane is an ordinary tab; a view with 2–3
+ * A sidebar "Open" entry. A view with one pane is an ordinary tab; a view with 2–3
  * panes is a split that is *itself* a tab — the joined leaves are no longer
  * shown as separate tabs. `panes` holds the leaf id per pane (null = an empty
  * pane awaiting a tab); `focused` is the pane that takes keyboard input. Each
@@ -161,6 +200,27 @@ interface View {
   panes: (string | null)[]
   sizes: number[] // fractions, same length as panes, summing to 1
   focused: number
+}
+
+// Last mode the user picked per Claude session, keyed by connection and tmux session
+// name (which a /clear keeps). Read on a sidebar click to open the same side again.
+type SessionMode = 'chat' | 'terminal'
+const MODE_KEY = 'session.mode'
+const modeKey = (connectionId: string, tmuxName: string): string => `${connectionId}\0${tmuxName}`
+function readModes(): Record<string, SessionMode> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(MODE_KEY) ?? '{}')
+    return v && typeof v === 'object' ? (v as Record<string, SessionMode>) : {}
+  } catch {
+    return {}
+  }
+}
+function rememberMode(connectionId: string, tmuxName: string, mode: SessionMode): void {
+  try {
+    localStorage.setItem(MODE_KEY, JSON.stringify({ ...readModes(), [modeKey(connectionId, tmuxName)]: mode }))
+  } catch {
+    /* a blocked store only loses the memory */
+  }
 }
 
 const makeView = (
@@ -197,6 +257,11 @@ interface PwRequest {
 }
 
 const tunId = (connectionId: string): string => `tun:${connectionId}`
+
+const readerId = (connectionId: string, dir?: string): string => `rd:${connectionId}:${dir ?? ''}`
+const chatTabId = (sessionId: string): string => `chat:${sessionId}`
+const readerTitle = (host: string, dir?: string): string =>
+  `Reader · ${dir ? (dir.split('/').filter(Boolean).pop() ?? '/') : host}`
 
 // Strip a live tab down to what's safe + sufficient to recreate it later.
 // Passwords and volatile session ids/status are intentionally omitted.
@@ -237,19 +302,10 @@ function serializeTab(t: Tab): PersistedTab {
         title: t.title,
         initialPath: t.dir
       }
-  }
-}
-
-// A tmux tab's drafts are stored as one JSON blob per pane under the tab's
-// single tabKey (see TmuxControlView's persist effect) — parse it back out,
-// falling back to empty on missing/corrupt data.
-function parseTmuxDrafts(raw: string | undefined): Record<string, string> {
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
+    case 'reader':
+      return { kind: 'reader', connectionId: t.connectionId, title: t.title, initialPath: t.dir }
+    case 'chat':
+      return { kind: 'chat', connectionId: t.connectionId, title: t.title, sessionId: t.sessionId, cwd: t.cwd }
   }
 }
 
@@ -287,54 +343,21 @@ export default function App() {
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [secretsAvailable, setSecretsAvailable] = useState(true)
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULTS)
-  // Prompt composer drafts, local-autosave keyed by tabKey — see PersistedTab.tabKey.
-  const [drafts, setDrafts] = useState<Record<string, string>>({})
 
   const [dialogConn, setDialogConn] = useState<Connection | null | undefined>(undefined) // undefined = closed
   const [hostKey, setHostKey] = useState<HostKeyPrompt | null>(null)
   const [pwRequest, setPwRequest] = useState<PwRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // The "New chat" form, once the host's password is settled.
+  const [newChat, setNewChat] = useState<{ conn: Connection; password?: string; dir: string } | null>(null)
 
   // Workspace persistence: don't save until the previous session is restored,
   // so the empty initial state never clobbers the saved tabs on disk.
   const restoredRef = useRef(false)
   const lastSavedRef = useRef('')
 
-  // Tab drag-to-reorder state (operates on views).
-  const dragViewId = useRef<string | null>(null)
-  const [dragOverId, setDragOverId] = useState<string | null>(null)
-
   // The split container, so dividers can translate pointer travel into fractions.
   const contentRef = useRef<HTMLDivElement>(null)
-
-  // One composer handle per session/tmux tab, so the header's toggle button can
-  // reach whichever pane is focused without owning any drafting state itself.
-  const composerRefs = useRef(new Map<string, ComposerHandle>())
-  // Mirrors each handle's `isOpen` into render-visible state — the map above is
-  // a ref precisely so touching it doesn't cause a render, but the toggle
-  // button's own color does need one. useImperativeHandle re-invokes this
-  // callback with a fresh handle whenever a pane's composer opens or closes.
-  const [composerOpen, setComposerOpen] = useState<Record<string, boolean>>({})
-  // useImperativeHandle's effect keys off the `ref` prop's own identity as well
-  // as its deps, so a `ref={setComposerRef(id)}` that mints a new closure every
-  // render makes it re-fire on every render — which, now that it calls setState,
-  // becomes an infinite loop. Cache one stable callback per id instead.
-  const composerRefCallbacks = useRef(new Map<string, (h: ComposerHandle | null) => void>())
-  const setComposerRef = useCallback((id: string) => {
-    let cb = composerRefCallbacks.current.get(id)
-    if (!cb) {
-      cb = (h: ComposerHandle | null): void => {
-        if (h) composerRefs.current.set(id, h)
-        else composerRefs.current.delete(id)
-        setComposerOpen((m) => {
-          const next = h?.isOpen ?? false
-          return m[id] === next ? m : { ...m, [id]: next }
-        })
-      }
-      composerRefCallbacks.current.set(id, cb)
-    }
-    return cb
-  }, [])
 
   // Derived view state. The active view is the tab on screen; the focused pane's
   // leaf is the app's notion of the "active" tab (sidebar + keyboard follow it).
@@ -368,6 +391,8 @@ export default function App() {
   }
   const viewsRef = useRef(views)
   viewsRef.current = views
+  // Live Claudes by tmux session name, per connection, from the sidebar's chat poll.
+  const [claudeTmux, setClaudeTmux] = useState<Record<string, Record<string, ChatSession>>>({})
 
   const refresh = async (): Promise<void> => setConnections(await window.api.listConnections())
   const nameOf = (id: string): string => connections.find((c) => c.id === id)?.name ?? 'Connection'
@@ -391,6 +416,8 @@ export default function App() {
     if (t.kind === 'tunnels') return <span className={c}>⇄</span>
     if (t.kind === 'editor') return <span className={c}>✎</span>
     if (t.kind === 'worktrees') return <span className={c}>⑂</span>
+    if (t.kind === 'reader') return <span className={c}>¶</span>
+    if (t.kind === 'chat') return <span className={c}>✦</span>
     return <span className={`h-2 w-2 rounded-full ${statusDot(t.status)}`} />
   }
 
@@ -416,6 +443,33 @@ export default function App() {
     const nv = makeView([id])
     setViews((vs) => [...vs, nv])
     setActiveViewId(nv.id)
+  }
+
+  // Show `id` in the pane that holds `replaceId` (the Chat / Terminal switch): the
+  // split keeps its layout, and `replaceId` stays mounted in a background view of
+  // its own. Without such a pane it is a plain showLeaf.
+  const showLeafIn = (id: string, replaceId: string): void => {
+    const target = viewsRef.current.find((x) => x.panes.includes(replaceId))
+    if (!target || id === replaceId) return showLeaf(id)
+    const idx = target.panes.indexOf(replaceId)
+    setViews((vs) => {
+      const out: View[] = []
+      for (const v of vs) {
+        if (v.id === target.id) {
+          const panes = v.panes.slice()
+          panes[idx] = id
+          out.push({ ...v, panes, focused: idx })
+        } else if (v.panes.includes(id)) {
+          const sv = shrinkView(v, v.panes.indexOf(id))
+          if (sv) out.push(sv)
+        } else {
+          out.push(v)
+        }
+      }
+      out.push(makeView([replaceId]))
+      return out
+    })
+    setActiveViewId(target.id)
   }
 
   // Click a pane to focus it.
@@ -594,6 +648,17 @@ export default function App() {
   })
 
   // In-pane move / detach / close controls, only for a leaf shown in a split.
+  // The Chat / Terminal switch over a terminal whose tmux session runs a Claude.
+  // In a split it sits below the pane tools, which take the top-right corner on hover.
+  const terminalSwitch = (tab: SessionTab | ControlTab): ReactNode =>
+    tab.tmux && claudeTmux[tab.connectionId]?.[tab.tmux.session] ? (
+      <ModeSwitch
+        mode="terminal"
+        onChat={() => void openChatForTab(tab)}
+        className={`absolute right-3 z-10 shadow-lg ${isSplit ? 'top-10' : 'top-2'}`}
+      />
+    ) : null
+
   const paneTools = (id: string): ReactNode => {
     if (!isSplit || !activeView || !onScreen(id)) return null
     const i = activeView.panes.indexOf(id)
@@ -652,12 +717,7 @@ export default function App() {
 
   // Summary is always mounted, so the live-agent poll just always runs — no
   // more "has the inbox ever been opened" gate to thread through.
-  const {
-    hosts: agentHosts,
-    error: agentScanError,
-    scanning: agentScanning,
-    rescan: rescanAgents
-  } = useAgentSessions(true)
+  const { hosts: agentHosts, error: agentScanError } = useAgentSessions(true)
 
   useEffect(() => {
     void (async () => {
@@ -665,9 +725,6 @@ export default function App() {
       setConnections(conns)
       void window.api.secretsAvailable().then(setSecretsAvailable)
       try {
-        // Load persisted drafts before restoring tabs so TerminalView/TmuxControlView
-        // seed their initial state from disk on first mount instead of starting blank.
-        setDrafts(await window.api.draftsAll())
         const ws = await window.api.getWorkspace()
         await restoreWorkspace(ws, conns)
       } finally {
@@ -745,8 +802,8 @@ export default function App() {
     }
   }, [])
 
-  // Native macOS fullscreen removes the traffic lights entirely, so the header
-  // row's reserved left padding for them would otherwise show as a dead gutter.
+  // Native macOS fullscreen removes the traffic lights entirely, so the sidebar's top
+  // reserved for them would otherwise show as dead space.
   useEffect(() => {
     if (!isMac) return
     void window.api.winIsFullScreen().then(setFullScreen)
@@ -780,7 +837,7 @@ export default function App() {
 
   // The badge counts sessions, not signals — five questions from one agent is
   // still one session waiting on you. Only in `notify` mode: dot-only means the
-  // tab strip is the whole surface, dock included.
+  // sidebar is the whole surface, dock included.
   useEffect(() => {
     window.api.agentBadge(appSettings.terminal.agentAlerts === 'notify' ? waiting.size : 0)
   }, [waiting, appSettings.terminal.agentAlerts])
@@ -991,6 +1048,39 @@ export default function App() {
           })
         if (makeActive) activeId = id
         idForIndex.set(i, id)
+      } else if (pt.kind === 'reader') {
+        const pw = await getPw(conn)
+        if (pw === null) continue
+        const id = readerId(conn.id, pt.initialPath)
+        if (!has(id))
+          built.push({
+            kind: 'reader',
+            id,
+            connectionId: conn.id,
+            dir: pt.initialPath,
+            title: pt.title ?? readerTitle(conn.name, pt.initialPath),
+            password: pw ?? undefined
+          })
+        if (makeActive) activeId = id
+        idForIndex.set(i, id)
+      } else if (pt.kind === 'chat') {
+        // A tab saved by 0.43.0 names a relay chat (`chatId`), which no longer exists.
+        if (!pt.sessionId || !pt.cwd) continue
+        const pw = await getPw(conn)
+        if (pw === null) continue
+        const id = chatTabId(pt.sessionId)
+        if (!has(id))
+          built.push({
+            kind: 'chat',
+            id,
+            connectionId: conn.id,
+            sessionId: pt.sessionId,
+            cwd: pt.cwd,
+            title: pt.title ?? `Chat · ${conn.name}`,
+            password: pw ?? undefined
+          })
+        if (makeActive) activeId = id
+        idForIndex.set(i, id)
       }
     }
 
@@ -1064,7 +1154,7 @@ export default function App() {
   // persistent session (create-or-attach); otherwise it's a plain login shell.
   const openSession = async (
     conn: Connection,
-    opts?: { session?: string; title?: string; agent?: { dir: string } }
+    opts?: { session?: string; title?: string; agent?: { dir: string }; into?: string }
   ): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) return // user cancelled the prompt
@@ -1108,7 +1198,8 @@ export default function App() {
     }
     const tab: Tab = control ? { kind: 'tmux', ...base } : { kind: 'session', ...base }
     setTabs((t) => [...t, tab])
-    showLeaf(sessionId)
+    if (opts?.into) showLeafIn(sessionId, opts.into)
+    else showLeaf(sessionId)
   }
 
   // Open a remote file manager (SFTP) as a NEW tab.
@@ -1213,10 +1304,248 @@ export default function App() {
     showLeaf(id)
   }
 
-  const fetchTmuxFor = (conn: Connection) => async () => {
-    const password = await resolvePassword(conn)
-    if (password === null) throw new Error('Password required to list sessions.')
-    return window.api.tmuxList({ connectionId: conn.id, password: password ?? undefined })
+  /**
+   * Open the transcript reader for a connection, scoped to `dir` when given.
+   *
+   * Beside a terminal it opens in a split — the point is to read the answer next
+   * to the agent that is writing it. That means: into an empty pane of the
+   * current split if there is one, else growing the split by one (max 3). From
+   * any other leaf (Summary, files…) there is nothing to read beside, so it
+   * just gets its own tab.
+   */
+  const openReader = (connectionId: string, password: string | undefined, dir?: string): void => {
+    const id = readerId(connectionId, dir)
+    if (tabs.some((x) => x.id === id)) {
+      showLeaf(id)
+      return
+    }
+    setTabs((t) => [
+      ...t,
+      { kind: 'reader', id, connectionId, dir, title: readerTitle(nameOf(connectionId), dir), password }
+    ])
+    const v = activeView
+    const beside = activeTab?.kind === 'session' || activeTab?.kind === 'tmux'
+    if (v && beside) {
+      const empty = v.panes.indexOf(null)
+      if (empty >= 0) {
+        fillPane(v.id, empty, id)
+        return
+      }
+      if (v.panes.length < 3) {
+        applySplit(v.direction, v.panes.length + 1)
+        fillPane(v.id, v.panes.length, id)
+        return
+      }
+    }
+    showLeaf(id)
+  }
+
+  // The reader for a terminal tab: scoped to the directory its tmux session is
+  // in, if it is one. Without tmux there is no way to ask the remote where the
+  // shell is, so that reader lists every project.
+  const openReaderForTab = async (tab: SessionTab | ControlTab): Promise<void> => {
+    const dir = tab.tmux
+      ? await window.api
+          .readerTmuxDir({
+            connectionId: tab.connectionId,
+            password: tab.password,
+            session: tab.tmux.session
+          })
+          .catch(() => null)
+      : null
+    openReader(tab.connectionId, tab.password, dir ?? undefined)
+  }
+
+  // Command palette: the reader for whatever is on screen.
+  const openReaderFromActive = async (): Promise<void> => {
+    if (activeTab?.kind === 'session' || activeTab?.kind === 'tmux') {
+      await openReaderForTab(activeTab)
+      return
+    }
+    const conn = connections.find((c) => c.id === (selectedConnId ?? activeConnectionId))
+    if (!conn) return
+    const password = activeTab && 'password' in activeTab ? activeTab.password : undefined
+    const pw = password ?? (await resolvePassword(conn))
+    if (pw === null) return // user cancelled the prompt
+    openReader(conn.id, pw)
+  }
+
+  // --- native chat -------------------------------------------------------------
+
+  /**
+   * Show a session's chat tab, opening it if needed. The chat is only a view: the
+   * Claude it follows keeps running in tmux whether or not the tab exists.
+   */
+  const openChat = (
+    connectionId: string,
+    password: string | undefined,
+    sessionId: string,
+    cwd: string,
+    title: string,
+    starting?: boolean,
+    into?: string
+  ): void => {
+    const show = (id: string): void => (into ? showLeafIn(id, into) : showLeaf(id))
+    const open = tabs.find((x) => x.kind === 'chat' && x.sessionId === sessionId)
+    if (open) {
+      show(open.id)
+      return
+    }
+    // A resumed tab keeps its old id, so the old session id can map to a taken one.
+    const base = chatTabId(sessionId)
+    const id = tabs.some((x) => x.id === base) ? `${base}:${Date.now()}` : base
+    setTabs((t) => [...t, { kind: 'chat', id, connectionId, sessionId, cwd, title, password, starting }])
+    show(id)
+  }
+
+  const openChatFor = async (conn: Connection, chat: ChatSession): Promise<void> => {
+    const pw = await resolvePassword(conn)
+    if (pw === null) return // user cancelled the prompt
+    openChat(conn.id, pw ?? undefined, chat.sessionId, chat.cwd, chatTabTitle(chat))
+  }
+
+  // A session's sidebar row: the side the user last switched it to.
+  const openSessionRow = (conn: Connection, chat: ChatSession): void => {
+    const name = chat.tmux?.session
+    if (name && readModes()[modeKey(conn.id, name)] === 'terminal') showTmuxSession(conn.id, name)
+    else void openChatFor(conn, chat)
+  }
+
+  // A resume can start Claude under a new session id: the tab follows it.
+  const chatStarted = (tabId: string): void =>
+    setTabs((ts) =>
+      ts.some((t) => t.id === tabId && t.kind === 'chat' && t.starting)
+        ? ts.map((t) => (t.id === tabId && t.kind === 'chat' ? { ...t, starting: false } : t))
+        : ts
+    )
+
+  const moveChat = (tabId: string, sessionId: string): void =>
+    setTabs((ts) =>
+      ts.map((t) =>
+        t.id === tabId && t.kind === 'chat' ? { ...t, sessionId, starting: true, formerIds: [...(t.formerIds ?? []), t.sessionId].slice(-MAX_FORMER_IDS) } : t
+      )
+    )
+
+  // The terminal tab on a tmux session: the one already open, else a new one.
+  const showTmuxSession = (connectionId: string, name: string, into?: string): void => {
+    const open = tabs.find(
+      (t) => (t.kind === 'session' || t.kind === 'tmux') && t.connectionId === connectionId && t.tmux?.session === name
+    )
+    if (open) {
+      if (into) showLeafIn(open.id, into)
+      else showLeaf(open.id)
+      return
+    }
+    const conn = connections.find((c) => c.id === connectionId)
+    if (conn) attachTmux(conn, name, into)
+  }
+
+  // The Chat / Terminal switch: the other side of the same Claude, in the same pane.
+  const switchToTerminal = (tab: ChatTab, name: string): void => {
+    rememberMode(tab.connectionId, name, 'terminal')
+    showTmuxSession(tab.connectionId, name, tab.id)
+  }
+
+  // The chat for a terminal tab: the live Claude whose tmux session is the tab's,
+  // shown in the terminal's pane.
+  const openChatForTab = async (tab: SessionTab | ControlTab): Promise<void> => {
+    if (!tab.tmux) return
+    const name = tab.tmux.session
+    const known = claudeTmux[tab.connectionId]?.[name]
+    const chat =
+      known ??
+      (
+        await window.api
+          .chatList({ connectionId: tab.connectionId, password: tab.password })
+          .catch(() => [] as ChatSession[])
+      ).find((c) => c.tmux?.session === name)
+    if (!chat) {
+      alert('No Claude is running in this tmux session.')
+      return
+    }
+    rememberMode(tab.connectionId, name, 'chat')
+    openChat(tab.connectionId, tab.password, chat.sessionId, chat.cwd, chatTabTitle(chat), false, tab.id)
+  }
+
+  // Where a new chat starts: the folder of the terminal on screen when it is a
+  // tmux one (the only kind the remote can be asked about), else home.
+  const openNewChat = async (conn: Connection, password?: string): Promise<void> => {
+    const t = activeTab?.kind === 'session' || activeTab?.kind === 'tmux' ? activeTab : null
+    const dir =
+      t?.tmux && t.connectionId === conn.id
+        ? await window.api
+            .readerTmuxDir({ connectionId: conn.id, password, session: t.tmux.session })
+            .catch(() => null)
+        : null
+    setNewChat({ conn, password, dir: dir ?? '~' })
+  }
+
+  const newChatFor = async (conn: Connection): Promise<void> => {
+    const pw = await resolvePassword(conn)
+    if (pw === null) return // user cancelled the prompt
+    await openNewChat(conn, pw ?? undefined)
+  }
+
+  // A group's + in the sidebar: a new chat in that folder.
+  const newChatIn = async (conn: Connection, dir: string): Promise<void> => {
+    const pw = await resolvePassword(conn)
+    if (pw === null) return // user cancelled the prompt
+    setNewChat({ conn, password: pw ?? undefined, dir })
+  }
+
+  // The connection the palette's chat entries act on: whatever is on screen.
+  const paletteConn = connections.find((c) => c.id === (selectedConnId ?? activeConnectionId)) ?? null
+
+  const startChat = async (cwd: string): Promise<void> => {
+    if (!newChat) return
+    const { conn, password } = newChat
+    const { sessionId } = await window.api.chatNew({ connectionId: conn.id, password, cwd })
+    openChat(conn.id, password, sessionId, cwd, `Chat · ${leaf(cwd)}`, true)
+    setNewChat(null)
+  }
+
+  // For a host that asks for a password, only one an open tab already holds.
+  const fetchChatsQuiet = async (): Promise<ChatSession[]> => {
+    const conn = paletteConn
+    if (!conn) return []
+    let password: string | undefined
+    if (conn.authMethod === 'password' && !(await window.api.hasSecret(conn.id))) {
+      password = tabs.map((t) => ('password' in t && t.connectionId === conn.id ? t.password : undefined)).find(Boolean)
+      if (!password) return []
+    }
+    return sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+  }
+
+  // The sidebar's two reads, for the active connection. Quiet like the palette's:
+  // a host that asks for a password is only read with a saved secret or one an
+  // open tab already holds, and otherwise yields nothing rather than a prompt.
+  const quietPassword = async (conn: Connection): Promise<{ ok: boolean; password?: string }> => {
+    if (conn.authMethod !== 'password' || (await window.api.hasSecret(conn.id))) return { ok: true }
+    const password = tabs
+      .map((t) => ('password' in t && t.connectionId === conn.id ? t.password : undefined))
+      .find(Boolean)
+    return password ? { ok: true, password } : { ok: false }
+  }
+
+  const fetchChatsSidebar = async (): Promise<ChatSession[]> => {
+    const conn = activeConnection
+    if (!conn) return []
+    const { ok, password } = await quietPassword(conn)
+    if (!ok) return []
+    const list = sortChats(await window.api.chatList({ connectionId: conn.id, password }))
+    // Which tmux sessions run a Claude: their terminal tabs get the Chat / Terminal switch.
+    const byName: Record<string, ChatSession> = {}
+    for (const c of list) if (c.tmux) byName[c.tmux.session] = c
+    setClaudeTmux((m) => ({ ...m, [conn.id]: byName }))
+    return list
+  }
+
+  const fetchTmuxSidebar = async (): Promise<TmuxSession[]> => {
+    const conn = activeConnection
+    if (!conn) return []
+    const { ok, password } = await quietPassword(conn)
+    if (!ok) return []
+    return window.api.tmuxList({ connectionId: conn.id, password })
   }
 
   const fetchStatsFor = (conn: Connection) => async () => {
@@ -1329,8 +1658,8 @@ export default function App() {
   // `name` comes from the server's own session list (or the user's new-session
   // field) and is passed through verbatim: sanitizing it here would attach to the
   // wrong name for any session tmux itself allows but tmuxSessionName() rewrites.
-  const attachTmux = (conn: Connection, name: string): void => {
-    void openSession(conn, { session: name, title: `${conn.name} · ${name}` })
+  const attachTmux = (conn: Connection, name: string, into?: string): void => {
+    void openSession(conn, { session: name, title: `${conn.name} · ${name}`, into })
   }
 
   // --- agent actions ----------------------------------------------------------
@@ -1343,21 +1672,36 @@ export default function App() {
   }
 
 
-  // Kill / rename run as one-shot commands; Summary refreshes its list after.
+  // Kill / rename run as one-shot commands; the sidebar refreshes its list after.
+  // Terminal tabs on the session follow it, so none of them brings the old name back.
+  const tmuxTabsOf = (conn: Connection, name: string): Tab[] =>
+    tabs.filter((t) => (t.kind === 'session' || t.kind === 'tmux') && t.connectionId === conn.id && t.tmux?.session === name)
   const killTmux = (conn: Connection) => async (name: string): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required.')
+    const open = tmuxTabsOf(conn, name).map((t) => t.id)
+    if (open.length) removeTabs(open)
     await window.api.tmuxKill({ connectionId: conn.id, password: password ?? undefined, name })
   }
   const renameTmux = (conn: Connection) => async (from: string, to: string): Promise<void> => {
     const password = await resolvePassword(conn)
     if (password === null) throw new Error('Password required.')
-    await window.api.tmuxRename({
-      connectionId: conn.id,
-      password: password ?? undefined,
-      from,
-      to: tmuxSessionName(to)
-    })
+    const name = tmuxSessionName(to)
+    await window.api.tmuxRename({ connectionId: conn.id, password: password ?? undefined, from, to: name })
+    const ids = new Set(tmuxTabsOf(conn, from).map((t) => t.id))
+    if (!ids.size) return
+    setTabs((ts) =>
+      ts.map((t) => {
+        if (!ids.has(t.id) || (t.kind !== 'session' && t.kind !== 'tmux') || !t.tmux) return t
+        const tmux = { ...t.tmux, session: name }
+        return {
+          ...t,
+          tmux,
+          command: t.command === tmuxCreateCommand(t.tmux) ? tmuxCreateCommand(tmux) : t.command,
+          title: t.title === `${conn.name} · ${from}` ? `${conn.name} · ${name}` : t.title
+        }
+      })
+    )
   }
 
   // Close one or more leaves in a single pass (atomic so back-to-back closes
@@ -1366,11 +1710,11 @@ export default function App() {
   // active tab vanished.
   const removeTabs = (ids: string[]): void => {
     const dead = new Set(ids)
-    for (const t of tabs)
-      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) {
-        window.api.closeSession(t.id)
-        void window.api.draftsSet(t.tabKey, '')
-      }
+    for (const t of tabs) {
+      if (dead.has(t.id) && (t.kind === 'session' || t.kind === 'tmux')) window.api.closeSession(t.id)
+      // Closing a chat tab leaves Claude running; only the unsent draft goes.
+      if (dead.has(t.id) && t.kind === 'chat') void window.api.draftsSet(`chat:${t.sessionId}`, '')
+    }
     setTabs((prev) => prev.filter((t) => !dead.has(t.id)))
     setViews((vs) => {
       const out: View[] = []
@@ -1483,173 +1827,102 @@ export default function App() {
   const controlTabs = tabs.filter((t): t is ControlTab => t.kind === 'tmux')
   const activeConnection = connections.find((c) => c.id === activeConnectionId) ?? null
 
-  const activeIsPane = activeTab?.kind === 'session' || activeTab?.kind === 'tmux'
-  const toggleActiveComposer = useCallback(() => {
-    if (activeTabId) composerRefs.current.get(activeTabId)?.toggleComposer()
-  }, [activeTabId])
-  const activeComposerOpen = !!(activeTabId && composerOpen[activeTabId])
+  // A single chat tab on screen: its header drags the window, as there is no app
+  // title bar.
+  const chatOnly = !isSplit && activeTab?.kind === 'chat'
+
+  // What the sidebar's "Open" list shows: the old tab pills, one row per view.
+  // A row's name in the sidebar: the tmux session for a terminal on one, else the tab's
+  // title without the server's name, which the sidebar already shows once at the bottom.
+  const sideLabel = (t: Tab): string => {
+    if ((t.kind === 'session' || t.kind === 'tmux') && t.tmux) return t.tmux.session
+    const label = leafLabel(t)
+    const conn = 'connectionId' in t ? connections.find((c) => c.id === t.connectionId) : undefined
+    return conn && label.startsWith(`${conn.name} · `) ? label.slice(conn.name.length + 3) : label
+  }
+  const openRows: SidebarOpenRow[] = views.map((view) => {
+    const active = view.id === activeViewId
+    const split = view.panes.length > 1
+    const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
+    const only = split ? null : leaves[0]
+    return {
+      id: view.id,
+      active,
+      split,
+      direction: view.direction,
+      label: split
+        ? leaves.map((l) => (l ? sideLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
+        : leaves[0]
+          ? sideLabel(leaves[0])
+          : 'Tab',
+      icon: leaves[0] ? leafIcon(leaves[0], active) : null,
+      waiting: leaves
+        .filter((l): l is Tab => !!l && waiting.has(l.id))
+        .map((l) => ({ id: l.id, label: leafLabel(l) })),
+      closable: !(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID),
+      chatSessionId: only?.kind === 'chat' ? only.sessionId : undefined,
+      chatFormerIds: only?.kind === 'chat' ? only.formerIds : undefined,
+      tmuxSession: only && (only.kind === 'session' || only.kind === 'tmux') ? only.tmux?.session : undefined,
+      special: only?.kind === 'summary' || only?.kind === 'settings' ? only.kind : undefined
+    }
+  })
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <div className="flex h-full w-full flex-row">
+      <Sidebar
+        connections={connections}
+        activeConnection={activeConnection}
+        onSelectConnection={selectConnection}
+        onNewChat={() => activeConnection && void newChatFor(activeConnection)}
+        onNewChatIn={(cwd) => activeConnection && void newChatIn(activeConnection, cwd)}
+        onOpenSummary={openSummary}
+        openRows={openRows}
+        onSelectView={setActiveViewId}
+        onCloseView={closeView}
+        onMoveView={moveView}
+        fetchChats={fetchChatsSidebar}
+        fetchTmux={fetchTmuxSidebar}
+        activeChatSessionId={activeTab?.kind === 'chat' ? activeTab.sessionId : null}
+        activeTmuxName={
+          (activeTab?.kind === 'session' || activeTab?.kind === 'tmux') &&
+          activeTab.connectionId === activeConnectionId
+            ? (activeTab.tmux?.session ?? null)
+            : null
+        }
+        onOpenChat={(chat) => activeConnection && openSessionRow(activeConnection, chat)}
+        onOpenTmux={(name) => activeConnection && showTmuxSession(activeConnection.id, name)}
+        onNewTmux={(name) => activeConnection && void attachTmux(activeConnection, tmuxSessionName(name))}
+        onRenameTmux={activeConnection ? renameTmux(activeConnection) : async () => {}}
+        onKillTmux={activeConnection ? killTmux(activeConnection) : async () => {}}
+        agentHosts={agentHosts}
+        onOpenSettings={openSettings}
+        fullScreen={fullScreen}
+        splitControls={
+          <SplitControls
+            count={activeView?.panes.length ?? 1}
+            direction={activeView?.direction ?? 'columns'}
+            onSingle={ungroup}
+            onSplit={applySplit}
+          />
+        }
+      />
+
       <div className="app-canvas flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Merged title/tab-bar row. `drag` on the root plus `no-drag` on every
-            interactive cluster mirrors how Chrome's own tab strip stays
-            draggable everywhere except its buttons and pills. */}
-        <div
-          className={`drag relative z-30 flex h-10 shrink-0 items-stretch gap-1 border-b border-line bg-surface/60 px-2 ${
-            // leave room for the native traffic lights on macOS — they vanish
-            // in true fullscreen, so the reserved gutter would go dead too
-            isMac && !fullScreen ? 'pl-[78px]' : 'pl-2.5'
-          }`}
-        >
-          {/* brand mark + menus — macOS gets a real menu bar (menu.ts) and native
-              traffic lights instead; rendering both would give every command two
-              homes and no reason to prefer either */}
-          {!isMac && (
+        {/* No title bar on macOS: the view runs full height and the window drags by the
+            sidebar's top row (and a chat's own header). Elsewhere a thin strip keeps the
+            menus and window controls, which macOS supplies natively. */}
+        {!isMac && (
+          <div className="drag relative z-30 flex h-8 shrink-0 items-stretch gap-2 bg-ink pr-2 pl-3">
             <div className="no-drag flex shrink-0 items-center gap-2 self-center pr-1">
               <span className="h-2 w-2 rounded-full bg-accent dot-glow text-accent" />
               <MenuBar onNewConnection={() => setDialogConn(null)} />
             </div>
-          )}
-
-          {/* tab pills — pt-1.5 here (not the row root) so they read as "poking
-              up" from the row's bottom border without pushing every other
-              cluster down */}
-          <div className="no-drag flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto pt-1.5">
-            {views.map((view) => {
-                const active = view.id === activeViewId
-                const split = view.panes.length > 1
-                const leaves = view.panes.map((p) => (p ? tabs.find((t) => t.id === p) ?? null : null))
-                const waitingLeaves = leaves.filter((l): l is Tab => !!l && waiting.has(l.id))
-                const label = split
-                  ? leaves.map((l) => (l ? leafLabel(l) : '+')).join(view.direction === 'columns' ? ' │ ' : ' ─ ')
-                  : leaves[0]
-                    ? leafLabel(leaves[0])
-                    : 'Tab'
-                return (
-                  <div
-                    key={view.id}
-                    draggable
-                    onClick={() => setActiveViewId(view.id)}
-                    onDragStart={(e) => {
-                      dragViewId.current = view.id
-                      e.dataTransfer.effectAllowed = 'move'
-                      e.dataTransfer.setData('text/plain', view.id)
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault()
-                      e.dataTransfer.dropEffect = 'move'
-                      if (dragViewId.current && dragViewId.current !== view.id) setDragOverId(view.id)
-                    }}
-                    onDragLeave={() => setDragOverId((id) => (id === view.id ? null : id))}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      const from = dragViewId.current
-                      if (from) moveView(from, view.id)
-                      dragViewId.current = null
-                      setDragOverId(null)
-                    }}
-                    onDragEnd={() => {
-                      dragViewId.current = null
-                      setDragOverId(null)
-                    }}
-                    className={`group flex shrink-0 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-sm transition-colors ${
-                      dragOverId === view.id ? 'ring-2 ring-inset ring-accent/70' : ''
-                    } ${
-                      active
-                        ? 'border-line bg-ink text-fg'
-                        : 'border-transparent text-muted hover:bg-elevated/40 hover:text-fg/90'
-                    }`}
-                  >
-                    {split ? (
-                      <span className={active ? 'text-accent' : 'text-faint'} title="split tab">
-                        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-                          <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
-                          {view.direction === 'columns' ? (
-                            <line x1="7" y1="2.5" x2="7" y2="11.5" />
-                          ) : (
-                            <line x1="1.5" y1="7" x2="12.5" y2="7" />
-                          )}
-                        </svg>
-                      </span>
-                    ) : leaves[0] ? (
-                      leafIcon(leaves[0], active)
-                    ) : null}
-                    {/* One dot per leaf of this tab that's waiting on you. In a
-                        split they read left to right in the same order as the
-                        joined label, so the dot and the name line up. */}
-                    {waitingLeaves.length > 0 && (
-                      <span
-                        className="flex items-center gap-1"
-                        title={`Waiting: ${waitingLeaves.map(leafLabel).join(', ')}`}
-                      >
-                        {waitingLeaves.map((l) => (
-                          <span
-                            key={l.id}
-                            className="dot-glow h-1.5 w-1.5 shrink-0 rounded-full bg-amber text-amber"
-                          />
-                        ))}
-                      </span>
-                    )}
-                    <span className="max-w-[260px] truncate font-mono text-[12px]">{label}</span>
-                    {!(view.panes.length === 1 && view.panes[0] === SUMMARY_TAB_ID) && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          closeView(view.id)
-                        }}
-                        className="text-faint opacity-60 transition-opacity hover:text-fg group-hover:opacity-100"
-                        title={split ? 'Close split (all its panes)' : 'Close tab'}
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-          </div>
-          {/* split-screen controls, composer toggle, and settings — one
-              cluster of fixed-height header actions */}
-          <div className="no-drag flex shrink-0 items-center gap-1 self-center border-l border-line pl-2">
-            <SplitControls
-              count={activeView?.panes.length ?? 1}
-              direction={activeView?.direction ?? 'columns'}
-              onSingle={ungroup}
-              onSplit={applySplit}
-            />
-            <button
-              onClick={toggleActiveComposer}
-              disabled={!activeIsPane}
-              title={`Toggle prompt composer (${COMPOSE_ACCEL})`}
-              className={`grid h-7 w-7 place-items-center rounded-md border transition-colors disabled:pointer-events-none disabled:opacity-30 ${
-                activeComposerOpen
-                  ? 'border-accent/50 bg-accent/15 text-accent'
-                  : 'border-transparent text-muted hover:bg-elevated hover:text-fg'
-              }`}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-              </svg>
-            </button>
-            <button
-              onClick={openSettings}
-              title="Settings (Ctrl+,)"
-              className="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-fg"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
-          </div>
-
-          {/* window controls — macOS supplies native traffic lights instead */}
-          {!isMac && (
+            <span className="flex-1" />
             <div className="no-drag flex h-full items-stretch">
               <WindowControls />
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* main content */}
         <div ref={contentRef} className="relative min-h-0 flex-1">
@@ -1669,7 +1942,6 @@ export default function App() {
               onOpenFiles={() => activeConnection && void openSftp(activeConnection)}
               onOpenTunnels={() => activeConnection && void openTunnels(activeConnection)}
               onEdit={() => activeConnection && setDialogConn(activeConnection)}
-              fetchTmux={activeConnection ? fetchTmuxFor(activeConnection) : async () => []}
               fetchStats={
                 activeConnection
                   ? fetchStatsFor(activeConnection)
@@ -1677,16 +1949,6 @@ export default function App() {
                       throw new Error('No active connection')
                     }
               }
-              onAttach={(name) => activeConnection && attachTmux(activeConnection, name)}
-              // A name the user just typed, unlike onAttach's, has never been
-              // through tmux. Normalise it here so the tab records the name
-              // tmux will actually use — `.` and `:` split tmux's target
-              // syntax, so a session called "api.v2" could never be reattached.
-              onNewSession={(name) =>
-                activeConnection && attachTmux(activeConnection, tmuxSessionName(name))
-              }
-              onKillSession={activeConnection ? killTmux(activeConnection) : async () => {}}
-              onRenameSession={activeConnection ? renameTmux(activeConnection) : async () => {}}
               resolvePassword={
                 activeConnection ? resolvePasswordFor(activeConnection) : async () => null
               }
@@ -1760,10 +2022,7 @@ export default function App() {
                       throw new Error('No active connection')
                     }
               }
-              agentHosts={agentHosts}
               agentScanError={agentScanError}
-              agentScanning={agentScanning}
-              rescanAgents={rescanAgents}
             />
             {paneTools(SUMMARY_TAB_ID)}
           </div>
@@ -1800,7 +2059,6 @@ export default function App() {
                 style={{ ...pp.style, backgroundColor: TERMINAL_BG }}
               >
                 <TerminalView
-                  ref={setComposerRef(tab.id)}
                   sessionId={tab.id}
                   connectionId={tab.connectionId}
                   active={activeTabId === tab.id}
@@ -1812,9 +2070,8 @@ export default function App() {
                   onStatus={onStatus}
                   onTitle={onTitle}
                   onAgentSignal={onAgentSignal}
-                  draftKey={tab.tabKey}
-                  initialDraft={drafts[tab.tabKey] ?? ''}
                 />
+                {terminalSwitch(tab)}
                 {paneTools(tab.id)}
               </div>
             )
@@ -1828,7 +2085,6 @@ export default function App() {
               {...paneProps(tab.id)}
             >
               <TmuxControlView
-                ref={setComposerRef(tab.id)}
                 sessionId={tab.id}
                 connectionId={tab.connectionId}
                 active={activeTabId === tab.id}
@@ -1840,9 +2096,8 @@ export default function App() {
                 settings={appSettings.terminal}
                 onStatus={onStatus}
                 onAgentSignal={onAgentSignal}
-                draftKey={tab.tabKey}
-                initialDrafts={parseTmuxDrafts(drafts[tab.tabKey])}
               />
+              {terminalSwitch(tab)}
               {paneTools(tab.id)}
             </div>
           ))}
@@ -1918,6 +2173,54 @@ export default function App() {
                     // several of these at once is what this pane is for.
                     if (conn) openClaude(conn, wt, `claude · ${wt.split('/').pop() || wt}`)
                   }}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* readers stay mounted so the open conversation and scroll position
+              survive a tab switch, and polling only runs while one is on screen */}
+          {tabs
+            .filter((t): t is ReaderTab => t.kind === 'reader')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden border-t border-line ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <ReaderView
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  dir={tab.dir}
+                  active={onScreen(tab.id)}
+                />
+                {paneTools(tab.id)}
+              </div>
+            ))}
+
+          {/* chats stay mounted so their transcript stream keeps running — and a
+              turn keeps showing progress — while another tab is on screen */}
+          {tabs
+            .filter((t): t is ChatTab => t.kind === 'chat')
+            .map((tab) => (
+              <div
+                key={tab.id}
+                className={`overflow-hidden ${chatOnly ? '' : 'border-t border-line'} ${paneRing(tab.id)}`}
+                {...paneProps(tab.id)}
+              >
+                <ChatView
+                  key={tab.sessionId}
+                  connectionId={tab.connectionId}
+                  password={tab.password}
+                  sessionId={tab.sessionId}
+                  cwd={tab.cwd}
+                  active={onScreen(tab.id)}
+                  starting={tab.starting}
+                  onOpenTerminal={(name) => switchToTerminal(tab, name)}
+                  onResumed={(sid) => moveChat(tab.id, sid)}
+                  onStarted={() => chatStarted(tab.id)}
+                  titleBar={chatOnly && tab.id === activeTabId}
+                  onAgentSignal={(s) => onAgentSignal(tab.id, s)}
                 />
                 {paneTools(tab.id)}
               </div>
@@ -2009,6 +2312,15 @@ export default function App() {
         />
       )}
 
+      {newChat && (
+        <NewChatModal
+          host={newChat.conn.name}
+          defaultDir={newChat.dir}
+          onStart={startChat}
+          onClose={() => setNewChat(null)}
+        />
+      )}
+
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -2021,6 +2333,10 @@ export default function App() {
         showLeaf={showLeaf}
         attachFromInbox={attachFromInbox}
         openSummary={openSummary}
+        openReader={() => void openReaderFromActive()}
+        fetchChats={fetchChatsQuiet}
+        openChat={(chat) => paletteConn && void openChatFor(paletteConn, chat)}
+        newChat={() => paletteConn && void newChatFor(paletteConn)}
       />
     </div>
   )

@@ -445,16 +445,6 @@ export type CursorStyle = 'block' | 'bar' | 'underline'
  */
 export type ShiftEnterMode = 'newline' | 'escape-cr' | 'submit'
 
-/**
- * What plain Enter does inside the prompt composer (see PromptComposer):
- * - `mod-enter`: Enter makes a newline, ⌘/Ctrl+Enter sends. The composer's
- *   original behavior — safest default since a stray Enter can't send early.
- * - `enter`: Enter sends, Shift+Enter makes a newline — chat-app muscle memory.
- * ⌘/Ctrl+Enter always sends and ⌥/Alt+Enter always inserts without sending,
- * regardless of this setting.
- */
-export type ComposerSendMode = 'mod-enter' | 'enter'
-
 export interface TerminalSettings {
   fontFamily: string // id from the renderer's font list (see lib/terminalSettings)
   fontSize: number
@@ -481,14 +471,6 @@ export interface TerminalSettings {
   liveTitles: boolean
   /** How loudly to report an attention signal from a session — see AgentAlerts. */
   agentAlerts: AgentAlerts
-  /** Open the prompt composer as soon as a session/tmux pane is ready, instead of
-   *  waiting for the chord (see COMPOSE_ACCEL, which still toggles it either way). */
-  composerDefaultOpen: boolean
-  /** What plain Enter does in the composer — see ComposerSendMode. */
-  composerSendMode: ComposerSendMode
-  /** Keep the composer open (drafting for the same target) after a send, instead
-   *  of closing and handing focus back to the terminal. */
-  composerStayOpen: boolean
 }
 
 /**
@@ -559,10 +541,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   // as Enter) and it's what lets a terminal agent take a multi-line prompt.
   shiftEnter: 'newline',
   liveTitles: true,
-  agentAlerts: 'dot',
-  composerDefaultOpen: false,
-  composerSendMode: 'mod-enter',
-  composerStayOpen: false
+  agentAlerts: 'dot'
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
@@ -632,7 +611,7 @@ export interface TunnelStatus {
  * come back.
  */
 export interface PersistedTab {
-  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees'
+  kind: 'summary' | 'session' | 'settings' | 'sftp' | 'editor' | 'tunnels' | 'tmux' | 'worktrees' | 'reader' | 'chat'
   connectionId?: string
   title?: string
   command?: string // session/tmux: the command to run (e.g. tmux attach / tmux -CC)
@@ -641,15 +620,15 @@ export interface PersistedTab {
    * before that carry only `command`, which parseTmuxIntent() recovers this from.
    */
   tmux?: TmuxIntent
-  initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo
+  initialPath?: string // sftp: directory to open; worktrees: a directory inside the repo; reader: the project directory (absent = all projects)
   path?: string // editor: remote file path
   name?: string // editor: file name
+  sessionId?: string // chat: the Claude session the tab follows (a tab saved by 0.43.0 has `chatId` instead and is dropped on restore)
+  cwd?: string // chat: the session's directory, needed to resume it once it has ended
   /**
    * session/tmux: a stable id for this tab, independent of the live (regenerated
-   * every launch) session id. Keys the prompt composer's persisted draft, so a
-   * draft finds its way back to the same tab across a restart. Tabs saved before
-   * this field existed just get a fresh one on restore — they never had a draft
-   * to recover anyway.
+   * every launch) session id. Tabs saved before this field existed just get a
+   * fresh one on restore.
    */
   tabKey?: string
 }

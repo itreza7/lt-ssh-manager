@@ -3,7 +3,6 @@
 export type {
   AgentAlerts,
   AppSettings,
-  ComposerSendMode,
   CursorStyle,
   EditorSettings,
   SettingsPatch,
@@ -36,6 +35,9 @@ export const clampOverscroll = (n: number | undefined): number => clamp(n ?? 1, 
 
 // Terminal font choices. The first two are bundled (offline); the rest fall
 // back to OS-installed monospace fonts. `stack` is the CSS font-family.
+// None of them carry Persian/Arabic, so each stack puts the bundled Vazirmatn
+// right after its primary font for those letters.
+const FA = '"Vazirmatn Variable"'
 const MONO = 'ui-monospace, "Cascadia Code", Consolas, monospace'
 export interface TerminalFont {
   id: string
@@ -44,11 +46,11 @@ export interface TerminalFont {
   bundled?: boolean
 }
 export const TERMINAL_FONTS: TerminalFont[] = [
-  { id: 'jetbrains', label: 'JetBrains Mono', stack: `"JetBrains Mono Variable", ${MONO}`, bundled: true },
-  { id: 'fira', label: 'Fira Code', stack: `"Fira Code Variable", ${MONO}`, bundled: true },
-  { id: 'cascadia', label: 'Cascadia Code', stack: `"Cascadia Code", "Cascadia Mono", ${MONO}` },
-  { id: 'consolas', label: 'Consolas', stack: 'Consolas, "Courier New", monospace' },
-  { id: 'courier', label: 'Courier New', stack: '"Courier New", monospace' }
+  { id: 'jetbrains', label: 'JetBrains Mono', stack: `"JetBrains Mono Variable", ${FA}, ${MONO}`, bundled: true },
+  { id: 'fira', label: 'Fira Code', stack: `"Fira Code Variable", ${FA}, ${MONO}`, bundled: true },
+  { id: 'cascadia', label: 'Cascadia Code', stack: `"Cascadia Code", "Cascadia Mono", ${FA}, ${MONO}` },
+  { id: 'consolas', label: 'Consolas', stack: `Consolas, "Courier New", ${FA}, monospace` },
+  { id: 'courier', label: 'Courier New', stack: `"Courier New", ${FA}, monospace` }
 ]
 
 export const resolveFontStack = (id: string): string =>

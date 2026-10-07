@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SftpEntry, SftpList, TransferProgress } from '../../../shared/types'
-import { Button, Modal } from './Modal'
+import { Button, MenuItem, Modal, PromptDialog } from './Modal'
 
 interface Props {
   connectionId: string
@@ -61,58 +61,6 @@ function EntryIcon({ entry }: { entry: SftpEntry }) {
 }
 
 // ---- small dialogs ----
-
-function PromptDialog({
-  title,
-  label,
-  initial,
-  confirmLabel,
-  onCancel,
-  onConfirm
-}: {
-  title: string
-  label: string
-  initial: string
-  confirmLabel: string
-  onCancel: () => void
-  onConfirm: (value: string) => void
-}) {
-  const [value, setValue] = useState(initial)
-  const ref = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    ref.current?.focus()
-    ref.current?.select()
-  }, [])
-  const submit = (): void => {
-    const v = value.trim()
-    if (v) onConfirm(v)
-  }
-  return (
-    <Modal
-      title={title}
-      onClose={onCancel}
-      footer={
-        <>
-          <Button onClick={onCancel}>Cancel</Button>
-          <Button variant="primary" onClick={submit}>
-            {confirmLabel}
-          </Button>
-        </>
-      }
-    >
-      <label className="eyebrow mb-2 block">{label}</label>
-      <input
-        ref={ref}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') submit()
-        }}
-        className="w-full rounded-lg border border-line bg-ink/60 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent/60"
-      />
-    </Modal>
-  )
-}
 
 function ChmodDialog({
   entry,
@@ -824,26 +772,5 @@ function Th({
       {children}
       {sort.key === col && <span className="ml-1 text-accent">{sort.dir === 1 ? '▲' : '▼'}</span>}
     </th>
-  )
-}
-
-function MenuItem({
-  children,
-  onClick,
-  danger
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  danger?: boolean
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`block w-full px-3.5 py-1.5 text-left text-sm transition-colors hover:bg-elevated ${
-        danger ? 'text-danger hover:bg-danger/15' : 'text-fg/85'
-      }`}
-    >
-      {children}
-    </button>
   )
 }

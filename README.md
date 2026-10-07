@@ -7,32 +7,35 @@ main process.
 
 ## Screenshots
 
-> The hosts and data shown are from a throwaway local demo server.
+> The hosts and data shown are from a throwaway demo server.
 
-![Embedded terminals — full-color xterm.js with live output](docs/screenshots/01-terminal.png)
+![Native Claude chat — a review run by a background workflow](docs/screenshots/01-chat.png)
 
 | | |
 | :---: | :---: |
-| **Server dashboard** — host vitals + tmux sessions | **Split panes** — tile sessions in one tab |
-| ![Server dashboard](docs/screenshots/02-dashboard.png) | ![Split terminals](docs/screenshots/03-split-terminals.png) |
-| **SFTP file manager** | **Remote code editor** (Monaco) |
-| ![SFTP file manager](docs/screenshots/04-sftp.png) | ![Remote code editor](docs/screenshots/06-code-editor.png) |
-| **Markdown preview** | **Settings** |
-| ![Markdown preview](docs/screenshots/07-markdown-preview.png) | ![Settings](docs/screenshots/05-settings.png) |
-| **Connection manager** — key / password / agent + tmux | |
-| ![Connection dialog](docs/screenshots/08-connection-dialog.png) | |
+| **Plan review** — the plan opens in full beside the chat | **Summary** — host vitals, with chats and tmux in the sidebar |
+| ![Plan review](docs/screenshots/09-chat-plan.png) | ![Summary](docs/screenshots/02-dashboard.png) |
+| **Split panes** — Claude's terminal next to a live log | **SFTP file manager** |
+| ![Split terminals](docs/screenshots/03-split-terminals.png) | ![SFTP file manager](docs/screenshots/04-sftp.png) |
+| **Remote code editor** (Monaco) | **Markdown preview** |
+| ![Remote code editor](docs/screenshots/06-code-editor.png) | ![Markdown preview](docs/screenshots/07-markdown-preview.png) |
+| **Settings** | **Connection manager** — key / password / agent + tmux |
+| ![Settings](docs/screenshots/05-settings.png) | ![Connection dialog](docs/screenshots/08-connection-dialog.png) |
 
 ## Features
 
 - **Embedded terminals** — real interactive shells rendered with xterm.js,
   so `htop`, `vim`, `docker stats`, `tail -f` all work and look right.
-- **Multiple sessions** in tabs, each with a live connection-status indicator.
+- **Sidebar** — like the Claude desktop app: your open tabs, every live Claude chat on the
+  host grouped by folder (worktrees under their repo), and the host's other tmux sessions,
+  each with a live status dot. A Claude's row opens it as chat or terminal, whichever you
+  last switched it to. Right-click a row for its actions: open, new chat in that folder,
+  new / rename / kill a tmux session, copy the path or id. ⌘B (Ctrl+Shift+B elsewhere) folds it to a thin rail.
 - **tmux control mode** — optional `tmux -CC` integration renders each tmux pane as
   its own native terminal: real scrollback and copy with no mouse-mode, while tmux
   keeps your sessions alive across drops.
 - **Built for terminal agents** — Shift+Enter sends a real newline instead of submitting;
-  a prompt composer drafts multi-line prompts locally and delivers them as one bracketed
-  paste; and dropping a file (or pasting an image with ⌘⇧V / Ctrl+Shift+U) on a terminal
+  and dropping a file (or pasting an image with ⌘⇧V / Ctrl+Shift+U) on a terminal
   uploads it to a private folder on the host and types the remote path at your cursor —
   the path is typed, never run.
 - **Find in terminal** — ⌘F (Ctrl+Shift+F elsewhere) searches the scrollback of the pane
@@ -44,18 +47,46 @@ main process.
   and a dock badge. The dashboard installs the matching Notification hook into a host's
   `~/.claude/settings.json` for you, showing the before/after JSON before it writes.
 - **Agent Inbox** — the Command Palette's (⌘K) "Running Agents" section lists every agent
-  you have running, across every connection: which host, which directory, how long it's
-  been idle, and whether it's asking for you, with one-click attach. Underneath it, the
-  sessions you *aren't* running — read from the host's own Claude transcripts, newest
-  first — resume in a tab with one click.
+  you have running, across every connection: which host and directory, with a status dot
+  for whether it's asking for you, and one-click attach. Its "Chats" section opens any live
+  Claude, and "Claude reader" reads a conversation, right-to-left text included.
+- **Native Claude chat** — a second, richer view of the real `claude` running in tmux on
+  a host, like the Claude desktop app: answers, tool calls as cards (commands with
+  output, edits as diffs), and question, plan and permission prompts you answer by click.
+  Every Claude live in tmux on the host appears, however it was started. The terminal tab
+  and the chat show the same session: the Chat / Terminal switch at the top right flips
+  between them in the same pane.
+  Runs of tool calls fold into one line ("Ran 3 commands"). The composer bar holds the
+  mode, model and effort pickers, a + for your skills and commands, a context ring, and
+  the folder and git branch. Click the ring for the context window (with a Compact button)
+  and the account's plan usage limits, read from `/usage`. Running workflows and
+  background agents show their phases and agents live in a Background tasks panel on the
+  right; once hidden, a Tasks button in the header brings it back. A plan waiting for
+  approval is a row at the top of that panel and opens there in full. Each running
+  workflow has a ■ stop button, and the composer's Stop asks first, offering to stop the
+  running workflows too (both ask before stopping). A ↻ in the header reloads the chat
+  from the transcript when something looks stuck. An actions menu runs
+  compact, clear, effort, context and usage.
+  Every Claude Code slash command works from the composer (type `/` for the list).
+  `/help` is a searchable command list, a bare `/model` or `/effort` opens its picker, and
+  `/usage` shows bars. Screens like `/config`, `/status`, `/mcp`, `/hooks`, `/memory`,
+  `/permissions` and `/resume` open as app UI in the chat — tabs, a search box, toggles and
+  rows you click — which drive Claude's own screen underneath. A screen it can't read shows
+  as text with key buttons. Commands that would end or break the session (`/exit`,
+  `/logout`…) are refused. Claude's suggested next prompt shows in the empty composer; Tab
+  takes it. A message shows in the chat the moment you send it ("Sending…", or "Not sent ·
+  Retry"), and a clicked answer shows a spinner until Claude takes it. A chat you aren't
+  looking at gets an amber dot in the sidebar when Claude finishes its turn or asks for
+  you; a message in the middle of a turn does not.
+  Needs Claude Code and tmux on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only
   `git status --ignored` first and shows you what would be deleted: `git worktree remove`
   takes ignored files (`.env`, `node_modules`) with it and still exits 0.
 - **Connection manager** — add/edit/delete connections; key, password, or agent auth.
 - **Server dashboard** — at-a-glance host vitals (OS, kernel, uptime, CPU/memory/disk
-  meters, load) from a one-shot probe, a tmux session list with one-click attach, and the
-  Claude Code hook installer.
+  meters, load) from a one-shot probe, and the Claude Code hook installer. Chats and tmux
+  sessions live in the sidebar.
 - **SFTP file manager** — browse, upload (incl. drag-and-drop), download with progress,
   rename, chmod, mkdir, and recursive delete over a pooled per-connection channel.
 - **Remote file editor** — edit remote files in an embedded Monaco editor, with markdown
@@ -73,7 +104,7 @@ main process.
   fails fast on permanent errors (bad auth, missing key, rejected host key).
 - **Native macOS chrome** — hidden title bar with real traffic lights, a proper
   application menu (⌘N new connection, ⌘W closes a tab, ⇧⌘W the window, ⇧⌘[ / ⇧⌘]
-  switch tabs), a frosted title bar (native vibrancy), the system font,
+  switch tabs), a frosted sidebar (native vibrancy), the system font,
   and the window reopens at whatever size and position you last left it instead of
   always maximizing.
 
@@ -83,7 +114,7 @@ main process.
 | --- | --- | --- |
 | Main | `src/main/` | SSH sessions (`ssh2`), host-key store, connection/secret stores, IPC |
 | Preload | `src/preload/` | `contextBridge` — exposes a minimal typed `window.api` |
-| Renderer | `src/renderer/src/` | React UI: tab strip, Command Palette, dialogs, xterm terminal tabs |
+| Renderer | `src/renderer/src/` | React UI: sidebar, Command Palette, dialogs, xterm terminal tabs |
 | Shared | `src/shared/` | Types shared across processes |
 
 Security: the renderer runs with `contextIsolation: true`, `nodeIntegration:
