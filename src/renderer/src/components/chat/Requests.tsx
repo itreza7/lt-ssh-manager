@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ChatAnswer, TuiPrompt } from '../../../../shared/chatProtocol'
 import { Button } from '../Modal'
 import { renderMarkdown } from '../MarkdownPreview'
@@ -37,13 +37,39 @@ export function PromptCard({ prompt, onAnswer, onTerminal, plan, planAside, onSh
   const [chosen, setChosen] = useState<string | null>(null)
   const sent = chosen !== null
   const [freeDigit, setFreeDigit] = useState<string | null>(null)
+  // Checkboxes clicked but not yet seen toggled on screen (digit -> the state asked for).
+  // The card shows that state at once and keeps the box locked until the screen agrees,
+  // so a second click before the next read cannot toggle it back.
+  const [want, setWant] = useState<Record<string, boolean>>({})
+  const drop = (digit: string): void =>
+    setWant((w) => {
+      if (!(digit in w)) return w
+      const n = { ...w }
+      delete n[digit]
+      return n
+    })
+  useEffect(() => {
+    setWant((w) => {
+      const n = { ...w }
+      for (const o of prompt.options) if (o.digit in n && o.checked === n[o.digit]) delete n[o.digit]
+      return Object.keys(n).length === Object.keys(w).length ? w : n
+    })
+  }, [prompt])
+  const toggle = (o: TuiPrompt['options'][number]): void => {
+    if (o.digit in want) return
+    setWant((w) => ({ ...w, [o.digit]: !o.checked }))
+    onAnswer({ kind: 'option', digit: o.digit, label: o.label }).then(
+      () => setTimeout(() => drop(o.digit), UNLOCK_MS),
+      () => drop(o.digit)
+    )
+  }
   const [text, setText] = useState('')
 
   const answer = (a: ChatAnswer, again = false): void => {
     setChosen(a.kind === 'option' ? a.digit : a.kind)
     onAnswer(a).then(
-      // A checkbox toggles in place; the card stays, so it is usable again.
-      // If the same dialog is still there after a while, let it be used again.
+      // Back and Next leave the card up (the next question), so it is usable again at once.
+      // Otherwise, if the same dialog is still there after a while, let it be used again.
       () => (again ? setChosen(null) : setTimeout(() => setChosen(null), UNLOCK_MS)),
       () => setChosen(null)
     )
@@ -65,19 +91,24 @@ export function PromptCard({ prompt, onAnswer, onTerminal, plan, planAside, onSh
       <div className="space-y-1.5">
         {prompt.options.map((o) => {
           const open = freeDigit === o.digit
+          const checked = o.digit in want ? want[o.digit] : o.checked
           return (
             <div key={o.digit}>
               <button
                 disabled={sent}
                 onClick={() =>
-                  o.freeText ? setFreeDigit(open ? null : o.digit) : answer({ kind: 'option', digit: o.digit, label: o.label }, o.checked !== undefined)
+                  o.freeText
+                    ? setFreeDigit(open ? null : o.digit)
+                    : o.checked !== undefined
+                      ? toggle(o)
+                      : answer({ kind: 'option', digit: o.digit, label: o.label })
                 }
                 className={`flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
-                  o.checked || open || chosen === o.digit ? 'border-accent/70 bg-accent/10' : 'border-sel hover:bg-line'
+                  checked || open || chosen === o.digit ? 'border-accent/70 bg-accent/10' : 'border-sel hover:bg-line'
                 } ${sent && chosen !== o.digit ? 'opacity-50' : ''}`}
               >
-                <span className={`mt-0.5 shrink-0 text-sm ${o.checked ? 'text-accent' : 'text-faint'}`}>
-                  {o.checked !== undefined ? (o.checked ? '☑' : '☐') : `${o.digit}.`}
+                <span className={`mt-0.5 shrink-0 text-sm ${checked ? 'text-accent' : 'text-faint'}`}>
+                  {o.checked !== undefined ? (checked ? '☑' : '☐') : `${o.digit}.`}
                 </span>
                 <span className="min-w-0" dir="auto">
                   <span className="block text-sm text-fg">{o.label}</span>
