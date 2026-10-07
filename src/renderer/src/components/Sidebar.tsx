@@ -96,6 +96,26 @@ function writeCollapsed(v: boolean): void {
   }
 }
 
+const FOLDED_KEY = 'sidebar.foldedGroups'
+
+/** The folder groups folded in the sidebar, by repo path; remembered across restarts. */
+function readFolded(): ReadonlySet<string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(FOLDED_KEY) ?? '[]')
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function writeFolded(v: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(FOLDED_KEY, JSON.stringify([...v]))
+  } catch {
+    /* private window / blocked storage — the folds just won't be remembered */
+  }
+}
+
 /**
  * A list kept fresh in the background: on mount, every POLL_MS while the window is
  * visible, and on focus. `key` names what is being listed (the connection) — a new
@@ -371,12 +391,13 @@ export function Sidebar({
   const [serverOpen, setServerOpen] = useState(false)
   const [sections, setSections] = useState({ open: true, tmux: true })
   const toggleSection = (k: keyof typeof sections): void => setSections((s) => ({ ...s, [k]: !s[k] }))
-  // Folded chat groups, by repo path. Open is the default, so a new folder is never hidden.
-  const [foldedGroups, setFoldedGroups] = useState<ReadonlySet<string>>(() => new Set())
+  // Folded chat groups, by repo path, remembered. Open is the default, so a new folder is never hidden.
+  const [foldedGroups, setFoldedGroups] = useState<ReadonlySet<string>>(readFolded)
   const toggleGroup = (repo: string): void =>
     setFoldedGroups((s) => {
       const next = new Set(s)
       if (!next.delete(repo)) next.add(repo)
+      writeFolded(next)
       return next
     })
   const [query, setQuery] = useState('')
