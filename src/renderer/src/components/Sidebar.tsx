@@ -263,13 +263,13 @@ const Slot = ({ children }: { children?: ReactNode }) => (
   <span className="grid h-4 w-4 shrink-0 place-items-center">{children}</span>
 )
 
-/** Idle is a hollow ring; every other state is a filled dot in its own colour. */
-/** A row's mark: amber when it has news for you (a decision, or a finished turn), a spinner while it works, else nothing. */
+/** A row's mark: a spinner while it works (an older ring is stale by then), amber when it
+ *  has news for you (a decision, or a finished turn), else nothing. */
 const RowMark = ({ news, busy }: { news: boolean; busy: boolean }) =>
-  news ? (
-    <span className="h-2 w-2 shrink-0 rounded-full bg-amber dot-glow" />
-  ) : busy ? (
+  busy ? (
     <Spinner className="text-faint" />
+  ) : news ? (
+    <span className="h-2 w-2 shrink-0 rounded-full bg-amber dot-glow" />
   ) : null
 
 const Icon = ({ children, size = 16 }: { children: ReactNode; size?: number }) => (
@@ -598,12 +598,12 @@ export function Sidebar({
   }, [agentHosts, activeConnection])
 
   // News: a dot on a row only for what needs you — a decision, or a turn that ended —
-  // since you last had it in front of you. Opening it is what clears it.
+  // since you last had it in front of you. Opening it is what clears it; the row in
+  // front never has one.
   const inFront = (c: ChatSession): boolean =>
     c.sessionId === activeChatSessionId || activeIds.has(c.sessionId) || (!!c.tmux && c.tmux.session === activeTmuxName)
   const [seen, setSeen] = useState<Record<string, number>>(readSeen)
   useEffect(() => {
-    const looking = document.hasFocus()
     setSeen((prev) => {
       const next: Record<string, number> = {}
       let changed = false
@@ -613,7 +613,7 @@ export function Sidebar({
       }
       for (const c of chats) {
         // A chat seen for the first time brings no news: an old one is not new.
-        const at = looking && inFront(c) ? c.updatedAt : (next[c.sessionId] ?? c.updatedAt)
+        const at = inFront(c) ? c.updatedAt : (next[c.sessionId] ?? c.updatedAt)
         if (next[c.sessionId] !== at) {
           next[c.sessionId] = at
           changed = true
@@ -623,12 +623,12 @@ export function Sidebar({
       writeSeen(next)
       return next
     })
-    // inFront reads the props below; the chats poll and focus re-run this.
+    // inFront reads the props below; the chats poll re-runs this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats, activeChatSessionId, activeTmuxName, openRows])
   const chatNews = (c: ChatSession): boolean =>
-    unread.has(c.sessionId) ||
-    ((c.status === 'idle' || c.status === 'waiting') && !(inFront(c) && document.hasFocus()) && c.updatedAt > (seen[c.sessionId] ?? c.updatedAt))
+    !inFront(c) &&
+    (unread.has(c.sessionId) || ((c.status === 'idle' || c.status === 'waiting') && c.updatedAt > (seen[c.sessionId] ?? c.updatedAt)))
 
   // A plain tmux session has news when the agent scan sees it start waiting, or stop working.
   const lastAgent = useRef(new Map<string, AgentStatus>())
@@ -640,13 +640,13 @@ export function Sidebar({
       lastAgent.current.set(name, st)
       if (was === undefined || was === st) continue
       if (st === 'waiting' || (was === 'working' && st === 'idle'))
-        if (!(name === activeTmuxName && document.hasFocus())) add.push(name)
+        if (name !== activeTmuxName) add.push(name)
     }
     if (add.length) setTmuxNews((s) => new Set([...s, ...add]))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentStatusByName])
   useEffect(() => {
-    if (!activeTmuxName || !tmuxNews.has(activeTmuxName) || !document.hasFocus()) return
+    if (!activeTmuxName || !tmuxNews.has(activeTmuxName)) return
     setTmuxNews((s) => {
       const n = new Set(s)
       n.delete(activeTmuxName)
