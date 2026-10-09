@@ -4,9 +4,10 @@ import type { AgentHostScan, Connection, SplitDirection, TmuxSession } from '../
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import { isMac } from '../lib/platform'
-import { CHAT_DOT, CHATS_CHANGED, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { CHATS_CHANGED, chatStatusOf, leaf, statusLabel } from './chat/format'
+import { Spinner } from './chat/Blocks'
 import { MenuItem, PromptDialog } from './Modal'
-import { STATUS_DOT, STATUS_LABEL } from './SummaryView'
+import { STATUS_LABEL } from './SummaryView'
 
 /** One entry of the "Open" list — a view (a tab, or a split that is itself a tab). */
 export interface SidebarOpenRow {
@@ -113,6 +114,32 @@ function writeFolded(v: ReadonlySet<string>): void {
     localStorage.setItem(FOLDED_KEY, JSON.stringify([...v]))
   } catch {
     /* private window / blocked storage — the folds just won't be remembered */
+  }
+}
+
+const SEEN_KEY = 'sidebar.chatSeen'
+/** A seen mark older than this is dropped: its chat is long gone. */
+const SEEN_TTL_MS = 14 * 24 * 3600_000
+
+/**
+ * Per chat, the newest status-file time (`updatedAt`, the server's clock) you have
+ * seen: a later one is news. Remembered across restarts.
+ */
+function readSeen(): Record<string, number> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}')
+    if (!v || typeof v !== 'object') return {}
+    return Object.fromEntries(Object.entries(v).filter((e): e is [string, number] => typeof e[1] === 'number'))
+  } catch {
+    return {}
+  }
+}
+
+function writeSeen(v: Record<string, number>): void {
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify(v))
+  } catch {
+    /* private window / blocked storage — news is just not remembered */
   }
 }
 
@@ -237,12 +264,13 @@ const Slot = ({ children }: { children?: ReactNode }) => (
 )
 
 /** Idle is a hollow ring; every other state is a filled dot in its own colour. */
-const ChatDot = ({ status }: { status: ChatStatus }) =>
-  status === 'idle' ? (
-    <span className="box-border h-2 w-2 shrink-0 rounded-full border-[1.5px] border-faint" />
-  ) : (
-    <span className={`h-2 w-2 shrink-0 rounded-full ${status === 'waiting' ? 'bg-amber' : CHAT_DOT[status]}`} />
-  )
+/** A row's mark: amber when it has news for you (a decision, or a finished turn), a spinner while it works, else nothing. */
+const RowMark = ({ news, busy }: { news: boolean; busy: boolean }) =>
+  news ? (
+    <span className="h-2 w-2 shrink-0 rounded-full bg-amber dot-glow" />
+  ) : busy ? (
+    <Spinner className="text-faint" />
+  ) : null
 
 const Icon = ({ children, size = 16 }: { children: ReactNode; size?: number }) => (
   <svg
@@ -569,6 +597,63 @@ export function Sidebar({
     return m
   }, [agentHosts, activeConnection])
 
+  // News: a dot on a row only for what needs you — a decision, or a turn that ended —
+  // since you last had it in front of you. Opening it is what clears it.
+  const inFront = (c: ChatSession): boolean =>
+    c.sessionId === activeChatSessionId || activeIds.has(c.sessionId) || (!!c.tmux && c.tmux.session === activeTmuxName)
+  const [seen, setSeen] = useState<Record<string, number>>(readSeen)
+  useEffect(() => {
+    const looking = document.hasFocus()
+    setSeen((prev) => {
+      const next: Record<string, number> = {}
+      let changed = false
+      for (const [id, at] of Object.entries(prev)) {
+        if (Date.now() - at < SEEN_TTL_MS) next[id] = at
+        else changed = true
+      }
+      for (const c of chats) {
+        // A chat seen for the first time brings no news: an old one is not new.
+        const at = looking && inFront(c) ? c.updatedAt : (next[c.sessionId] ?? c.updatedAt)
+        if (next[c.sessionId] !== at) {
+          next[c.sessionId] = at
+          changed = true
+        }
+      }
+      if (!changed) return prev
+      writeSeen(next)
+      return next
+    })
+    // inFront reads the props below; the chats poll and focus re-run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chats, activeChatSessionId, activeTmuxName, openRows])
+  const chatNews = (c: ChatSession): boolean =>
+    unread.has(c.sessionId) ||
+    ((c.status === 'idle' || c.status === 'waiting') && !(inFront(c) && document.hasFocus()) && c.updatedAt > (seen[c.sessionId] ?? c.updatedAt))
+
+  // A plain tmux session has news when the agent scan sees it start waiting, or stop working.
+  const lastAgent = useRef(new Map<string, AgentStatus>())
+  const [tmuxNews, setTmuxNews] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    const add: string[] = []
+    for (const [name, st] of agentStatusByName) {
+      const was = lastAgent.current.get(name)
+      lastAgent.current.set(name, st)
+      if (was === undefined || was === st) continue
+      if (st === 'waiting' || (was === 'working' && st === 'idle'))
+        if (!(name === activeTmuxName && document.hasFocus())) add.push(name)
+    }
+    if (add.length) setTmuxNews((s) => new Set([...s, ...add]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentStatusByName])
+  useEffect(() => {
+    if (!activeTmuxName || !tmuxNews.has(activeTmuxName) || !document.hasFocus()) return
+    setTmuxNews((s) => {
+      const n = new Set(s)
+      n.delete(activeTmuxName)
+      return n
+    })
+  }, [activeTmuxName, tmuxNews, chats])
+
   if (collapsed) {
     return (
       <aside
@@ -796,12 +881,11 @@ export function Sidebar({
                       )}
                     >
                       <Slot>
-                        <ChatDot status={st} />
+                        <RowMark news={chatNews(chat)} busy={st === 'busy'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate" dir="auto">
                         {label}
                       </span>
-                      {unread.has(chat.sessionId) && <span className="h-2 w-2 shrink-0 rounded-full bg-amber" title="New since you last looked" />}
                     </button>
                   )
                 })}
@@ -854,9 +938,7 @@ export function Sidebar({
                       className={rowCls(s.name === activeTmuxName)}
                     >
                       <Slot>
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${status ? STATUS_DOT[status] : 'bg-transparent'}`}
-                        />
+                        <RowMark news={tmuxNews.has(s.name)} busy={status === 'working'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate">{s.name}</span>
                     </button>
