@@ -2217,6 +2217,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // Sends called off while they wait their turn in chatKeys: their sendId, until they run.
   const cancelledSends = new Set<string>()
   const SEND_CANCEL_TTL_MS = 60_000
+  const SEND_CHECK_MS = 500
+  const SEND_RETRY_MS = 600
+  const SEND_ENTER_RETRIES = 2
 
   ipcMain.handle('chat:send', (_e, args: ChatTarget & { pane: string; text: string; sendId?: string }): Promise<ChatKeysResult> => {
     const pane = chatPaneOf(args.pane)
@@ -2227,6 +2230,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       await chatRefuseBusy(args, pane)
       if (cancelled()) throw chatFail('cancelled')
       await chatPaste(args, pane, args.text, true, true)
+      // The TUI can miss the Enter (busy redrawing, a slow link): the text then sits in
+      // its input. Press it again while it does; a sent or queued message empties the input.
+      for (let i = 0; ; i++) {
+        await chatWait(i === 0 ? SEND_CHECK_MS : SEND_RETRY_MS)
+        const raw = await chatScreen(args, pane, true)
+        // A dialog that opened since: the message went in, and Enter would answer it.
+        const plain = stripSgr(raw)
+        if (!inputHasDraft(raw) || isDialogOpen(plain) || [MARK.question, MARK.plan, MARK.permission, MARK.review].some((m) => plain.includes(m))) return
+        if (i === SEND_ENTER_RETRIES) throw chatFail('error', 'Typed but not submitted. Press Enter in the terminal.')
+        await chatNamed(args, pane, KEY.enter)
+      }
     })
   })
 

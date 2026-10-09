@@ -454,6 +454,9 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   // An idle status can lag a send by a moment: only then does an open turn count as busy.
   const busy = state.status === 'busy' || (state.turn && state.status === 'idle' && Date.now() - sentAt.current < SEND_GRACE_MS)
   const waiting = state.status === 'waiting'
+  // The status file can say busy while a dialog is open (2.1.293's plan dialog): the
+  // dialog on screen is what says it waits.
+  const asking = waiting || !!prompt
 
   // Only what needs you raises a dot: a turn that ended, or Claude waiting on an answer.
   // A reply in the middle of a turn is not news.
@@ -505,7 +508,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   }, [state.status])
 
   // A plan dialog names its file: read it each time one opens (a revised plan reuses the file).
-  const planPath = waiting && prompt?.kind === 'plan' ? prompt.planFile : undefined
+  const planPath = asking && prompt?.kind === 'plan' ? prompt.planFile : undefined
   useEffect(() => {
     if (!planPath) {
       setPlanFile(null)
@@ -988,7 +991,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
   // dialog names, else ExitPlanMode's input once the transcript has it.
   const planReq = [...state.requests].reverse().find((r) => r.kind === 'plan')
   const planInput = planReq?.input as { plan?: unknown } | undefined
-  const planOnScreen = waiting && prompt?.kind === 'plan'
+  const planOnScreen = asking && prompt?.kind === 'plan'
   const plan = ended
     ? null
     : planOnScreen && planFile && planFile.path === prompt.planFile && planFile.text.trim()
@@ -1159,7 +1162,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
               />
             )}
             {live && pane && <LiveScreen title={live} target={target} pane={pane} active={active} onClose={() => setLive(null)} />}
-            {waiting && polling && prompt && <PromptCard
+            {asking && polling && prompt && <PromptCard
                 key={`${prompt.kind}\0${prompt.body}`}
                 prompt={prompt}
                 plan={prompt.kind === 'plan' && !wide ? plan?.text : undefined}
@@ -1175,7 +1178,7 @@ export function ChatView({ connectionId, password, sessionId, cwd, active, start
                 onAnswer={answer}
                 onTerminal={openTerminal}
               />}
-            {busy && !waiting && <div className="animate-glow text-sm text-faint">Working…</div>}
+            {busy && !asking && <div className="animate-glow text-sm text-faint">Working…</div>}
           </div>
         </div>
 

@@ -4,9 +4,10 @@ import type { AgentHostScan, Connection, SplitDirection, TmuxSession } from '../
 import { agentStatus } from '../lib/agents'
 import type { AgentStatus } from '../lib/agents'
 import { isMac } from '../lib/platform'
-import { CHAT_DOT, CHATS_CHANGED, chatStatusOf, leaf, statusLabel, type ChatStatus } from './chat/format'
+import { CHATS_CHANGED, chatStatusOf, leaf, statusLabel } from './chat/format'
+import { Spinner } from './chat/Blocks'
 import { MenuItem, PromptDialog } from './Modal'
-import { STATUS_DOT, STATUS_LABEL } from './SummaryView'
+import { STATUS_LABEL } from './SummaryView'
 
 /** One entry of the "Open" list — a view (a tab, or a split that is itself a tab). */
 export interface SidebarOpenRow {
@@ -93,6 +94,26 @@ function writeCollapsed(v: boolean): void {
     localStorage.setItem(COLLAPSED_KEY, v ? '1' : '0')
   } catch {
     /* private window / blocked storage — the sidebar just won't be remembered */
+  }
+}
+
+const FOLDED_KEY = 'sidebar.foldedGroups'
+
+/** The folder groups folded in the sidebar, by repo path; remembered across restarts. */
+function readFolded(): ReadonlySet<string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(FOLDED_KEY) ?? '[]')
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function writeFolded(v: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(FOLDED_KEY, JSON.stringify([...v]))
+  } catch {
+    /* private window / blocked storage — the folds just won't be remembered */
   }
 }
 
@@ -216,13 +237,14 @@ const Slot = ({ children }: { children?: ReactNode }) => (
   <span className="grid h-4 w-4 shrink-0 place-items-center">{children}</span>
 )
 
-/** Idle is a hollow ring; every other state is a filled dot in its own colour. */
-const ChatDot = ({ status }: { status: ChatStatus }) =>
-  status === 'idle' ? (
-    <span className="box-border h-2 w-2 shrink-0 rounded-full border-[1.5px] border-faint" />
-  ) : (
-    <span className={`h-2 w-2 shrink-0 rounded-full ${status === 'waiting' ? 'bg-amber' : CHAT_DOT[status]}`} />
-  )
+/** A row's mark: a spinner while it works (an older ring is stale by then), amber when it
+ *  has news for you (a decision, or a finished turn), else nothing. */
+const RowMark = ({ news, busy }: { news: boolean; busy: boolean }) =>
+  busy ? (
+    <Spinner className="text-faint" />
+  ) : news ? (
+    <span className="h-2 w-2 shrink-0 rounded-full bg-amber dot-glow" />
+  ) : null
 
 const Icon = ({ children, size = 16 }: { children: ReactNode; size?: number }) => (
   <svg
@@ -371,12 +393,13 @@ export function Sidebar({
   const [serverOpen, setServerOpen] = useState(false)
   const [sections, setSections] = useState({ open: true, tmux: true })
   const toggleSection = (k: keyof typeof sections): void => setSections((s) => ({ ...s, [k]: !s[k] }))
-  // Folded chat groups, by repo path. Open is the default, so a new folder is never hidden.
-  const [foldedGroups, setFoldedGroups] = useState<ReadonlySet<string>>(() => new Set())
+  // Folded chat groups, by repo path, remembered. Open is the default, so a new folder is never hidden.
+  const [foldedGroups, setFoldedGroups] = useState<ReadonlySet<string>>(readFolded)
   const toggleGroup = (repo: string): void =>
     setFoldedGroups((s) => {
       const next = new Set(s)
       if (!next.delete(repo)) next.add(repo)
+      writeFolded(next)
       return next
     })
   const [query, setQuery] = useState('')
@@ -520,9 +543,7 @@ export function Sidebar({
   for (const c of chats) seenAt.current.set(c.sessionId, now)
   const live = new Set([...seenAt.current].filter(([, at]) => now - at < MOVE_GRACE_MS).map(([id]) => id))
   const liveTmux = new Set(tmux.map((s) => s.name))
-  // Chats whose open tab has news you haven't seen.
   const idsOf = (r: SidebarOpenRow): string[] => (r.chatSessionId ? [r.chatSessionId, ...(r.chatFormerIds ?? [])] : [])
-  const unread = new Set(openRows.filter((r) => r.waiting.length > 0).flatMap(idsOf))
   // The open tab's row may still carry an id it has moved away from.
   const activeIds = new Set(openRows.filter((r) => r.active).flatMap(idsOf))
   const shownOpenRows = openRows.filter(
@@ -547,6 +568,72 @@ export function Sidebar({
     for (const s of host?.sessions ?? []) m.set(s.session, agentStatus(s))
     return m
   }, [agentHosts, activeConnection])
+
+  // The dot means one thing: "check me, I need you". A Claude waiting on you (a dialog is
+  // open) has one for as long as it waits, unless its row is in front. A turn that ended
+  // on a row you were not looking at leaves one until you open the row, or Claude works again. A row's key is its
+  // tmux session when it has one, so /clear (a new session id in the same pane) is no news.
+  const keyOf = (c: ChatSession): string => c.tmux?.session ?? c.sessionId
+  const frontKeys = new Set<string>(activeTmuxName ? [activeTmuxName] : [])
+  for (const c of chats)
+    if (c.sessionId === activeChatSessionId || activeIds.has(c.sessionId)) frontKeys.add(keyOf(c))
+  // The list is read every POLL_MS, but the chat shows a reply at once: a row you left a
+  // moment ago still counts as in front until one more read has landed.
+  const frontAt = useRef(new Map<string, number>())
+  for (const k of frontKeys) frontAt.current.set(k, now)
+  const inFront = (k: string): boolean => frontKeys.has(k) || now - (frontAt.current.get(k) ?? 0) < POLL_MS + 5000
+  const lastTmux = useRef(new Map<string, AgentStatus>())
+  const lastChat = useRef(new Map<string, { id: string; st: ChatSession['status']; at: number }>())
+  const [needs, setNeeds] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    // Chats and the tmux scan are told apart ("c:" / "t:"): the scan lands before the chat
+    // list, and its idea of a Claude's state must not read as that chat changing.
+    const add: string[] = []
+    const drop: string[] = []
+    for (const [name, st] of agentStatusByName) {
+      if (st === 'unknown') continue
+      const k = `t:${name}`
+      const was = lastTmux.current.get(name)
+      lastTmux.current.set(name, st)
+      if (was === st) continue
+      if (st === 'working' || (st === 'idle' && was === 'waiting')) drop.push(k)
+      else if ((st === 'waiting' || (st === 'idle' && was === 'working')) && !inFront(name)) add.push(k)
+    }
+    for (const c of chats) {
+      const key = keyOf(c)
+      const k = `c:${key}`
+      const was = lastChat.current.get(key)
+      lastChat.current.set(key, { id: c.sessionId, st: c.status, at: c.updatedAt })
+      const same = was?.id === c.sessionId
+      // Working, or a question taken back: nothing waits on you any more.
+      if (c.status === 'busy' || (same && c.status === 'idle' && was.st === 'waiting')) drop.push(k)
+      // Waiting needs you, even when first seen. A turn ended when the same session went
+      // from working to idle, or wrote its status while idle (a turn shorter than a poll).
+      // A new session in the same pane (/clear, /resume) is no news.
+      else if (
+        !inFront(key) &&
+        ((c.status === 'waiting' && was?.st !== 'waiting') ||
+          (same && c.status === 'idle' && (was.st === 'busy' || c.updatedAt > was.at)))
+      )
+        add.push(k)
+    }
+    if (add.length || drop.length)
+      setNeeds((prev) => {
+        const next = new Set(prev)
+        for (const k of drop) next.delete(k)
+        for (const k of add) next.add(k)
+        return next
+      })
+    // inFront reads the render it ran in; the polls re-run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chats, agentStatusByName])
+  const frontSig = [...frontKeys].sort().join('\n')
+  useEffect(() => {
+    if (![...needs].some((k) => frontKeys.has(k.slice(2)))) return
+    setNeeds((prev) => new Set([...prev].filter((k) => !frontKeys.has(k.slice(2)))))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frontSig, needs])
+  const rowNeedsYou = (k: string): boolean => needs.has(k) && !frontKeys.has(k.slice(2))
 
   if (collapsed) {
     return (
@@ -775,12 +862,11 @@ export function Sidebar({
                       )}
                     >
                       <Slot>
-                        <ChatDot status={st} />
+                        <RowMark news={st === 'waiting' ? !frontKeys.has(keyOf(chat)) : rowNeedsYou(`c:${keyOf(chat)}`)} busy={st === 'busy'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate" dir="auto">
                         {label}
                       </span>
-                      {unread.has(chat.sessionId) && <span className="h-2 w-2 shrink-0 rounded-full bg-amber" title="New since you last looked" />}
                     </button>
                   )
                 })}
@@ -833,9 +919,7 @@ export function Sidebar({
                       className={rowCls(s.name === activeTmuxName)}
                     >
                       <Slot>
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${status ? STATUS_DOT[status] : 'bg-transparent'}`}
-                        />
+                        <RowMark news={rowNeedsYou(`t:${s.name}`)} busy={status === 'working'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate">{s.name}</span>
                     </button>

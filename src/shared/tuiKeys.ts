@@ -304,6 +304,10 @@ const SOLID_RULE_RE = /^[\s─━═]{5,}$/
 const DASH_RULE_RE = /^[\s╌╍┄┅]{3,}$/
 const FOOTER_RE = /(Esc to cancel|Enter to select|Tab to amend|ctrl\+g|ctrl-g)/i
 const FREE_TEXT_RE = /^(Type something|Tell Claude what to change)/i
+/** A multi-select's own "Submit" row, under its last option (2.1.292): a row, not a description. */
+const SUBMIT_ROW_RE = /^\s*(?:❯\s*)?Submit$/
+/** The bar Claude Code draws down the left of a question's text. */
+const QUOTE_BAR_RE = /^\s*│ ?/
 /** A plan file Claude Code names in a plan dialog's footer: ~/.claude/plans/<name>.md or its absolute form. */
 export const PLAN_FILE_RE = /((?:~|\/[\w.\/-]*?)\/\.claude\/plans\/[\w.-]+\.md)\b/
 const BODY_CAP = { plan: 150, permission: 60, question: 20, review: 20 } as const
@@ -350,7 +354,7 @@ export function parsePrompt(screen: string): TuiPrompt | null {
     let k = i + 1
     for (; k < lines.length; k++) {
       const l = lines[k]
-      if (!l.trim() || OPTION_RE.test(l) || SOLID_RULE_RE.test(l) || DASH_RULE_RE.test(l) || FOOTER_RE.test(l) || !/^\s{3,}\S/.test(l)) break
+      if (!l.trim() || OPTION_RE.test(l) || SUBMIT_ROW_RE.test(l) || SOLID_RULE_RE.test(l) || DASH_RULE_RE.test(l) || FOOTER_RE.test(l) || !/^\s{3,}\S/.test(l)) break
       desc.push(l.trim())
     }
     if (i === last) end = k - 1
@@ -384,7 +388,17 @@ export function parsePrompt(screen: string): TuiPrompt | null {
           : null
   if (!kind) return null
 
-  const body = above.slice(-BODY_CAP[kind]).join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
+  // A question's text is drawn with a bar down its left and wrapped at the screen's
+  // width: drop the bar and join its lines back into one paragraph.
+  // (Only a question's: a permission prompt's boxes keep their bars, one block each.)
+  const kept = above.slice(-BODY_CAP[kind])
+  const unbarred: string[] = []
+  kept.forEach((l, i) => {
+    if (kind !== 'question' || !QUOTE_BAR_RE.test(l)) unbarred.push(l)
+    else if (i > 0 && QUOTE_BAR_RE.test(kept[i - 1])) unbarred[unbarred.length - 1] += ' ' + l.replace(QUOTE_BAR_RE, '').trim()
+    else unbarred.push(l.replace(QUOTE_BAR_RE, '').trim())
+  })
+  const body = unbarred.join('\n').replace(/^\s*\n+/, '').replace(/\s+$/, '')
   const tabHeader = above.some((l) => l.includes('←') && l.includes('→'))
   const planFile = kind === 'plan' ? PLAN_FILE_RE.exec(footer)?.[1] : undefined
   return { kind, body, options, multi, canTab: multi || tabHeader, canBack: tabHeader, ...(planFile ? { planFile } : {}) }
