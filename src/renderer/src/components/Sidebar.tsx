@@ -117,32 +117,6 @@ function writeFolded(v: ReadonlySet<string>): void {
   }
 }
 
-const SEEN_KEY = 'sidebar.chatSeen'
-/** A seen mark older than this is dropped: its chat is long gone. */
-const SEEN_TTL_MS = 14 * 24 * 3600_000
-
-/**
- * Per chat, the newest status-file time (`updatedAt`, the server's clock) you have
- * seen: a later one is news. Remembered across restarts.
- */
-function readSeen(): Record<string, number> {
-  try {
-    const v: unknown = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}')
-    if (!v || typeof v !== 'object') return {}
-    return Object.fromEntries(Object.entries(v).filter((e): e is [string, number] => typeof e[1] === 'number'))
-  } catch {
-    return {}
-  }
-}
-
-function writeSeen(v: Record<string, number>): void {
-  try {
-    localStorage.setItem(SEEN_KEY, JSON.stringify(v))
-  } catch {
-    /* private window / blocked storage — news is just not remembered */
-  }
-}
-
 /**
  * A list kept fresh in the background: on mount, every POLL_MS while the window is
  * visible, and on focus. `key` names what is being listed (the connection) — a new
@@ -569,9 +543,7 @@ export function Sidebar({
   for (const c of chats) seenAt.current.set(c.sessionId, now)
   const live = new Set([...seenAt.current].filter(([, at]) => now - at < MOVE_GRACE_MS).map(([id]) => id))
   const liveTmux = new Set(tmux.map((s) => s.name))
-  // Chats whose open tab has news you haven't seen.
   const idsOf = (r: SidebarOpenRow): string[] => (r.chatSessionId ? [r.chatSessionId, ...(r.chatFormerIds ?? [])] : [])
-  const unread = new Set(openRows.filter((r) => r.waiting.length > 0).flatMap(idsOf))
   // The open tab's row may still carry an id it has moved away from.
   const activeIds = new Set(openRows.filter((r) => r.active).flatMap(idsOf))
   const shownOpenRows = openRows.filter(
@@ -597,62 +569,71 @@ export function Sidebar({
     return m
   }, [agentHosts, activeConnection])
 
-  // News: a dot on a row only for what needs you — a decision, or a turn that ended —
-  // since you last had it in front of you. Opening it is what clears it; the row in
-  // front never has one.
-  const inFront = (c: ChatSession): boolean =>
-    c.sessionId === activeChatSessionId || activeIds.has(c.sessionId) || (!!c.tmux && c.tmux.session === activeTmuxName)
-  const [seen, setSeen] = useState<Record<string, number>>(readSeen)
+  // The dot means one thing: "check me, I need you". A Claude waiting on you (a dialog is
+  // open) has one for as long as it waits, unless its row is in front. A turn that ended
+  // on a row you were not looking at leaves one until you open the row, or Claude works again. A row's key is its
+  // tmux session when it has one, so /clear (a new session id in the same pane) is no news.
+  const keyOf = (c: ChatSession): string => c.tmux?.session ?? c.sessionId
+  const frontKeys = new Set<string>(activeTmuxName ? [activeTmuxName] : [])
+  for (const c of chats)
+    if (c.sessionId === activeChatSessionId || activeIds.has(c.sessionId)) frontKeys.add(keyOf(c))
+  // The list is read every POLL_MS, but the chat shows a reply at once: a row you left a
+  // moment ago still counts as in front until one more read has landed.
+  const frontAt = useRef(new Map<string, number>())
+  for (const k of frontKeys) frontAt.current.set(k, now)
+  const inFront = (k: string): boolean => frontKeys.has(k) || now - (frontAt.current.get(k) ?? 0) < POLL_MS + 5000
+  const lastTmux = useRef(new Map<string, AgentStatus>())
+  const lastChat = useRef(new Map<string, { id: string; st: ChatSession['status']; at: number }>())
+  const [needs, setNeeds] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
-    setSeen((prev) => {
-      const next: Record<string, number> = {}
-      let changed = false
-      for (const [id, at] of Object.entries(prev)) {
-        if (Date.now() - at < SEEN_TTL_MS) next[id] = at
-        else changed = true
-      }
-      for (const c of chats) {
-        // A chat seen for the first time brings no news: an old one is not new.
-        const at = inFront(c) ? c.updatedAt : (next[c.sessionId] ?? c.updatedAt)
-        if (next[c.sessionId] !== at) {
-          next[c.sessionId] = at
-          changed = true
-        }
-      }
-      if (!changed) return prev
-      writeSeen(next)
-      return next
-    })
-    // inFront reads the props below; the chats poll re-runs this.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chats, activeChatSessionId, activeTmuxName, openRows])
-  const chatNews = (c: ChatSession): boolean =>
-    !inFront(c) &&
-    (unread.has(c.sessionId) || ((c.status === 'idle' || c.status === 'waiting') && c.updatedAt > (seen[c.sessionId] ?? c.updatedAt)))
-
-  // A plain tmux session has news when the agent scan sees it start waiting, or stop working.
-  const lastAgent = useRef(new Map<string, AgentStatus>())
-  const [tmuxNews, setTmuxNews] = useState<ReadonlySet<string>>(() => new Set())
-  useEffect(() => {
+    // Chats and the tmux scan are told apart ("c:" / "t:"): the scan lands before the chat
+    // list, and its idea of a Claude's state must not read as that chat changing.
     const add: string[] = []
+    const drop: string[] = []
     for (const [name, st] of agentStatusByName) {
-      const was = lastAgent.current.get(name)
-      lastAgent.current.set(name, st)
-      if (was === undefined || was === st) continue
-      if (st === 'waiting' || (was === 'working' && st === 'idle'))
-        if (name !== activeTmuxName) add.push(name)
+      if (st === 'unknown') continue
+      const k = `t:${name}`
+      const was = lastTmux.current.get(name)
+      lastTmux.current.set(name, st)
+      if (was === st) continue
+      if (st === 'working' || (st === 'idle' && was === 'waiting')) drop.push(k)
+      else if ((st === 'waiting' || (st === 'idle' && was === 'working')) && !inFront(name)) add.push(k)
     }
-    if (add.length) setTmuxNews((s) => new Set([...s, ...add]))
+    for (const c of chats) {
+      const key = keyOf(c)
+      const k = `c:${key}`
+      const was = lastChat.current.get(key)
+      lastChat.current.set(key, { id: c.sessionId, st: c.status, at: c.updatedAt })
+      const same = was?.id === c.sessionId
+      // Working, or a question taken back: nothing waits on you any more.
+      if (c.status === 'busy' || (same && c.status === 'idle' && was.st === 'waiting')) drop.push(k)
+      // Waiting needs you, even when first seen. A turn ended when the same session went
+      // from working to idle, or wrote its status while idle (a turn shorter than a poll).
+      // A new session in the same pane (/clear, /resume) is no news.
+      else if (
+        !inFront(key) &&
+        ((c.status === 'waiting' && was?.st !== 'waiting') ||
+          (same && c.status === 'idle' && (was.st === 'busy' || c.updatedAt > was.at)))
+      )
+        add.push(k)
+    }
+    if (add.length || drop.length)
+      setNeeds((prev) => {
+        const next = new Set(prev)
+        for (const k of drop) next.delete(k)
+        for (const k of add) next.add(k)
+        return next
+      })
+    // inFront reads the render it ran in; the polls re-run this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentStatusByName])
+  }, [chats, agentStatusByName])
+  const frontSig = [...frontKeys].sort().join('\n')
   useEffect(() => {
-    if (!activeTmuxName || !tmuxNews.has(activeTmuxName)) return
-    setTmuxNews((s) => {
-      const n = new Set(s)
-      n.delete(activeTmuxName)
-      return n
-    })
-  }, [activeTmuxName, tmuxNews, chats])
+    if (![...needs].some((k) => frontKeys.has(k.slice(2)))) return
+    setNeeds((prev) => new Set([...prev].filter((k) => !frontKeys.has(k.slice(2)))))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frontSig, needs])
+  const rowNeedsYou = (k: string): boolean => needs.has(k) && !frontKeys.has(k.slice(2))
 
   if (collapsed) {
     return (
@@ -881,7 +862,7 @@ export function Sidebar({
                       )}
                     >
                       <Slot>
-                        <RowMark news={chatNews(chat)} busy={st === 'busy'} />
+                        <RowMark news={st === 'waiting' ? !frontKeys.has(keyOf(chat)) : rowNeedsYou(`c:${keyOf(chat)}`)} busy={st === 'busy'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate" dir="auto">
                         {label}
@@ -938,7 +919,7 @@ export function Sidebar({
                       className={rowCls(s.name === activeTmuxName)}
                     >
                       <Slot>
-                        <RowMark news={tmuxNews.has(s.name)} busy={status === 'working'} />
+                        <RowMark news={rowNeedsYou(`t:${s.name}`)} busy={status === 'working'} />
                       </Slot>
                       <span className="min-w-0 flex-1 truncate">{s.name}</span>
                     </button>

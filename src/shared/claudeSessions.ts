@@ -2,6 +2,7 @@
 // ~/.claude/sessions, joined with the tmux panes that exist. Pure — the main
 // process runs CHAT_LIST_SCRIPT and hands the output to parseChatSessions().
 import type { ChatSession } from './chatProtocol'
+import { MARK } from './tuiKeys'
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** A session id goes into a remote shell glob, so it is checked before it is used. */
@@ -12,7 +13,8 @@ export const PANE_RE = /^%\d+$/
 
 /**
  * One exec: every status file whose pid is alive (`S <pid> <mtime s> <base64>`),
- * then every tmux pane (`P <pane>|<window>|<session>`). The session name is
+ * (`D <pid>` after one whose pane shows a dialog), then every tmux pane
+ * (`P <pane>|<window>|<session>`). The session name is
  * last because it is the one field that could hold a `|`. tmux may be missing or
  * have no server; that is an empty pane list, not a failure.
  */
@@ -20,7 +22,12 @@ export const CHAT_LIST_SCRIPT =
   'for f in "$HOME"/.claude/sessions/*.json; do [ -f "$f" ] || continue; b=$(basename "$f" .json); ' +
   'case "$b" in ""|*[!0-9]*) continue;; esac; kill -0 "$b" 2>/dev/null || continue; ' +
   'm=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null); ' +
-  'echo "S $b ${m:-0} $(base64 < "$f" | tr -d \'\\n\')"; done; ' +
+  'echo "S $b ${m:-0} $(base64 < "$f" | tr -d \'\\n\')"; ' +
+  // A Claude that says busy may be showing a dialog (older versions never say waiting for
+  // one): `D <pid>` when its pane's last lines hold a numbered option and a dialog marker.
+  'if grep -q \'"status":"busy"\' "$f"; then p=$(grep -o \'"tmux":"[^"]*"\' "$f" | grep -o \'%[0-9]*\'); ' +
+  'if [ -n "$p" ]; then t=$(tmux capture-pane -p -t "$p" 2>/dev/null | tail -n 20); case "$t" in *"❯ 1."*) case "$t" in ' +
+  `*"${MARK.permission}"*|*"${MARK.plan}"*|*"${MARK.question}"*|*"${MARK.review}"*) echo "D $b";; esac;; esac; fi; fi; done; ` +
   "tmux list-panes -a -F '#{pane_id}|#{window_id}|#{session_name}' 2>/dev/null | sed 's/^/P /'; exit 0"
 
 /** The status file's `tmux` field, "session:@window.%pane". */
@@ -36,7 +43,10 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v 
 export function parseChatSessions(stdout: string): ChatSession[] {
   const panes = new Map<string, { window: string; session: string }>()
   const files: Array<{ pid: number; mtime: number; b64: string }> = []
+  const dialog = new Set<number>()
   for (const line of stdout.split('\n')) {
+    const d = /^D (\d+)$/.exec(line.trim())
+    if (d) dialog.add(Number(d[1]))
     if (line.startsWith('P ')) {
       const m = /^P (%\d+)\|(@\d+)\|(.*)$/.exec(line)
       if (m) panes.set(m[1], { window: m[2], session: m[3] })
@@ -65,8 +75,8 @@ export function parseChatSessions(stdout: string): ChatSession[] {
       pid: typeof j.pid === 'number' ? j.pid : f.pid,
       cwd: str(j.cwd) ?? '',
       name: str(j.name),
-      status: str(j.status) ?? 'idle',
-      waitingFor: str(j.waitingFor),
+      status: dialog.has(f.pid) ? 'waiting' : (str(j.status) ?? 'idle'),
+      waitingFor: str(j.waitingFor) ?? (dialog.has(f.pid) ? 'dialog' : undefined),
       entrypoint,
       version: str(j.version),
       tmux: field && pane ? { session: pane.session, window: pane.window, pane: field.pane } : undefined,

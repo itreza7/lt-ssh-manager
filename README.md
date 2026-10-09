@@ -75,9 +75,12 @@ main process.
   as text with key buttons. Commands that would end or break the session (`/exit`,
   `/logout`…) are refused. Claude's suggested next prompt shows in the empty composer; Tab
   takes it. A message shows in the chat the moment you send it ("Sending…", or "Not sent ·
-  Retry"), and a clicked answer shows a spinner until Claude takes it. A chat you aren't
-  looking at gets an amber dot in the sidebar when Claude finishes its turn or asks for
-  you; a message in the middle of a turn does not.
+  Retry"), and a clicked answer shows a spinner until Claude takes it. A sidebar row gets
+  an amber dot only when Claude needs you. While it waits on a decision (a permission,
+  question or plan, also on older Claude Code versions that report busy) the dot stays
+  until you answer, hidden only while the row is open. A turn that ends while you look
+  elsewhere leaves a dot until you open the row. A row at work shows a spinner;
+  `/clear` and a message in the middle of a turn add no dot.
   Needs Claude Code and tmux on the host.
 - **Worktrees** — list and create git worktrees on a host and start an agent in one, so
   two agents on the same repository stop editing the same files. Removal runs a read-only
